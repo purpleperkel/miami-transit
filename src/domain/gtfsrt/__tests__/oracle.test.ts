@@ -1,5 +1,11 @@
 import { transit_realtime } from 'gtfs-realtime-bindings';
 
+import {
+  LIVE_TRIP_UPDATES_FIXTURE_BYTES,
+  LIVE_TRIP_UPDATES_FIXTURE_DECODED,
+  LIVE_VEHICLES_FIXTURE_BYTES,
+  LIVE_VEHICLES_FIXTURE_DECODED,
+} from '../__fixtures__/live-feeds.fixture';
 import { VEHICLE_POSITIONS_FIXTURE_BYTES, VEHICLE_POSITIONS_FIXTURE_DECODED } from '../__fixtures__/vehicle-positions.fixture';
 import { decodeFeedMessage } from '../decode-feed';
 import type { FeedMessage } from '../types';
@@ -176,5 +182,19 @@ describe('oracle: the generated vehicle-positions fixture', () => {
     const ours = ourDecode(VEHICLE_POSITIONS_FIXTURE_BYTES);
     expect(ours).toEqual(VEHICLE_POSITIONS_FIXTURE_DECODED);
     expect(inOracleShape(ours)).toEqual(oracleDecode(VEHICLE_POSITIONS_FIXTURE_BYTES));
+  });
+});
+
+describe('oracle: the generated live-feeds fixture (the M4.2 mapper cases)', () => {
+  it('the mapper vehicles decode to the committed expectation, which the reference decoder agrees with', () => {
+    const ours = ourDecode(LIVE_VEHICLES_FIXTURE_BYTES);
+    expect(ours).toEqual(LIVE_VEHICLES_FIXTURE_DECODED);
+    expect(inOracleShape(ours)).toEqual(oracleDecode(LIVE_VEHICLES_FIXTURE_BYTES));
+  });
+
+  it('the mapper trip updates decode to the committed expectation, which the reference decoder agrees with', () => {
+    const ours = ourDecode(LIVE_TRIP_UPDATES_FIXTURE_BYTES);
+    expect(ours).toEqual(LIVE_TRIP_UPDATES_FIXTURE_DECODED);
+    expect(inOracleShape(ours)).toEqual(oracleDecode(LIVE_TRIP_UPDATES_FIXTURE_BYTES));
   });
 });

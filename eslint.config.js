@@ -7,6 +7,42 @@ const expoConfig = require('eslint-config-expo/flat');
 // Native, Expo or the app-only `@/` alias.
 const DOMAIN_PURITY_MESSAGE =
   'src/domain is pure logic shared with the Mac scripts: no react, react-native, expo* or @/ imports.';
+const DOMAIN_PURITY = {
+  paths: [
+    { name: 'react', message: DOMAIN_PURITY_MESSAGE },
+    { name: 'react-native', message: DOMAIN_PURITY_MESSAGE },
+    { name: 'expo', message: DOMAIN_PURITY_MESSAGE },
+  ],
+  patterns: [
+    {
+      group: ['react/*', 'react-native/*', 'react-native-*', '@react-native/*'],
+      message: DOMAIN_PURITY_MESSAGE,
+    },
+    { group: ['expo/*', 'expo-*', '@expo/*'], message: DOMAIN_PURITY_MESSAGE },
+    { group: ['@/*'], message: DOMAIN_PURITY_MESSAGE },
+  ],
+};
+
+// The GTFS-realtime reference bindings (and the protobufjs under them) are a TEST ORACLE: app and
+// domain code decode with src/domain/gtfsrt, so protobufjs never reaches the Hermes bundle.
+// Only tests (`__tests__/`) and the Mac-side scripts may import them.
+const ORACLE_ONLY_MESSAGE =
+  'gtfs-realtime-bindings / protobufjs are a test oracle only — decode with src/domain/gtfsrt instead.';
+const ORACLE_ONLY = {
+  paths: [
+    { name: 'gtfs-realtime-bindings', message: ORACLE_ONLY_MESSAGE },
+    { name: 'protobufjs', message: ORACLE_ONLY_MESSAGE },
+  ],
+  patterns: [{ group: ['gtfs-realtime-bindings/*', 'protobufjs/*'], message: ORACLE_ONLY_MESSAGE }],
+};
+
+/** One `no-restricted-imports` setting from several restriction sets (flat config replaces, never merges, a rule). */
+function restrictImports(...sets) {
+  return [
+    'error',
+    { paths: sets.flatMap((set) => set.paths), patterns: sets.flatMap((set) => set.patterns) },
+  ];
+}
 
 module.exports = defineConfig([
   // `.claude/` holds agent scaffolding, including git WORKTREES: whole second checkouts with their
@@ -52,27 +88,20 @@ module.exports = defineConfig([
       '@typescript-eslint/switch-exhaustiveness-check': 'error',
     },
   },
+  // A file gets exactly one no-restricted-imports setting — the LAST matching block's — so each
+  // block lists every restriction that applies to its files.
+  {
+    files: ['src/**'],
+    ignores: ['src/**/__tests__/**'],
+    rules: { 'no-restricted-imports': restrictImports(ORACLE_ONLY) },
+  },
   {
     files: ['src/domain/**'],
-    rules: {
-      'no-restricted-imports': [
-        'error',
-        {
-          paths: [
-            { name: 'react', message: DOMAIN_PURITY_MESSAGE },
-            { name: 'react-native', message: DOMAIN_PURITY_MESSAGE },
-            { name: 'expo', message: DOMAIN_PURITY_MESSAGE },
-          ],
-          patterns: [
-            {
-              group: ['react/*', 'react-native/*', 'react-native-*', '@react-native/*'],
-              message: DOMAIN_PURITY_MESSAGE,
-            },
-            { group: ['expo/*', 'expo-*', '@expo/*'], message: DOMAIN_PURITY_MESSAGE },
-            { group: ['@/*'], message: DOMAIN_PURITY_MESSAGE },
-          ],
-        },
-      ],
-    },
+    ignores: ['src/domain/**/__tests__/**'],
+    rules: { 'no-restricted-imports': restrictImports(DOMAIN_PURITY, ORACLE_ONLY) },
+  },
+  {
+    files: ['src/domain/**/__tests__/**'],
+    rules: { 'no-restricted-imports': restrictImports(DOMAIN_PURITY) },
   },
 ]);

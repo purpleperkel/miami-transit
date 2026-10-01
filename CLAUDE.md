@@ -17,15 +17,22 @@ SDK 57; never trust memory for Expo APIs).
   are gitignored.
 
 ## Coding standards (Jamie's — mechanically enforced by `npm run verify` once M1 lands)
-- Functions ≤ 60 lines. ≥ 2 `invariant()` assertions per named function (pre/postconditions);
-  anonymous inline callbacks ≤ 5 lines are exempt.
+- Functions ≤ 60 lines. ≥ 2 `invariant()` assertions per named function (pre/postconditions).
+  As enforced by `scripts/check/standards.ts`: "named" = function declarations, methods, named
+  function expressions, and functions assigned to a variable / class property / `export default`.
+  Anonymous callbacks ≤ 5 lines are exempt; longer ones need 2 assertions (in test files
+  `expect(...)`, `assert(...)`, `assert.x(...)` count). `describe`/`suite` callbacks are containers —
+  each test inside is checked on its own. `invariant` itself is the one exemption.
 - No recursion (bounded loops only). No silent catch — return `err(...)` or rethrow.
 - Check every return value / promise (no floating promises). Zero warnings
   (`eslint --max-warnings 0`, `tsc` strict).
 - No stubs, no TODO/FIXME markers, no skipped tests. Test-time mocks of NATIVE modules
   (react-native-maps, expo-glass-effect, expo-haptics…) are allowed in jest only and must be
   labelled `// test-time mock of native module` at the `jest.mock` call.
-- Install Expo packages with `npx expo install <pkg>` (SDK-pinned), dev tools with `npm i -D`.
+- Install Expo packages with `npx expo install <pkg>` (SDK-pinned; for dev deps use `npx expo install <pkg> --dev`,
+  NOT `-- --save-dev`, which lands them in dependencies), other dev tools with `npm i -D --save-exact`.
+- `babel.config.js` exists because jest-expo 57.0.5's `jest-expo/ios` preset needs Expo's babel preset
+  to parse React Native's jest setup. TypeScript 6 defaults `types` to `[]` — the tsconfigs set it explicitly.
 
 ## Secrets
 Realtime API keys NEVER appear in source, tests, fixtures, commits or chat. On the phone they

@@ -1,56 +1,23 @@
-# Welcome to your Expo app 👋
+# Miami Transit
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Personal iPhone app: live Metrorail + Metromover on a clean Apple map, next arrivals, saved
+trips with a "leave in N min" countdown. Runs inside the App Store **Expo Go** (SDK 57).
 
-## Get started
+## Open it on the iPhone (no Mac needed)
+Published updates load in Expo Go (signed in as `jamieperkel`) from:
 
-1. Install dependencies
+    exp://u.expo.dev/f1d15d42-826a-4d23-afaa-d6e0fa1e6d1a?runtime-version=1.0.0&channel-name=production
 
-   ```bash
-   npm install
-   ```
+Home Screen icon: Shortcuts app → New Shortcut → "Open URLs" with the link above →
+Share → Add to Home Screen (name it "Miami Transit").
 
-2. Start the app
+## Develop
+    npx expo start --lan        # then open "miami-transit" under Development servers in Expo Go
+    npm run verify              # the gate (from M1 on)
 
-   ```bash
-   npx expo start
-   ```
+Plan: `/Users/jacobperkel/.claude/plans/could-i-make-an-fluttering-charm.md`. Working rules: `CLAUDE.md`.
 
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
-```
-
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
-
-### Other setup steps
-
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+## Data
+Schedules: Miami-Dade DTPW GTFS (public). Realtime: Miami-Dade DTPW via Swiftly, and via
+[Transitland](https://www.transit.land/terms). API keys live only in the iOS Keychain (on device)
+and the gitignored `.env` (Mac probe scripts) — never in this repo.

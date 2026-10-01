@@ -8,7 +8,10 @@
     "scheme": "miamitransit",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "runtimeVersion": {
+        "policy": "appVersion"
+      }
     },
     "plugins": [
       "expo-router",
@@ -27,6 +30,17 @@
     },
     "platforms": [
       "ios"
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "f1d15d42-826a-4d23-afaa-d6e0fa1e6d1a"
+      }
+    },
+    "owner": "jamieperkel",
+    "updates": {
+      "url": "https://u.expo.dev/f1d15d42-826a-4d23-afaa-d6e0fa1e6d1a"
+    },
+    "android": {}
   }
 }

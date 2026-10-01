@@ -17,7 +17,9 @@ jest_nonempty() {
   fi
   echo "$out" | grep -qE "Tests: +([0-9]+ skipped, )?[1-9][0-9]* passed" \
     || { echo "$out" | tail -15; echo "ratchet: no jest tests passed under '$path' ${name:+(-t '$name')}"; return 1; }
-  if echo "$out" | grep -qE "Tests:.*[1-9][0-9]* skipped"; then
+  # With -t, jest reports every test the NAME FILTER excluded as "skipped" — that is not a real
+  # skip. Real it.skip/xit/.only are forbidden repo-wide by scripts/check/standards.ts (skipped-test).
+  if [ -z "$name" ] && echo "$out" | grep -qE "Tests:.*[1-9][0-9]* skipped"; then
     echo "ratchet: skipped tests under '$path' — skipped tests are forbidden"; return 1
   fi
 }

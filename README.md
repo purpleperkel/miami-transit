@@ -17,7 +17,20 @@ Share → Add to Home Screen (name it "Miami Transit").
 
 Plan: `/Users/jacobperkel/.claude/plans/could-i-make-an-fluttering-charm.md`. Working rules: `CLAUDE.md`.
 
-## Data
+## Data sources and attribution
+- **Schedules:** Miami-Dade County DTPW GTFS (public feed).
+- **Realtime:** Miami-Dade DTPW via [Swiftly](https://www.goswift.ly/api-license-agreement) and via
+  [Transitland](https://www.transit.land/terms).
+- **Trip planning:** [Transitous](https://transitous.org), a community-run, non-commercial router
+  ([sources](https://transitous.org/sources)). This app identifies itself with a User-Agent that links
+  back to this repository, and stays light on its API.
+- API keys live only in the iOS Keychain (on device) and in the gitignored `.env` (Mac probe scripts).
+  They are never in this repo or its history, and a guard checks every published bundle.
+
+## License
+MIT. See `LICENSE`. Non-commercial use of the data sources is subject to their own terms.
+
+## Data (details)
 Schedules: Miami-Dade DTPW GTFS (public). Realtime: Miami-Dade DTPW via Swiftly, and via
 [Transitland](https://www.transit.land/terms). API keys live only in the iOS Keychain (on device)
 and the gitignored `.env` (Mac probe scripts) — never in this repo.

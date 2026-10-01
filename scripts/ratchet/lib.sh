@@ -24,8 +24,13 @@ jest_nonempty() {
   local path="$1" name="${2:-}" out json
   [ -e "$path" ] || { echo "ratchet: missing $path — the milestone's tests do not exist yet"; return 1; }
   _no_argv_in_tests "$path" || return 1
+  # Select EXACTLY this file (--runTestsByPath) or this directory (anchored, escaped absolute prefix): jest
+  # otherwise reads the path as an unanchored regex, so 'x.test.ts' also matched a sibling 'x.test.tsx'.
+  local sel=()
+  if [ -f "$path" ]; then sel=(--runTestsByPath "$path")
+  else sel=("^$(cd "$path" && pwd -P | sed 's/[][\.*^$+?(){}|]/\\&/g')/"); fi
   json=$(mktemp -t ratchet-jest.XXXXXX)
-  out=$(local_bin jest --ci --json --outputFile="$json" "$path" 2>&1) || { echo "$out" | tail -30; rm -f "$json"; return 1; }
+  out=$(local_bin jest --ci --json --outputFile="$json" "${sel[@]}" 2>&1) || { echo "$out" | tail -30; rm -f "$json"; return 1; }
   JEST_JSON="$json" PIN="$name" node -e '
     const r = JSON.parse(require("fs").readFileSync(process.env.JEST_JSON, "utf8"));
     const all = r.testResults.flatMap((f) => f.assertionResults);

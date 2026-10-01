@@ -1,0 +1,34 @@
+/**
+ * The platform-neutral SQL executor contract (plan §4 "src/data … sql-executor (expo + node
+ * impls)", M3.1). The schedule engine (schedule-queries.ts, schedule-repo.ts) reads the schedule
+ * DB through THIS interface only, so the same code runs:
+ *   - on the phone, over expo-sqlite      → src/data/expo-sql-executor.ts
+ *   - on the Mac, over Node's node:sqlite → scripts/lib/node-sql-executor.ts (the GTFS pipeline's
+ *     executor, M2.15), which is how the node:test suites query the real assets/db/schedule.db.
+ *
+ * This module is types only: no runtime import, so it loads under Metro, jest and Node alike.
+ *
+ * The contract is SYNCHRONOUS because the node:sqlite executor is, and the schedule reads are
+ * small indexed lookups on a ~2 MB read-only DB (one station's stop times for one or two service
+ * days); expo-sqlite's `getAllSync` / `getFirstSync` serve them on the phone.
+ *
+ * Parameters: anonymous `?` placeholders take a list in order; named placeholders are written
+ * `:name` in the SQL and passed by BARE name (`{ name: value }`). Each implementation maps that
+ * to its driver's binding form (node:sqlite binds bare names; expo-sqlite wants the `:` prefix).
+ */
+
+/** A value SQLite stores or binds, on every platform the contract serves. */
+export type SqlValue = null | number | string | Uint8Array;
+
+/** Anonymous (`?`) parameters in order, or named (`:name`) parameters by bare name. */
+export type SqlParams = readonly SqlValue[] | Readonly<Record<string, SqlValue>>;
+
+/** One result row: column name → value. */
+export type SqlRow = Readonly<Record<string, SqlValue>>;
+
+export interface SqlExecutor {
+  /** Every row of a query (column names → values), in the order SQLite returns them. */
+  all<T extends object = SqlRow>(sql: string, params?: SqlParams): T[];
+  /** The first row of a query, or null when it returns none. */
+  get<T extends object = SqlRow>(sql: string, params?: SqlParams): T | null;
+}

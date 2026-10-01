@@ -1,5 +1,6 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite';
 
+import type { SqlExecutor, SqlParams, SqlRow, SqlValue } from '../../src/data/sql-executor';
 import { invariant } from '../../src/lib/invariant';
 import { err, ok, type Result } from '../../src/lib/result';
 
@@ -9,8 +10,10 @@ import { err, ok, type Result } from '../../src/lib/result';
  * verifier, the manifest and the report — and by their tests.
  *
  * It lives in scripts/lib and NEVER under src/: `node:sqlite` is a Node built-in Metro cannot
- * bundle, so no module the app imports may reach it. The on-device executor (M3.1) is the
- * expo-sqlite twin that src/data adds.
+ * bundle, so no module the app imports may reach it. It implements the platform-neutral
+ * `SqlExecutor` contract (src/data/sql-executor.ts, M3.1) — the same interface its on-device twin,
+ * src/data/expo-sql-executor.ts, implements over expo-sqlite — so the schedule engine's node:test
+ * suites query the real schedule DB through exactly the code the phone runs.
  *
  * Every method states its contract with invariants. SQLite failures (a missing file, "file is not
  * a database", a malformed page) are thrown by node:sqlite as Errors with code ERR_SQLITE_ERROR;
@@ -18,16 +21,14 @@ import { err, ok, type Result } from '../../src/lib/result';
  * and rethrows anything else.
  */
 
-export type SqlValue = null | number | bigint | string | Uint8Array;
-/** Anonymous (`?`) parameters in order, or named (`:name`) parameters by bare name. */
-export type SqlParams = readonly SqlValue[] | Readonly<Record<string, SqlValue>>;
-export type SqlRow = Readonly<Record<string, SqlValue>>;
+/** The value, parameter and row types are the contract's (src/data/sql-executor.ts), re-exported for the pipeline. */
+export type { SqlParams, SqlRow, SqlValue };
 
 export type SqlError = { readonly kind: 'sqlite'; readonly path: string; readonly message: string };
 
 export type OpenMode = 'read-only' | 'read-write';
 
-export class NodeSqlExecutor {
+export class NodeSqlExecutor implements SqlExecutor {
   private readonly db: DatabaseSync;
   readonly path: string;
 

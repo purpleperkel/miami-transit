@@ -6,12 +6,16 @@ import { invariant } from '@/lib/invariant';
 import { LiveDataProvider } from '@/live/live-context';
 
 // The map is the app: the tab shell renders full-bleed under the root stack, with no header bar.
-const ROOT_SCREEN_OPTIONS = { headerShown: false } as const;
-// Pushed screens above the tabs get a native header with a back button.
-const DIAGNOSTICS_OPTIONS = { headerShown: true, title: 'Diagnostics' } as const;
-// Data & Settings (M8b.1) sits on the map's tabs, whose route name "(tabs)" would be the back label
-// (M1.19): the back button shows only its chevron.
-const DATA_OPTIONS = { headerShown: true, title: 'Data & Settings', headerBackButtonDisplayMode: 'minimal' } as const;
+// Every screen pushed above the tabs shows a native header whose back button would read the screen
+// beneath's title — for the tab shell, its route name "(tabs)" (seen on the phone at M1.19). So the
+// stack's default back label is a real word, whichever tab the screen was opened from; a screen
+// pushed from another pushed screen names that screen instead.
+const ROOT_SCREEN_OPTIONS = { headerShown: false, headerBackTitle: 'Back' } as const;
+const DATA_TITLE = 'Data & Settings';
+// Data & Settings (M8b.1) is opened from any tab (the accessory); its back button shows only its chevron.
+const DATA_OPTIONS = { headerShown: true, title: DATA_TITLE, headerBackButtonDisplayMode: 'minimal' } as const;
+// Diagnostics is reached from Data & Settings (one tap further), so its back button names it.
+const DIAGNOSTICS_OPTIONS = { headerShown: true, title: 'Diagnostics', headerBackTitle: DATA_TITLE } as const;
 
 /**
  * The root: the bundled schedule DB (M3.8) is opened once, here, for every screen, and the live

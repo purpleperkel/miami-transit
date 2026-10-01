@@ -19,8 +19,10 @@ import {
   readRideCandidates,
   readServiceDays,
   readShapePaths,
+  readStations,
   readStopVisits,
   readTripsAround,
+  type StationListing,
   type StationRef,
 } from './schedule-queries';
 import type { SqlExecutor } from './sql-executor';
@@ -77,6 +79,8 @@ export class ScheduleRepo {
   private shapes: ReadonlyMap<number, ShapePath> | null = null;
   /** The live runtime's trip / stop / track lookups (M4.9), read on first use and kept. */
   private network: RuntimeNetwork | null = null;
+  /** Every station (44 on the 2026 feed), read on first use and kept. */
+  private stationList: readonly StationListing[] | null = null;
 
   private constructor(db: SqlExecutor, meta: ScheduleMeta, bounds: ServiceCalendarBounds) {
     invariant(meta.schemaVersion === SCHEDULE_SCHEMA_VERSION, 'the repo reads only the schema it was written for');
@@ -168,6 +172,15 @@ export class ScheduleRepo {
     invariant(network.tracks.length > 0, 'the schedule DB has line tracks');
     invariant(this.network === network, 'the network is read once, then kept');
     return network;
+  }
+
+  /** Every station, rail first, each mode in name order (the Stations tab, M5.5; the map's markers, M5.8). */
+  stations(): readonly StationListing[] {
+    const stations = this.stationList ?? Object.freeze(readStations(this.db));
+    this.stationList = stations;
+    invariant(stations.length > 0, 'the schedule DB has stations');
+    invariant(this.stationList === stations, 'the stations are read once, then kept');
+    return stations;
   }
 
   private shapePaths(): ReadonlyMap<number, ShapePath> {

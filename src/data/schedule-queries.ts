@@ -5,7 +5,7 @@ import type { Mode } from '../domain/network/stations';
 import type { StopVisit } from '../domain/schedule/departures';
 import type { ScheduledTrip, ShapePath, TripStop } from '../domain/schedule/positions';
 import type { RideCandidate } from '../domain/schedule/rides';
-import type { LatLon } from '../lib/geo';
+import { isLatLon, type LatLon } from '../lib/geo';
 import { invariant } from '../lib/invariant';
 import type { SqlExecutor, SqlRow, SqlValue } from './sql-executor';
 
@@ -24,6 +24,16 @@ import type { SqlExecutor, SqlRow, SqlValue } from './sql-executor';
  */
 
 export type StationRef = { readonly stationIdx: number; readonly stationKey: string; readonly name: string; readonly mode: number };
+
+/** One station as the app lists and draws it (the Stations tab, M5.5; the map's station markers, M5.8). */
+export type StationListing = {
+  readonly stationKey: string;
+  /** The display name (M2.9: Title Case, at most 28 characters). */
+  readonly name: string;
+  readonly mode: Mode;
+  /** The centroid of the station's platform stops. */
+  readonly coordinate: LatLon;
+};
 
 /** A window translated into one service day's seconds: [fromS, toS] = window - base_epoch. */
 export type DaySeconds = { readonly fromS: number; readonly toS: number };
@@ -131,6 +141,9 @@ const LINE_TRACKS_SQL = `
   SELECT ls.line_id, ls.shape_idx, sp.seq, sp.lat, sp.lon
   FROM line_shape AS ls JOIN shape_point AS sp ON sp.shape_idx = ls.shape_idx
   ORDER BY ls.line_id, ls.shape_idx, sp.seq`;
+
+/** Every station: rail before the Mover, each mode in name order (station_key breaks a tie). */
+const STATIONS_SQL = 'SELECT station_key, name, mode, lat, lon FROM station ORDER BY mode, name, station_key';
 
 /** line.mode as the schema stores it (scripts/gtfs/schema.ts MODE_CODES: rail 0, mover 1). */
 const MODES_BY_CODE: ReadonlyMap<number, Mode> = new Map<number, Mode>([
@@ -306,6 +319,22 @@ export function readLineTracks(db: SqlExecutor): LineTrack[] {
   const list = [...tracks.values()];
   invariant(list.length > 0 && list.every((track) => track.points.length >= 2), 'every line has a track of at least one segment');
   return list;
+}
+
+/** Every station in the schedule, rail first, each mode in name order. */
+export function readStations(db: SqlExecutor): StationListing[] {
+  const stations = db.all(STATIONS_SQL).map(toStationListing);
+  invariant(stations.length > 0, 'the schedule DB has stations');
+  invariant(new Set(stations.map((station) => station.stationKey)).size === stations.length, 'station keys are unique');
+  return stations;
+}
+
+function toStationListing(row: SqlRow): StationListing {
+  const mode = MODES_BY_CODE.get(int(row, 'mode'));
+  invariant(mode !== undefined, `station.mode ${String(row.mode)} is rail (0) or mover (1)`);
+  const coordinate = { latitude: real(row, 'lat'), longitude: real(row, 'lon') };
+  invariant(isLatLon(coordinate), `station ${String(row.station_key)} sits on a real coordinate`);
+  return { stationKey: text(row, 'station_key'), name: text(row, 'name'), mode, coordinate };
 }
 
 /** The row's line_id, which must be a catalog line. */

@@ -128,7 +128,7 @@ function metres(values: readonly number[]): number[] {
   return rounded;
 }
 
-describe('terminal stops (M2.11 ruling: the county shapes stop short of the end platforms)', () => {
+describe('terminal stops accepted and extended (M2.11 ruling: the county shapes stop short of the end platforms)', () => {
   it('terminal stop 103 m past the shape end on the track is accepted and the shape is extended to it', () => {
     const geometry = shape([at(0, 0), at(500, 0), at(1000, 0)]);
     const stops = [at(0, 3), at(500, -4), at(1103, 4.5)];
@@ -139,7 +139,7 @@ describe('terminal stops (M2.11 ruling: the county shapes stop short of the end 
     expect(Math.abs(overhang.endM - 103)).toBeLessThan(0.5);
     const extended = extendShape(geometry, overhang);
     expect(extended.points).toHaveLength(4);
-    expect(extended.extendedM).toBe(overhang.endM);
+    expect([extended.extendedStartM, extended.extendedEndM]).toEqual([0, overhang.endM]);
     expect(extended.lengthM).toBeCloseTo(geometry.lengthM + overhang.endM, 9);
     expect(haversineMeters(extended.points[3] ?? ORIGIN, at(1103, 0))).toBeLessThan(0.5);
     // On the extended shape the platform is ON the line: same distances, nothing left overhanging.
@@ -160,9 +160,35 @@ describe('terminal stops (M2.11 ruling: the county shapes stop short of the end 
     expect(metres(extended.cumulativeM)).toEqual([0, 103, 1103]);
     expect(metres(distances.map((d) => d + overhang.startM))).toEqual([0, 503, 1103]);
     expect(haversineMeters(extended.points[0] ?? ORIGIN, at(-103, 0))).toBeLessThan(0.5);
-    expect(extended.extendedM).toBe(overhang.startM);
+    expect([extended.extendedStartM, extended.extendedEndM]).toEqual([overhang.startM, 0]);
   });
 
+  it('both ends overhang -> extended_start_m and extended_end_m recorded separately', () => {
+    // A synthetic 1000 m track whose first platform sits 60 m before its start and whose last sits
+    // 120 m past its end: each end is extended by its own overhang — neither the max nor the sum.
+    const geometry = shape([at(0, 0), at(500, 0), at(1000, 0)]);
+    const distances = okValue(projectStops(geometry, [at(-60, 4), at(500, 0), at(1120, -3)]));
+    expect(metres(distances)).toEqual([-60, 500, 1120]);
+    const extended = extendShape(geometry, overhangOf(geometry, distances));
+    expect(Math.abs(extended.extendedStartM - 60)).toBeLessThan(0.5);
+    expect(Math.abs(extended.extendedEndM - 120)).toBeLessThan(0.5);
+    expect(extended.lengthM).toBeCloseTo(geometry.lengthM + extended.extendedStartM + extended.extendedEndM, 9);
+    expect(metres(extended.cumulativeM)).toEqual([0, 60, 560, 1060, 1180]);
+    expect(haversineMeters(extended.points[0] ?? ORIGIN, at(-60, 0))).toBeLessThan(0.5);
+    expect(haversineMeters(extended.points[4] ?? ORIGIN, at(1120, 0))).toBeLessThan(0.5);
+  });
+
+  it('an overhang under 1 cm is float noise: the stop reads as on the end point and nothing is extended', () => {
+    const geometry = shape([at(0, 0), at(1000, 0)]);
+    const distances = okValue(projectStops(geometry, [at(0, 0), at(1000.005, 0)]));
+    expect(distances[1]).toBe(geometry.lengthM);
+    expect(overhangOf(geometry, distances)).toEqual({ startM: 0, endM: 0 });
+    expect(extendShape(geometry, overhangOf(geometry, distances))).toBe(geometry);
+  });
+
+});
+
+describe('terminal stops rejected (M2.11 ruling)', () => {
   it(`terminal overhang > ${MAX_TERMINAL_OVERHANG_M} m -> Err naming the stop; 149 m is still accepted`, () => {
     const geometry = shape([at(0, 0), at(1000, 0)]);
     const error = errValue(projectStops(geometry, [at(0, 0), at(500, 0), at(1160, 2)]));

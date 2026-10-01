@@ -12,8 +12,12 @@ import { invariant } from '../../src/lib/invariant';
  * Anything else — a mismatch, no manifest yet, no DB on disk, or --force — builds.
  */
 
-/** Bump whenever the builder's output for the SAME zip changes (schema, derivation, rounding…). */
-export const BUILDER_VERSION = 1;
+/**
+ * Bump whenever the builder's output for the SAME zip changes (schema, derivation, rounding…).
+ * 1: the first schedule DB (M2.15–M2.20). 2: shape extension recorded per end (extended_start_m /
+ * extended_end_m, arbiter ruling 2026-10-01).
+ */
+export const BUILDER_VERSION = 2;
 
 /** The fields of the stored manifest this decision reads. */
 export type BuildFingerprint = {

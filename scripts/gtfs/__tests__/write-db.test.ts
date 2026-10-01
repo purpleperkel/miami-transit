@@ -9,7 +9,8 @@ import { BUILDER_VERSION } from '../idempotency';
 import { columnsOf, declaredType, SCHEMA_VERSION, TABLE_NAMES, TABLES, type ColumnKind } from '../schema';
 import { writeScheduleDb } from '../write-db';
 import { expectErr, expectOk } from './expect-result';
-import { MINI_SHA, miniRows, queryValue, removeDir, scratchDir, writeMiniDb } from './mini-db';
+import { miniFeedZip } from '../__fixtures__/mini-feed';
+import { MINI_SHA, miniRows, queryValue, removeDir, rowsOf, scratchDir, shortShapeFeed, writeMiniDb } from './mini-db';
 
 const DIR = scratchDir('write-db');
 after(() => removeDir(DIR));
@@ -101,7 +102,7 @@ describe('writeScheduleDb: what it holds', () => {
     assert.equal(statSync(first).size % 4096, 0, 'whole pages');
   });
 
-  test('the declared columns match the DDL, table by table: all 15 tables, trip.next_trip_idx, shape.extended_m', () => {
+  test('the declared columns match the DDL, table by table: all 15 tables, trip.next_trip_idx, shape.extended_start_m/extended_end_m', () => {
     const path = writeMiniDb(testDir('columns'));
     const db = new DatabaseSync(path, { readOnly: true });
     for (const table of TABLE_NAMES) {
@@ -113,7 +114,8 @@ describe('writeScheduleDb: what it holds', () => {
     }
     db.close();
     assert.equal(TABLE_NAMES.length, 15);
-    assert.ok(columnsOf('trip').includes('next_trip_idx') && columnsOf('shape').includes('extended_m'));
+    assert.ok(columnsOf('trip').includes('next_trip_idx'));
+    assert.deepEqual(columnsOf('shape').slice(-2), ['extended_start_m', 'extended_end_m']);
   });
 
   test('meta records the source zip, the schema and the builder', () => {
@@ -123,6 +125,18 @@ describe('writeScheduleDb: what it holds', () => {
     db.close();
     assert.deepEqual(meta, { builder_version: String(BUILDER_VERSION), feed_sha256: MINI_SHA, schema_version: '1', time_zone: 'America/New_York' });
     assert.equal(Object.keys(meta).length, 4);
+  });
+
+  test('a shape overhanging at both ends stores each end in its own column (extended_start_m 103, extended_end_m 50)', () => {
+    const path = join(testDir('both-ends'), 'schedule.db');
+    expectOk(writeScheduleDb(rowsOf(miniFeedZip(shortShapeFeed(103, 50))), path));
+    const [start, end] = [
+      queryValue(path, "SELECT extended_start_m FROM shape WHERE shape_id = '211239'"),
+      queryValue(path, "SELECT extended_end_m FROM shape WHERE shape_id = '211239'"),
+    ];
+    assert.ok(typeof start === 'number' && Math.abs(start - 103) < 0.5, `extended_start_m ${String(start)}`);
+    assert.ok(typeof end === 'number' && Math.abs(end - 50) < 0.5, `extended_end_m ${String(end)}`);
+    assert.equal(queryValue(path, "SELECT count(*) FROM shape WHERE shape_id != '211239' AND (extended_start_m != 0 OR extended_end_m != 0)"), 0);
   });
 
   test("stop_time.seq is the pattern's stop position: every trip's stop i is its pattern's stop i", () => {

@@ -2,7 +2,7 @@ import { LINE_CATALOG, type LineDef } from '../../src/domain/lines/line-catalog'
 import type { Station } from '../../src/domain/network/stations';
 import { invariant } from '../../src/lib/invariant';
 import { err, ok, type Result } from '../../src/lib/result';
-import { groupStopTimes, type NetworkModel, type NetworkPattern, type NetworkTrip } from './build-network';
+import { groupStopTimes, type NetworkModel, type NetworkPattern, type NetworkShape, type NetworkTrip } from './build-network';
 import type { ServiceCalendar, ServiceDay } from './calendar';
 import { BUILDER_VERSION } from './idempotency';
 import type { LoadedFeed, Stop } from './load-feed';
@@ -144,12 +144,19 @@ function stopRows({ feed, network }: RowsInput, indexes: Indexes): Row<'stop'>[]
   return rows;
 }
 
-/** Shapes as DRAWN: length and extension include the M2.11 terminal extensions. */
+/** Shapes as DRAWN: length includes the M2.11 terminal extensions, each end's recorded in its own column. */
 function shapeRows(network: NetworkModel): Row<'shape'>[] {
   invariant(network.shapes.every((shape, i) => i === 0 || (network.shapes[i - 1]?.shapeId ?? '') < shape.shapeId), 'shapes arrive sorted by id');
-  const rows = network.shapes.map(({ shapeId, geometry }, i) => ({ shape_idx: i, shape_id: shapeId, length_m: geometry.lengthM, extended_m: geometry.extendedM }));
-  invariant(rows.every((row) => row.extended_m >= 0 && row.extended_m < row.length_m), 'an extension is a part of its shape');
+  const rows = network.shapes.map((shape, i) => shapeRow(shape, i));
+  invariant(rows.every((row, i) => row.shape_idx === i), 'shape rows sit at their index');
   return rows;
+}
+
+function shapeRow({ shapeId, geometry }: NetworkShape, idx: number): Row<'shape'> {
+  const { lengthM, extendedStartM, extendedEndM } = geometry;
+  invariant(extendedStartM >= 0 && extendedEndM >= 0, `shape ${shapeId}: each end's extension is a length`);
+  invariant(extendedStartM + extendedEndM < lengthM, `shape ${shapeId}: the extensions are parts of the drawn shape`);
+  return { shape_idx: idx, shape_id: shapeId, length_m: lengthM, extended_start_m: extendedStartM, extended_end_m: extendedEndM };
 }
 
 function stopRow(stop: Stop, idx: number, stationIdx: number): Row<'stop'> {

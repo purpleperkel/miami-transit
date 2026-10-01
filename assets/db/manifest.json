@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "builderVersion": 1,
+  "builderVersion": 2,
   "feedUrl": "https://www.miamidade.gov/transit/googletransit/current/google_transit.zip",
   "feedSha256": "785460181e910e47af9172ccb9da0b10aa61ba9d55539fd6b69d0ad181758ef5",
   "feedEtag": "\"80443ab02821dd1:0\"",
   "feedLastModified": "Fri, 31 Jul 2026 20:10:53 GMT",
-  "dbSha256": "51cee88920e7dfb8f52b9b5ed73866b0d08489e76bd9f809954aa35771139574",
+  "dbSha256": "013b99824af137e4c5e8ae57d1165969865dfed2ad253aa7c66d80667ea2e982",
   "dbBytes": 2088960,
   "sqliteVersion": "3.53.4",
   "serviceStartDate": 20231113,

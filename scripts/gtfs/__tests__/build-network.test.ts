@@ -5,11 +5,13 @@ import { haversineMeters } from '../../../src/lib/geo';
 import type { Result } from '../../../src/lib/result';
 import { MINI_FEED, MINI_FEED_FACTS as F, miniFeedZip, type MiniFeedOverrides } from '../__fixtures__/mini-feed';
 import { linkBlocks, MAX_THROUGH_GAP_S, type BlockTrip } from '../block-links';
+import type { ShapeGeometry } from '../../../src/domain/schedule/shape-geometry';
 import { buildNetwork, tripNote, type NetworkError, type NetworkModel, type NetworkTrip } from '../build-network';
 import { loadFeed } from '../load-feed';
 import { isSymmetric, MAX_RAIL_MOVER_TRANSFER_M, SAME_STATION_TRANSFER_S, WALK_DETOUR_FACTOR, WALK_SPEED_M_PER_S } from '../transfers';
 import { unzipFeed } from '../unzip-feed';
 import { expectErr, expectOk } from './expect-result';
+import { GREEN_211239, shortShapeFeed } from './mini-db';
 
 /** zip → unzip → load → build, exactly as the pipeline runs it, on the M2.4 mini feed. */
 function network(overrides: MiniFeedOverrides = {}): Result<NetworkModel, NetworkError> {
@@ -106,36 +108,40 @@ describe('buildNetwork: stations and patterns on the mini feed', () => {
   });
 });
 
-/** The point `metres` from `from` toward `to` (linear in degrees: exact enough over a few hundred metres). */
-function towards(from: readonly [number, number], to: readonly [number, number], metres: number): [number, number] {
-  const total = haversineMeters({ latitude: from[0], longitude: from[1] }, { latitude: to[0], longitude: to[1] });
-  assert.ok(metres > 0 && metres < total, 'the point lies between the two');
-  const f = metres / total;
-  const point: [number, number] = [from[0] + f * (to[0] - from[0]), from[1] + f * (to[1] - from[1])];
-  assert.ok(point.every(Number.isFinite));
-  return point;
+function drawnShape(model: NetworkModel, shapeId: string): ShapeGeometry {
+  const shape = model.shapes.find((candidate) => candidate.shapeId === shapeId)?.geometry;
+  assert.ok(shape !== undefined, `shape ${shapeId} is in the network`);
+  assert.equal(shape.cumulativeM.length, shape.points.length);
+  return shape;
 }
 
 describe('buildNetwork: shapes drawn to the terminal platforms (M2.11 ruling)', () => {
   test('a shape that starts 103 m short of Palmetto is extended back to the platform; stop distances start at 0', () => {
-    // Shape 211239 (Green, Palmetto → Dadeland South) is traced through the platforms; start it 103 m
-    // down the track toward Okeechobee instead, as the county's real shape does.
-    const [palmetto, okeechobee] = [[25.843348, -80.323791], [25.839812, -80.301544]] as const;
-    const [lat, lon] = towards(palmetto, okeechobee, 103);
-    const model = expectOk(network(withLines('shapes.txt', ['211239,25.843348,-80.323791,1,', `211239,${lat.toFixed(7)},${lon.toFixed(7)},1,`])));
-    const shape = model.shapes.find((candidate) => candidate.shapeId === '211239')?.geometry;
-    assert.ok(shape !== undefined);
-    assert.ok(Math.abs(shape.extendedM - 103) < 0.5, `extended ${shape.extendedM} m`);
-    assert.ok(haversineMeters(shape.points[0] ?? { latitude: 0, longitude: 0 }, { latitude: palmetto[0], longitude: palmetto[1] }) < 1, 'the drawn line reaches the platform');
+    // Shape 211239 is traced through the platforms; start it 103 m down the track instead, as the county's real shape does.
+    const model = expectOk(network(shortShapeFeed(103, 0)));
+    const shape = drawnShape(model, '211239');
+    assert.ok(Math.abs(shape.extendedStartM - 103) < 0.5, `extended ${shape.extendedStartM} m at the start`);
+    assert.equal(shape.extendedEndM, 0);
+    const [lat, lon] = GREEN_211239.palmetto;
+    assert.ok(haversineMeters(shape.points[0] ?? { latitude: 0, longitude: 0 }, { latitude: lat, longitude: lon }) < 1, 'the drawn line reaches the platform');
     const green = model.patterns.find((pattern) => pattern.shapeId === '211239');
     assert.equal(green?.distancesM[0], 0);
     assert.ok((green?.distancesM.at(-1) ?? Infinity) <= shape.lengthM);
-    assert.equal(model.shapes.find((candidate) => candidate.shapeId === '211246')?.geometry.extendedM, 0, 'other shapes are untouched');
+    const other = drawnShape(model, '211246');
+    assert.deepEqual([other.extendedStartM, other.extendedEndM], [0, 0], 'other shapes are untouched');
+  });
+
+  test('a shape short at both ends is extended at each end by that end\'s own overhang (103 m and 50 m)', () => {
+    const model = expectOk(network(shortShapeFeed(103, 50)));
+    const shape = drawnShape(model, '211239');
+    assert.ok(Math.abs(shape.extendedStartM - 103) < 0.5, `extended ${shape.extendedStartM} m at the start`);
+    assert.ok(Math.abs(shape.extendedEndM - 50) < 0.5, `extended ${shape.extendedEndM} m at the end`);
+    const green = model.patterns.find((pattern) => pattern.shapeId === '211239');
+    assert.deepEqual([green?.distancesM[0], green?.distancesM.at(-1)], [0, shape.lengthM], 'both terminal platforms sit on the drawn ends');
   });
 
   test('a shape that starts more than 150 m short of its first platform is a build error naming the stop and shape', () => {
-    const [lat, lon] = towards([25.843348, -80.323791], [25.839812, -80.301544], 160);
-    const error = expectErr(network(withLines('shapes.txt', ['211239,25.843348,-80.323791,1,', `211239,${lat.toFixed(7)},${lon.toFixed(7)},1,`])));
+    const error = expectErr(network(shortShapeFeed(160, 0)));
     assert.equal(error.step, 'shapes');
     assert.match(error.message, /shape 211239: stop 0 is 16\d\.\d m past the shape start along the track \(max 150 m\) \(stop_id 9486\)/);
   });

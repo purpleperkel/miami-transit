@@ -20,7 +20,9 @@ import { err, ok, type Result } from '../../lib/result';
  *     100 m sideways AND at most 150 m past that end of the shape;
  *  3. an overhanging terminal stop reads as a distance before the start (< 0) or past the end
  *     (> lengthM); `overhangOf` measures it and `extendShape` adds the stop's projection on the ray
- *     as the new terminal point, so the drawn line reaches the platform and distances stay monotone;
+ *     as the new terminal point, so the drawn line reaches the platform and distances stay monotone.
+ *     Each end's added metres are recorded separately (arbiter ruling: one column per end, never a
+ *     max or a sum), and an overhang under 1 cm is float noise, not an extension;
  *  4. anything farther is an Err naming the stop (the caller adds the shape).
  */
 
@@ -36,11 +38,10 @@ export type ShapeGeometry = {
   /** cumulativeM[i] = metres along the shape from points[0] to points[i]; cumulativeM[0] = 0. */
   readonly cumulativeM: readonly number[];
   readonly lengthM: number;
-  /**
-   * Metres the build added to the published polyline to reach overhanging terminal platforms: the
-   * LONGER of the two end extensions (each is capped at MAX_TERMINAL_OVERHANG_M). 0 = as published.
-   */
-  readonly extendedM: number;
+  /** Metres added BEFORE the published first point to reach an overhanging first platform (0 = as published). */
+  readonly extendedStartM: number;
+  /** Metres added AFTER the published last point to reach an overhanging last platform (0 = as published). */
+  readonly extendedEndM: number;
 };
 
 /** How far a pattern's terminal stops lie beyond the shape's two ends, along the terminal rays (0 = on it). */
@@ -73,7 +74,7 @@ export function buildShapeGeometry(points: readonly LatLon[]): Result<ShapeGeome
   }
   const lengthM = cumulativeM[cumulativeM.length - 1] ?? 0;
   invariant(cumulativeM.every((d, i) => i === 0 || d >= (cumulativeM[i - 1] ?? 0)), 'cumulative distance never decreases');
-  return ok({ points, cumulativeM, lengthM, extendedM: 0 });
+  return ok({ points, cumulativeM, lengthM, extendedStartM: 0, extendedEndM: 0 });
 }
 
 /**
@@ -112,12 +113,16 @@ export function overhangOf(shape: ShapeGeometry, distancesM: readonly number[]):
 
 /**
  * The published shape lengthened along its terminal rays: a new first point `startM` before the
- * start and a new last point `endM` past the end. Every existing distance shifts by startM, so a
- * stop's distance on the extended shape is its projected distance + startM.
+ * start and a new last point `endM` past the end, each recorded on its own (extendedStartM /
+ * extendedEndM). Every existing distance shifts by startM, so a stop's distance on the extended
+ * shape is its projected distance + startM.
  */
 export function extendShape(shape: ShapeGeometry, overhang: Overhang): ShapeGeometry {
-  invariant(shape.extendedM === 0, 'only a published shape is extended (extension is decided once, for every pattern on it)');
-  invariant(overhang.startM >= 0 && overhang.endM >= 0, 'an extension never shortens a shape');
+  invariant(shape.extendedStartM === 0 && shape.extendedEndM === 0, 'only a published shape is extended (once per end, for every pattern on it)');
+  invariant(
+    overhang.startM >= 0 && overhang.endM >= 0 && overhang.startM <= MAX_TERMINAL_OVERHANG_M && overhang.endM <= MAX_TERMINAL_OVERHANG_M,
+    `each end is extended by 0..${MAX_TERMINAL_OVERHANG_M} m`,
+  );
   if (overhang.startM === 0 && overhang.endM === 0) {
     return shape;
   }
@@ -134,7 +139,7 @@ export function extendShape(shape: ShapeGeometry, overhang: Overhang): ShapeGeom
   }
   const lengthM = at(cumulativeM, cumulativeM.length - 1);
   invariant(Math.abs(lengthM - (shape.lengthM + overhang.startM + overhang.endM)) < 1e-6, 'the extension adds exactly the overhangs');
-  return { points, cumulativeM, lengthM, extendedM: Math.max(overhang.startM, overhang.endM) };
+  return { points, cumulativeM, lengthM, extendedStartM: overhang.startM, extendedEndM: overhang.endM };
 }
 
 /** The point `metres` beyond `to` on the ray from `from` through `to` (local planar frame at `to`). */

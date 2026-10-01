@@ -24,7 +24,8 @@ export type PatternSummary = {
   readonly route_id: string;
   readonly direction_id: number;
   readonly shape_id: string;
-  readonly extended_m: number;
+  readonly extended_start_m: number;
+  readonly extended_end_m: number;
   readonly stop_count: number;
   readonly trips: number;
   readonly first_station: string;
@@ -36,7 +37,7 @@ export type Report = { readonly lines: readonly string[]; readonly checks: reado
 
 const MIA = 'rail:miami-international-airport';
 
-const PATTERNS_SQL = `SELECT p.pattern_idx, p.line_id, p.variant, p.route_id, p.direction_id, sh.shape_id, sh.extended_m, p.stop_count,
+const PATTERNS_SQL = `SELECT p.pattern_idx, p.line_id, p.variant, p.route_id, p.direction_id, sh.shape_id, sh.extended_start_m, sh.extended_end_m, p.stop_count,
     (SELECT count(*) FROM trip t WHERE t.pattern_idx = p.pattern_idx) AS trips,
     (SELECT st.name FROM pattern_stop ps JOIN stop s ON s.stop_idx = ps.stop_idx JOIN station st ON st.station_idx = s.station_idx
       WHERE ps.pattern_idx = p.pattern_idx ORDER BY ps.seq LIMIT 1) AS first_station,
@@ -101,11 +102,11 @@ function stationCheck(name: string, patterns: readonly PatternSummary[], lineId:
   return { name, ok, detail };
 }
 
-const COLUMNS = ['idx', 'line', 'variant', 'route', 'dir', 'shape', 'ext_m', 'stops', 'trips', 'from → to'] as const;
+const COLUMNS = ['idx', 'line', 'variant', 'route', 'dir', 'shape', 'ext_start_m', 'ext_end_m', 'stops', 'trips', 'from → to'] as const;
 
 /** One table row's cells, in COLUMNS order. */
 function patternCells(p: PatternSummary): string[] {
-  const cells = [p.pattern_idx, p.line_id, p.variant, p.route_id, p.direction_id, p.shape_id, p.extended_m.toFixed(1), p.stop_count, p.trips];
+  const cells = [p.pattern_idx, p.line_id, p.variant, p.route_id, p.direction_id, p.shape_id, p.extended_start_m.toFixed(1), p.extended_end_m.toFixed(1), p.stop_count, p.trips];
   invariant(cells.length === COLUMNS.length - 1, 'a cell per column before the route');
   const row = [...cells.map(String), `${p.first_station} → ${p.last_station}`];
   invariant(row.length === COLUMNS.length, 'a cell per column');

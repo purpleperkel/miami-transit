@@ -17,7 +17,7 @@ import { columnsOf, declaredType, MODE_CODES, SCHEMA_VERSION, TABLE_NAMES, TABLE
  * The checks, in order (structure first, so a damaged file fails on the check that names the damage):
  * size < 6 MB · integrity_check · user_version · journal_mode · tables · catalog · references ·
  * ≥ 2 stop times per trip · monotone times · trips follow their pattern · stop distances ·
- * shape extension · service days. A SQLite error while checking (a corrupted page, "file is not a
+ * shape extension per end · service days. A SQLite error while checking (a corrupted page, "file is not a
  * database") fails the check that hit it.
  */
 
@@ -37,7 +37,7 @@ const CHECKS = [
   ['times are monotone', timesAreMonotone],
   ['trips follow their pattern', tripsFollowPatterns],
   ['stop distances', stopDistances],
-  [`shape extension ≤ ${MAX_TERMINAL_OVERHANG_M} m`, shapeExtensions],
+  [`shape extension ≤ ${MAX_TERMINAL_OVERHANG_M} m per end`, shapeExtensions],
   ['service days', serviceDays],
 ] as const satisfies readonly (readonly [string, Check])[];
 
@@ -258,14 +258,16 @@ function stopDistances(db: NodeSqlExecutor): string | null {
   return problem;
 }
 
-/** The M2.11 ruling: no end of a shape was extended more than MAX_TERMINAL_OVERHANG_M. */
+/** The M2.11 ruling, checked at EACH end: neither end of a shape was extended more than MAX_TERMINAL_OVERHANG_M. */
 function shapeExtensions(db: NodeSqlExecutor): string | null {
   invariant(MAX_TERMINAL_OVERHANG_M === 150, 'the ruling caps a terminal extension at 150 m');
-  const sql = `SELECT shape_id, extended_m FROM shape WHERE extended_m < 0 OR extended_m > ${MAX_TERMINAL_OVERHANG_M} LIMIT 1`;
-  const problem = firstProblem<{ shape_id: string; extended_m: number }>(
+  const max = MAX_TERMINAL_OVERHANG_M;
+  const sql = `SELECT shape_id, 'start' AS end_name, extended_start_m AS metres FROM shape WHERE extended_start_m NOT BETWEEN 0 AND ${max}
+    UNION ALL SELECT shape_id, 'end', extended_end_m FROM shape WHERE extended_end_m NOT BETWEEN 0 AND ${max} LIMIT 1`;
+  const problem = firstProblem<{ shape_id: string; end_name: string; metres: number }>(
     db,
     sql,
-    (r) => `shape ${r.shape_id} was extended ${r.extended_m.toFixed(1)} m past its published end (max ${MAX_TERMINAL_OVERHANG_M} m)`,
+    (r) => `shape ${r.shape_id} was extended ${r.metres.toFixed(1)} m at its ${r.end_name} (max ${max} m per end)`,
   );
   invariant(problem === null || problem.startsWith('shape '), 'the problem names the shape');
   return problem;

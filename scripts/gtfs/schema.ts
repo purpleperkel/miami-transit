@@ -5,7 +5,8 @@ import { invariant } from '../../src/lib/invariant';
  * Plan §4 "GTFS pipeline" (M2.15): the schedule DB schema, version 1 (`PRAGMA user_version`).
  *
  * SCHEMA_DDL is the plan's DDL VERBATIM — copied into the plan on 2026-10-01 from the design
- * agent's output, plus `shape.extended_m` from the M2.11 shape-end ruling. TABLES declares the same
+ * agent's output, plus the M2.11 shape-end ruling's `shape.extended_start_m` / `extended_end_m` (one
+ * column per end, arbiter 2026-10-01). TABLES declares the same
  * columns, in the same order, with the TypeScript type each row value has; the writer's tests prove
  * the two agree column by column against `PRAGMA table_info`, so a row can never bind to the wrong
  * column silently.
@@ -26,7 +27,7 @@ CREATE TABLE line(line_id TEXT PRIMARY KEY, mode INTEGER NOT NULL, name TEXT NOT
 CREATE TABLE station(station_idx INTEGER PRIMARY KEY, station_key TEXT NOT NULL UNIQUE, mode INTEGER NOT NULL, name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL);
 CREATE TABLE stop(stop_idx INTEGER PRIMARY KEY, stop_id TEXT NOT NULL UNIQUE, station_idx INTEGER NOT NULL, code TEXT NOT NULL, bound TEXT, lat REAL NOT NULL, lon REAL NOT NULL);
 CREATE INDEX stop_by_station ON stop(station_idx);
-CREATE TABLE shape(shape_idx INTEGER PRIMARY KEY, shape_id TEXT NOT NULL UNIQUE, length_m REAL NOT NULL, extended_m REAL NOT NULL DEFAULT 0);
+CREATE TABLE shape(shape_idx INTEGER PRIMARY KEY, shape_id TEXT NOT NULL UNIQUE, length_m REAL NOT NULL, extended_start_m REAL NOT NULL DEFAULT 0, extended_end_m REAL NOT NULL DEFAULT 0);
 CREATE TABLE shape_point(shape_idx INTEGER NOT NULL, seq INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, dist_m REAL NOT NULL, PRIMARY KEY(shape_idx,seq)) WITHOUT ROWID;
 CREATE TABLE line_shape(line_id TEXT NOT NULL, shape_idx INTEGER NOT NULL, PRIMARY KEY(line_id,shape_idx)) WITHOUT ROWID; -- rail: longest dir-0 shape per line; mover: all shapes
 CREATE TABLE pattern(pattern_idx INTEGER PRIMARY KEY, route_id TEXT NOT NULL, line_id TEXT NOT NULL, variant TEXT NOT NULL, direction_id INTEGER NOT NULL, shape_idx INTEGER NOT NULL, dest_station_idx INTEGER NOT NULL, stop_count INTEGER NOT NULL);
@@ -51,7 +52,7 @@ export const TABLES = {
   line: { line_id: 'text', mode: 'int', name: 'text', sort: 'int' },
   station: { station_idx: 'int', station_key: 'text', mode: 'int', name: 'text', lat: 'real', lon: 'real' },
   stop: { stop_idx: 'int', stop_id: 'text', station_idx: 'int', code: 'text', bound: 'text?', lat: 'real', lon: 'real' },
-  shape: { shape_idx: 'int', shape_id: 'text', length_m: 'real', extended_m: 'real' },
+  shape: { shape_idx: 'int', shape_id: 'text', length_m: 'real', extended_start_m: 'real', extended_end_m: 'real' },
   shape_point: { shape_idx: 'int', seq: 'int', lat: 'real', lon: 'real', dist_m: 'real' },
   line_shape: { line_id: 'text', shape_idx: 'int' },
   pattern: {

@@ -115,9 +115,17 @@ describe('verifyScheduleDb: file format and geometry', () => {
     assert.match(failsOn(path, 'stop distances').message, /pattern 0 stop 1: distance is off its shape or goes backwards/);
   });
 
-  test('a shape extended more than 150 m -> Err (the M2.11 ruling)', () => {
-    const path = damaged('over-extended', 'UPDATE shape SET extended_m = 150.5 WHERE shape_idx = 0');
-    assert.match(failsOn(path, 'shape extension ≤ 150 m').message, /extended 150\.5 m past its published end \(max 150 m\)/);
+  test('a shape extended more than 150 m at either end -> Err naming that end (the M2.11 ruling)', () => {
+    const start = damaged('over-extended-start', 'UPDATE shape SET extended_start_m = 150.5 WHERE shape_idx = 0');
+    assert.match(failsOn(start, 'shape extension ≤ 150 m per end').message, /extended 150\.5 m at its start \(max 150 m per end\)/);
+    const end = damaged('over-extended-end', 'UPDATE shape SET extended_end_m = 151 WHERE shape_idx = 0');
+    assert.match(failsOn(end, 'shape extension ≤ 150 m per end').message, /extended 151\.0 m at its end/);
+  });
+
+  test('two ends of 140 m each pass: the limit is per end, not on their sum', () => {
+    const path = damaged('both-ends-140', 'UPDATE shape SET extended_start_m = 140, extended_end_m = 140 WHERE shape_idx = 0');
+    assert.equal(expectOk(verifyScheduleDb(path)).checks.length, 13);
+    assert.equal(queryValue(path, 'SELECT extended_start_m + extended_end_m FROM shape WHERE shape_idx = 0'), 280);
   });
 
   test('a missing file -> Err naming the open step', () => {

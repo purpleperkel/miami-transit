@@ -14,6 +14,8 @@ Share → Add to Home Screen (name it "Miami Transit").
 ## Develop
     npx expo start --lan        # then open "miami-transit" under Development servers in Expo Go
     npm run verify              # the gate (from M1 on)
+    npx tsx scripts/gtfs/check-feed.ts   # has the county republished the schedule? exit 0 no, 10 yes (read-only)
+    npm run gtfs:refresh        # rebuild assets/db from the county feed (UNCHANGED if current), verify it, print the report
 
 Plan: `/Users/jacobperkel/.claude/plans/could-i-make-an-fluttering-charm.md`. Working rules: `CLAUDE.md`.
 

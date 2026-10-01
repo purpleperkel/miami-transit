@@ -1,20 +1,35 @@
 import { fetch } from 'expo/fetch';
-import { importDatabaseFromAssetAsync, openDatabaseAsync } from 'expo-sqlite';
+import { deleteDatabaseAsync, importDatabaseFromAssetAsync, openDatabaseAsync } from 'expo-sqlite';
 
-import probeManifest from '../../../../assets/db/probe-manifest.json';
+import manifest from '../../../../assets/db/manifest.json';
 import { err, ok } from '../../../lib/result';
-import { judgeProbeDb, judgeZipHead, probeBinaryFetch, probeProtobufDecode, probeSqliteAsset } from '../data-probes';
+import { judgeScheduleDb, judgeZipHead, probeBinaryFetch, probeProtobufDecode, probeSqliteAsset } from '../data-probes';
 
 // test-time mock of native module
-jest.mock('expo-sqlite', () => ({ importDatabaseFromAssetAsync: jest.fn(), openDatabaseAsync: jest.fn() }));
+jest.mock('expo-sqlite', () => ({ deleteDatabaseAsync: jest.fn(), importDatabaseFromAssetAsync: jest.fn(), openDatabaseAsync: jest.fn() }));
 // test-time mock of native module
 jest.mock('expo/fetch', () => ({ fetch: jest.fn() }));
 
 const mockImport = jest.mocked(importDatabaseFromAssetAsync);
 const mockOpen = jest.mocked(openDatabaseAsync);
+const mockDelete = jest.mocked(deleteDatabaseAsync);
 const mockFetch = jest.mocked(fetch);
-const TRUE_TOTALS = { rows: 1000, epochSum: probeManifest.epochSum };
-const TRUE_LABEL = probeManifest.unicodeLabel.label;
+/** The meta rows the real schedule DB holds (assets/db/schedule.db), as the manifest records them. */
+const TRUE_META = [
+  { key: 'builder_version', value: String(manifest.builderVersion) },
+  { key: 'feed_sha256', value: manifest.feedSha256 },
+  { key: 'schema_version', value: String(manifest.schemaVersion) },
+  { key: 'time_zone', value: 'America/New_York' },
+];
+const TRUE_COUNTS = { trips: manifest.counts.trips, stopTimes: manifest.counts.stopTimes };
+
+/** The true meta rows as the key → value map the probe builds. */
+function trueMeta(): Map<string, string> {
+  const meta = new Map(TRUE_META.map((row) => [row.key, row.value]));
+  expect(meta.size).toBe(TRUE_META.length);
+  expect(meta.get('feed_sha256')).toBe(manifest.feedSha256);
+  return meta;
+}
 
 /** The first 1 KB of a zip: the PK\x03\x04 signature, then bytes >= 0x80 like a real local header. */
 function zipHead(length = 1024): Uint8Array {
@@ -25,13 +40,14 @@ function zipHead(length = 1024): Uint8Array {
   return bytes;
 }
 
-/** A stand-in SQLiteDatabase answering the probe's two queries in order. */
-function fakeDb(totals: object | null, label: string | null) {
+/** A stand-in SQLiteDatabase answering the probe's meta query, then its counts query. */
+function fakeDb(meta: readonly object[], counts: object | null) {
   const db = {
-    getFirstAsync: jest.fn().mockResolvedValueOnce(totals).mockResolvedValueOnce(label === null ? null : { label }),
+    getAllAsync: jest.fn().mockResolvedValueOnce(meta),
+    getFirstAsync: jest.fn().mockResolvedValueOnce(counts),
     closeAsync: jest.fn().mockResolvedValue(undefined),
   };
-  expect(db.getFirstAsync).not.toHaveBeenCalled();
+  expect(db.getAllAsync).not.toHaveBeenCalled();
   expect(db.closeAsync).not.toHaveBeenCalled();
   return db;
 }
@@ -42,39 +58,41 @@ afterEach(() => {
 });
 
 describe('probeSqliteAsset', () => {
-  it('imports this bundle’s probe DB (overwriting any old copy), counts 1000 rows and closes it', async () => {
-    const db = fakeDb(TRUE_TOTALS, TRUE_LABEL);
+  it('imports this bundle’s schedule DB into its own copy (overwriting any old one), reads it, then closes and deletes it', async () => {
+    const db = fakeDb(TRUE_META, TRUE_COUNTS);
     mockOpen.mockResolvedValue(db as never);
     const outcome = await probeSqliteAsset();
     expect(outcome.ok).toBe(true);
-    expect(mockImport).toHaveBeenCalledWith('probe.db', expect.objectContaining({ forceOverwrite: true }));
-    expect(db.getFirstAsync.mock.calls[0]?.[0]).toMatch(/COUNT\(\*\)/);
+    expect(mockImport).toHaveBeenCalledWith('diagnostics-schedule.db', expect.objectContaining({ forceOverwrite: true }));
+    expect(db.getAllAsync.mock.calls[0]?.[0]).toMatch(/FROM meta/);
     expect(db.closeAsync).toHaveBeenCalledTimes(1);
+    expect(mockDelete).toHaveBeenCalledWith('diagnostics-schedule.db');
   });
 
   it('closes the DB and fails (never throws) when a query rejects', async () => {
-    const db = fakeDb(null, null);
-    db.getFirstAsync.mockReset().mockRejectedValue(new Error('file is not a database'));
+    const db = fakeDb([], null);
+    db.getAllAsync.mockReset().mockRejectedValue(new Error('file is not a database'));
     mockOpen.mockResolvedValue(db as never);
     await expect(probeSqliteAsset()).resolves.toEqual(err('SQLite asset: file is not a database'));
     expect(db.closeAsync).toHaveBeenCalledTimes(1);
   });
 });
 
-describe('judgeProbeDb', () => {
-  it('passes only when the phone reads exactly what the Mac wrote', () => {
-    expect(judgeProbeDb(TRUE_TOTALS, TRUE_LABEL)).toEqual(
-      ok(`1000 rows in probe_row; epoch sum and "${TRUE_LABEL}" match the Mac`),
+describe('judgeScheduleDb', () => {
+  it('passes only when the phone reads the feed, schema and counts the manifest records', () => {
+    expect(judgeScheduleDb(trueMeta(), TRUE_COUNTS)).toEqual(
+      ok(`5137 trips, 45937 stop times; feed ${manifest.feedSha256.slice(0, 8)}, schema 1, builder 2 match the manifest`),
     );
-    expect(judgeProbeDb(null, TRUE_LABEL).ok).toBe(false);
+    expect(judgeScheduleDb(trueMeta(), null).ok).toBe(false);
   });
 
-  it('fails on 999 rows, a changed epoch sum or a mangled unicode label', () => {
-    expect(judgeProbeDb({ ...TRUE_TOTALS, rows: 999 }, TRUE_LABEL)).toEqual(
-      err('SQLite asset: counted 999 rows in probe_row, want 1000'),
+  it('fails on a different feed, a different builder, or one trip short', () => {
+    const otherFeed = new Map([...trueMeta(), ['feed_sha256', '0'.repeat(64)]]);
+    expect(judgeScheduleDb(otherFeed, TRUE_COUNTS).ok).toBe(false);
+    expect(judgeScheduleDb(new Map([...trueMeta(), ['builder_version', '1']]), TRUE_COUNTS).ok).toBe(false);
+    expect(judgeScheduleDb(trueMeta(), { ...TRUE_COUNTS, trips: TRUE_COUNTS.trips - 1 })).toEqual(
+      err(`SQLite asset: counted 5136 trips and 45937 stop times, want 5137 and 45937`),
     );
-    expect(judgeProbeDb({ ...TRUE_TOTALS, epochSum: TRUE_TOTALS.epochSum + 60 }, TRUE_LABEL).ok).toBe(false);
-    expect(judgeProbeDb(TRUE_TOTALS, 'Govâ€™t Center · 7').ok).toBe(false);
   });
 });
 

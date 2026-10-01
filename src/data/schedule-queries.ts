@@ -1,11 +1,14 @@
 import type { ServiceCalendarBounds, ServiceDay, TimeWindow } from '../domain/gtfs/service-day';
+import type { Mode } from '../domain/network/stations';
 import type { StopVisit } from '../domain/schedule/departures';
+import type { ScheduledTrip, ShapePath, TripStop } from '../domain/schedule/positions';
 import type { RideCandidate } from '../domain/schedule/rides';
+import type { LatLon } from '../lib/geo';
 import { invariant } from '../lib/invariant';
 import type { SqlExecutor, SqlRow, SqlValue } from './sql-executor';
 
 /**
- * Every SQL statement the schedule engine runs (M3.2–M3.4), written against the plan §4 DDL, and
+ * Every SQL statement the schedule engine runs (M3.2–M3.5), written against the plan §4 DDL, and
  * the checked readers that turn their rows into domain values.
  *
  * This module imports only the SqlExecutor CONTRACT, through relative paths — never expo-sqlite,
@@ -91,6 +94,32 @@ const RIDE_CANDIDATES_SQL = `
   WHERE xs.station_idx = :to_station_idx
   ORDER BY board_dep_s, board_trip_idx, via_block_link, alight_arr_s`;
 
+/**
+ * Every trip of one service day running at some point in [from_s, to_s] (start_s <= to_s and
+ * end_s >= from_s), with its stops in order: times, and each stop's distance along the trip's
+ * shape (pattern_stop.dist_m, matched on the pattern and the stop's position).
+ */
+const TRIPS_AROUND_SQL = `
+  SELECT t.trip_idx, t.trip_id, t.block_id, p.line_id, l.mode, p.direction_id, p.shape_idx,
+         st.seq, st.arr_s, st.dep_s, ps.dist_m
+  FROM trip AS t
+  JOIN service_day_active AS a ON a.service_idx = t.service_idx AND a.date = :date
+  JOIN pattern AS p ON p.pattern_idx = t.pattern_idx
+  JOIN line AS l ON l.line_id = p.line_id
+  JOIN stop_time AS st ON st.trip_idx = t.trip_idx
+  JOIN pattern_stop AS ps ON ps.pattern_idx = t.pattern_idx AND ps.seq = st.seq
+  WHERE t.start_s <= :to_s AND t.end_s >= :from_s
+  ORDER BY t.trip_idx, st.seq`;
+
+/** Every shape's points in order, with their cumulative distance (the M2.11 geometry, extensions included). */
+const SHAPE_POINTS_SQL = 'SELECT shape_idx, seq, lat, lon, dist_m FROM shape_point ORDER BY shape_idx, seq';
+
+/** line.mode as the schema stores it (scripts/gtfs/schema.ts MODE_CODES: rail 0, mover 1). */
+const MODES_BY_CODE: ReadonlyMap<number, Mode> = new Map<number, Mode>([
+  [0, 'rail'],
+  [1, 'mover'],
+]);
+
 /** The meta table as a key → value map (schema_version, builder_version, feed_sha256, time_zone). */
 export function readMeta(db: SqlExecutor): ReadonlyMap<string, string> {
   const rows = db.all(META_SQL);
@@ -163,6 +192,64 @@ export function readRideCandidates(
   return db.all(RIDE_CANDIDATES_SQL, params).map(toRideCandidate);
 }
 
+/** The trips of one service day running at some point inside `seconds`, each with its stops in order. */
+export function readTripsAround(db: SqlExecutor, day: ServiceDay, seconds: DaySeconds): ScheduledTrip[] {
+  invariant(seconds.fromS <= seconds.toS, 'the day window is ordered');
+  const rows = db.all(TRIPS_AROUND_SQL, { date: day.date, from_s: seconds.fromS, to_s: seconds.toS });
+  const rowsByTrip = new Map<number, SqlRow[]>();
+  for (const row of rows) {
+    const tripIdx = int(row, 'trip_idx');
+    const tripRows = rowsByTrip.get(tripIdx);
+    if (tripRows === undefined) {
+      rowsByTrip.set(tripIdx, [row]);
+    } else {
+      tripRows.push(row);
+    }
+  }
+  const trips = [...rowsByTrip.values()].map(toScheduledTrip);
+  invariant(trips.reduce((n, trip) => n + trip.stops.length, 0) === rows.length, 'every row is one stop of one trip');
+  return trips;
+}
+
+/** One trip from its rows (one per stop, in stop order): the trip's fields, then each stop's times and distance. */
+function toScheduledTrip(rows: readonly SqlRow[]): ScheduledTrip {
+  const first = rows[0];
+  invariant(first !== undefined && rows.length >= 2, 'a trip has at least two stop rows');
+  invariant(rows.every((row, i) => int(row, 'seq') === i), `trip ${String(first.trip_id)} lists its stops 0, 1, 2…`);
+  const mode = MODES_BY_CODE.get(int(first, 'mode'));
+  invariant(mode !== undefined, `line.mode ${String(first.mode)} is rail (0) or mover (1)`);
+  return {
+    tripIdx: int(first, 'trip_idx'),
+    tripId: text(first, 'trip_id'),
+    blockId: text(first, 'block_id'),
+    lineId: text(first, 'line_id'),
+    mode,
+    directionId: int(first, 'direction_id'),
+    shapeIdx: int(first, 'shape_idx'),
+    stops: rows.map((row): TripStop => ({ arrS: int(row, 'arr_s'), depS: int(row, 'dep_s'), distM: real(row, 'dist_m') })),
+  };
+}
+
+/** Every shape's path (points and cumulative distances), by shape_idx. */
+export function readShapePaths(db: SqlExecutor): ReadonlyMap<number, ShapePath> {
+  const rows = db.all(SHAPE_POINTS_SQL);
+  invariant(rows.length >= 2, 'the schedule DB has shape points');
+  const paths = new Map<number, { points: LatLon[]; distM: number[] }>();
+  for (const row of rows) {
+    const shapeIdx = int(row, 'shape_idx');
+    let path = paths.get(shapeIdx);
+    if (path === undefined) {
+      path = { points: [], distM: [] };
+      paths.set(shapeIdx, path);
+    }
+    invariant(int(row, 'seq') === path.points.length, `shape ${shapeIdx} lists its points 0, 1, 2…`);
+    path.points.push({ latitude: real(row, 'lat'), longitude: real(row, 'lon') });
+    path.distM.push(real(row, 'dist_m'));
+  }
+  invariant([...paths.values()].every((p) => p.points.length >= 2 && p.distM[0] === 0), 'every shape has >= 2 points, measured from 0');
+  return paths;
+}
+
 function toStopVisit(row: SqlRow): StopVisit {
   invariant(typeof row === 'object' && row !== null, 'a stop-visit row is an object');
   const note = row.note ?? null;
@@ -208,6 +295,14 @@ function int(row: SqlRow, column: string): number {
   const value: SqlValue | undefined = row[column];
   invariant(column in row, `the row has column ${column}`);
   invariant(typeof value === 'number' && Number.isSafeInteger(value), `${column} is an integer, got ${String(value)}`);
+  return value;
+}
+
+/** A column that must hold a finite number (coordinates, metres). */
+function real(row: SqlRow, column: string): number {
+  const value: SqlValue | undefined = row[column];
+  invariant(column in row, `the row has column ${column}`);
+  invariant(typeof value === 'number' && Number.isFinite(value), `${column} is a finite number, got ${String(value)}`);
   return value;
 }
 

@@ -3,8 +3,10 @@ import {
   type ServiceCalendarBounds,
   type ServiceDayResolution,
   type TimeWindow,
+  windowFrom,
 } from '../domain/gtfs/service-day';
 import { assembleDepartures, type Departure } from '../domain/schedule/departures';
+import { MAX_LAYOVER_S, type ScheduledVehicle, scheduledVehicles, type ShapePath } from '../domain/schedule/positions';
 import { assembleRides, judgeRides, type RidesOutcome } from '../domain/schedule/rides';
 import { invariant } from '../lib/invariant';
 import { err, ok, type Result } from '../lib/result';
@@ -15,14 +17,16 @@ import {
   readMeta,
   readRideCandidates,
   readServiceDays,
+  readShapePaths,
   readStopVisits,
+  readTripsAround,
   type StationRef,
 } from './schedule-queries';
 import type { SqlExecutor } from './sql-executor';
 
 /**
- * The schedule engine's public face (plan M3.2–M3.4): service days, departures and rides, read
- * from the bundled schedule DB through the SqlExecutor contract.
+ * The schedule engine's public face (plan M3.2–M3.5): service days, departures, rides and scheduled
+ * vehicle positions, read from the bundled schedule DB through the SqlExecutor contract.
  *
  *   executor (expo-sqlite | node:sqlite) → schedule-queries (SQL) → domain (pure assembly)
  *
@@ -60,10 +64,16 @@ export type DeparturesOutcome =
 
 export type RidesQueryOutcome = RidesOutcome | CalendarGap;
 
+export type VehiclesOutcome =
+  | { readonly kind: 'vehicles'; readonly serviceDates: readonly number[]; readonly vehicles: readonly ScheduledVehicle[] }
+  | CalendarGap;
+
 export class ScheduleRepo {
   readonly meta: ScheduleMeta;
   private readonly db: SqlExecutor;
   private readonly bounds: ServiceCalendarBounds;
+  /** Every shape's path, read on the first positions call and kept (15 shapes, ~2,400 points). */
+  private shapes: ReadonlyMap<number, ShapePath> | null = null;
 
   private constructor(db: SqlExecutor, meta: ScheduleMeta, bounds: ServiceCalendarBounds) {
     invariant(meta.schemaVersion === SCHEDULE_SCHEMA_VERSION, 'the repo reads only the schema it was written for');
@@ -127,6 +137,33 @@ export class ScheduleRepo {
       candidates: readRideCandidates(this.db, stations.value, day, daySeconds(day, window)),
     }));
     return ok(judgeRides(assembleRides(window, candidates)));
+  }
+
+  /**
+   * Every scheduled vehicle at `epoch` — one per block per running service day — or why the calendar
+   * has none. The trips fetched run within MAX_LAYOVER_S of the instant, so a layover sees the trips
+   * either side of its gap.
+   */
+  vehiclesAt(epoch: number): VehiclesOutcome {
+    invariant(Number.isSafeInteger(epoch), `vehiclesAt needs a whole epoch second, got ${epoch}`);
+    const window = windowFrom(epoch - MAX_LAYOVER_S, 2 * MAX_LAYOVER_S);
+    const resolution = this.serviceDays(window);
+    if (resolution.kind !== 'active') {
+      return resolution;
+    }
+    const days = resolution.days.map((day) => ({ day, trips: readTripsAround(this.db, day, daySeconds(day, window)) }));
+    const vehicles = scheduledVehicles(epoch, days, this.shapePaths());
+    const serviceDates = resolution.days.map((day) => day.date);
+    invariant(vehicles.every((v) => serviceDates.includes(v.serviceDate)), 'every vehicle runs a block of a running service day');
+    return { kind: 'vehicles', serviceDates, vehicles };
+  }
+
+  private shapePaths(): ReadonlyMap<number, ShapePath> {
+    const shapes = this.shapes ?? readShapePaths(this.db);
+    this.shapes = shapes;
+    invariant(shapes.size > 0, 'the schedule DB has shapes');
+    invariant(this.shapes === shapes, 'the shapes are read once, then kept');
+    return shapes;
   }
 
   private stationPair(fromKey: string, toKey: string): Result<{ from: StationRef; to: StationRef }, UnknownStation> {

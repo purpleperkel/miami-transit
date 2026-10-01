@@ -1,8 +1,8 @@
 import { fetch } from 'expo/fetch';
-import { importDatabaseFromAssetAsync, openDatabaseAsync } from 'expo-sqlite';
+import { deleteDatabaseAsync, importDatabaseFromAssetAsync, openDatabaseAsync } from 'expo-sqlite';
 
-import probeDbAsset from '@/assets/db/probe.db';
-import probeManifest from '@/assets/db/probe-manifest.json';
+import scheduleManifest from '@/assets/db/manifest.json';
+import scheduleDbAsset from '@/assets/db/schedule.db';
 import {
   VEHICLE_POSITIONS_FIXTURE_BYTES,
   VEHICLE_POSITIONS_FIXTURE_DECODED,
@@ -16,15 +16,16 @@ import { type ProbeOutcome, settleProbe } from './probe-kit';
 
 /**
  * M1.16 data probes — the three data paths the app depends on, run on the phone (Hermes, Expo Go):
- *   probeSqliteAsset     the bundled node:sqlite DB imports and opens in expo-sqlite (risk R4)
+ *   probeSqliteAsset     the bundled schedule DB (written by node:sqlite) imports and opens in expo-sqlite (risk R4)
  *   probeProtobufDecode  our GTFS-realtime decoder runs on Hermes and reproduces the Mac's decode
  *   probeBinaryFetch     `expo/fetch` hands back binary bytes intact (risk R6)
  */
 
-/** The plan's acceptance count for the bundled probe DB (M1.14 / M1.16). */
-const EXPECTED_ROWS = 1000;
-/** The imported copy's file name in expo-sqlite's database directory. */
-const PROBE_DB_NAME = 'probe.db';
+/**
+ * The probe's own copy, in expo-sqlite's default directory — never the app's copy (the
+ * `schedule-<sha>.db` that src/data/schedule-db-provider.tsx keeps in its own directory).
+ */
+const DIAGNOSTIC_DB_NAME = 'diagnostics-schedule.db';
 const SQLITE_TIMEOUT_MS = 15_000;
 const DECODE_TIMEOUT_MS = 5_000;
 const FETCH_TIMEOUT_MS = 15_000;
@@ -38,55 +39,59 @@ const BINARY_PROBE_RANGE = 'bytes=0-1023';
 /** "PK\x03\x04", a zip's local-file-header signature: proves these are the zip's first bytes. */
 const ZIP_SIGNATURE: readonly number[] = [0x50, 0x4b, 0x03, 0x04];
 
-type ProbeTotals = { readonly rows: number; readonly epochSum: number };
+const COUNTS_SQL = 'SELECT (SELECT count(*) FROM trip) AS trips, (SELECT count(*) FROM stop_time) AS stopTimes';
+
+type ScheduleCounts = { readonly trips: number; readonly stopTimes: number };
 
 export function probeSqliteAsset(): Promise<ProbeOutcome> {
-  invariant(typeof probeDbAsset === 'number', 'the probe DB is bundled as a Metro asset (metro.config.js)');
-  invariant(probeManifest.rows === EXPECTED_ROWS, `the bundled manifest describes the ${EXPECTED_ROWS}-row probe DB`);
-  return settleProbe('SQLite asset', readBundledProbeDb, SQLITE_TIMEOUT_MS);
+  invariant(typeof scheduleDbAsset === 'number', 'the schedule DB is bundled as a Metro asset (metro.config.js)');
+  invariant(scheduleManifest.counts.trips > 0, 'the bundled manifest counts the schedule DB’s trips');
+  return settleProbe('SQLite asset', readBundledScheduleDb, SQLITE_TIMEOUT_MS);
 }
 
 /**
  * The import is exactly what SQLiteProvider's documented `assetSource` prop runs
  * (expo-sqlite 57 src/hooks.tsx, openDatabaseWithInitAsync), called directly so the probe can
- * report a Result. `forceOverwrite` makes every run read THIS bundle's DB, never a stale copy.
+ * report a Result. `forceOverwrite` makes every run read THIS bundle's DB, never a stale copy, and
+ * the copy is deleted afterwards so the probe leaves no 2 MB behind.
  */
-async function readBundledProbeDb(): Promise<ProbeOutcome> {
-  const table = probeManifest.table;
-  invariant(/^[a-z_]+$/.test(table), 'the manifest names a plain SQL table');
-  await importDatabaseFromAssetAsync(PROBE_DB_NAME, { assetId: probeDbAsset, forceOverwrite: true });
-  const db = await openDatabaseAsync(PROBE_DB_NAME, { useNewConnection: true });
+async function readBundledScheduleDb(): Promise<ProbeOutcome> {
+  invariant(!DIAGNOSTIC_DB_NAME.startsWith('schedule-'), 'the probe never names its copy like the app’s');
+  await importDatabaseFromAssetAsync(DIAGNOSTIC_DB_NAME, { assetId: scheduleDbAsset, forceOverwrite: true });
+  const db = await openDatabaseAsync(DIAGNOSTIC_DB_NAME, { useNewConnection: true });
   try {
-    const totals = await db.getFirstAsync<ProbeTotals>(`SELECT COUNT(*) AS rows, SUM(epoch) AS epochSum FROM ${table}`);
-    const sample = await db.getFirstAsync<{ label: string }>(
-      `SELECT label FROM ${table} WHERE id = ?`,
-      probeManifest.unicodeLabel.id,
-    );
-    const outcome = judgeProbeDb(totals, sample?.label ?? null);
+    const meta = await db.getAllAsync<{ key: string; value: string }>('SELECT key, value FROM meta');
+    const counts = await db.getFirstAsync<ScheduleCounts>(COUNTS_SQL);
+    const outcome = judgeScheduleDb(new Map(meta.map((row) => [row.key, row.value])), counts);
     invariant(outcome.ok || outcome.error.length > 0, 'a failed SQLite probe says why');
     return outcome;
   } finally {
     await db.closeAsync();
+    await deleteDatabaseAsync(DIAGNOSTIC_DB_NAME);
   }
 }
 
-/** The phone's reading of the DB must match what the Mac wrote (assets/db/probe-manifest.json). */
-export function judgeProbeDb(totals: ProbeTotals | null, unicodeLabel: string | null): ProbeOutcome {
-  invariant(probeManifest.rows === EXPECTED_ROWS, 'the manifest is the 1000-row probe manifest');
-  invariant(probeManifest.unicodeLabel.label.length > 0, 'the manifest carries a unicode sample label');
-  if (totals === null) {
-    return err(`SQLite asset: ${probeManifest.table} returned no totals row`);
+/** The phone's reading of the schedule DB must match what the Mac recorded (assets/db/manifest.json). */
+export function judgeScheduleDb(meta: ReadonlyMap<string, string>, counts: ScheduleCounts | null): ProbeOutcome {
+  const want = scheduleManifest;
+  invariant(/^[0-9a-f]{64}$/.test(want.feedSha256), 'the manifest records the feed hash');
+  invariant(want.counts.trips > 0 && want.counts.stopTimes > 0, 'the manifest counts trips and stop times');
+  const feed = meta.get('feed_sha256') ?? '';
+  if (feed !== want.feedSha256) {
+    return err(`SQLite asset: meta.feed_sha256 is ${JSON.stringify(feed)}, the manifest's is ${want.feedSha256.slice(0, 8)}…`);
   }
-  if (totals.rows !== EXPECTED_ROWS) {
-    return err(`SQLite asset: counted ${totals.rows} rows in ${probeManifest.table}, want ${EXPECTED_ROWS}`);
+  const [schema, builder] = [Number(meta.get('schema_version')), Number(meta.get('builder_version'))];
+  if (schema !== want.schemaVersion || builder !== want.builderVersion) {
+    return err(`SQLite asset: schema ${schema} / builder ${builder}, the manifest's are ${want.schemaVersion} / ${want.builderVersion}`);
   }
-  if (totals.epochSum !== probeManifest.epochSum) {
-    return err(`SQLite asset: epoch sum ${totals.epochSum} differs from the Mac's ${probeManifest.epochSum}`);
+  if (counts === null) {
+    return err('SQLite asset: counting trips and stop times returned no row');
   }
-  if (unicodeLabel !== probeManifest.unicodeLabel.label) {
-    return err(`SQLite asset: row ${probeManifest.unicodeLabel.id} reads ${JSON.stringify(unicodeLabel)}`);
+  if (counts.trips !== want.counts.trips || counts.stopTimes !== want.counts.stopTimes) {
+    const wanted = `${want.counts.trips} and ${want.counts.stopTimes}`;
+    return err(`SQLite asset: counted ${counts.trips} trips and ${counts.stopTimes} stop times, want ${wanted}`);
   }
-  return ok(`${totals.rows} rows in ${probeManifest.table}; epoch sum and "${unicodeLabel}" match the Mac`);
+  return ok(`${counts.trips} trips, ${counts.stopTimes} stop times; feed ${feed.slice(0, 8)}, schema ${schema}, builder ${builder} match the manifest`);
 }
 
 export function probeProtobufDecode(): Promise<ProbeOutcome> {

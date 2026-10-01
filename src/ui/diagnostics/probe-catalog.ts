@@ -25,7 +25,7 @@ export const PROBES: readonly ProbeSpec[] = [
   {
     id: 'sqlite',
     title: 'SQLite asset',
-    expectation: 'The bundled node:sqlite DB opens in expo-sqlite with 1000 rows',
+    expectation: 'The bundled schedule DB opens in expo-sqlite; its feed, schema and counts match the manifest',
     run: probeSqliteAsset,
     leavesApp: false,
   },

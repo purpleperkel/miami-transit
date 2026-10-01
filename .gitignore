@@ -41,3 +41,12 @@ example
 # generated native folders
 /ios
 /android
+
+# secrets — keys live in the iOS Keychain on device and in .env on the Mac (probe scripts only)
+.env
+.env.*
+!.env.example
+
+# local build output and phone evidence screenshots
+.cache/
+evidence/

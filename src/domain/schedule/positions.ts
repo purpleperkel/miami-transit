@@ -125,20 +125,56 @@ export function scheduledVehicles(
   shapes: ReadonlyMap<number, ShapePath>,
 ): ScheduledVehicle[] {
   invariant(Number.isSafeInteger(epoch), `an instant is a whole epoch second, got ${epoch}`);
-  invariant(days.every((d, i) => i === 0 || at(days, i - 1).day.date < d.day.date), 'service days come in date order, each once');
   const vehicles: ScheduledVehicle[] = [];
-  for (const { day, trips } of days) {
-    const s = epoch - day.baseEpoch;
-    for (const [groupKey, blockTrips] of groupByVehicle(trips)) {
-      const placed = blockPlacementAt(blockTrips, s);
-      if (placed !== null) {
-        vehicles.push(toVehicle(`${day.date}:${groupKey}`, day.date, placed, shapes));
-      }
+  for (const block of vehicleBlocks(days)) {
+    const vehicle = placeVehicle(block, epoch, shapes);
+    if (vehicle !== null) {
+      vehicles.push(vehicle);
     }
   }
-  vehicles.sort((a, b) => (a.vehicleKey < b.vehicleKey ? -1 : a.vehicleKey > b.vehicleKey ? 1 : 0));
   invariant(vehicles.every((v, i) => i === 0 || at(vehicles, i - 1).vehicleKey < v.vehicleKey), 'one vehicle per key');
   return vehicles;
+}
+
+/**
+ * One vehicle of one service day: its key (`date:block_id`), the day it belongs to, and its block's
+ * trips in start order. The map (M5.10) reads the blocks once and places them at every frame tick
+ * with placeVehicle — no query per frame.
+ */
+export type VehicleBlock = {
+  readonly vehicleKey: string;
+  readonly serviceDate: number;
+  readonly baseEpoch: number;
+  readonly mode: Mode;
+  readonly trips: readonly ScheduledTrip[];
+};
+
+/** Every vehicle of the fetched service days, sorted by key; a block-less trip is a vehicle of its own. */
+export function vehicleBlocks(days: readonly ServiceDayTrips[]): VehicleBlock[] {
+  invariant(days.every((d, i) => i === 0 || at(days, i - 1).day.date < d.day.date), 'service days come in date order, each once');
+  const blocks: VehicleBlock[] = [];
+  for (const { day, trips } of days) {
+    for (const [groupKey, blockTrips] of groupByVehicle(trips)) {
+      const mode = at(blockTrips, 0).mode;
+      invariant(blockTrips.every((trip) => trip.mode === mode), `block ${groupKey} runs one mode`);
+      blocks.push({ vehicleKey: `${day.date}:${groupKey}`, serviceDate: day.date, baseEpoch: day.baseEpoch, mode, trips: blockTrips });
+    }
+  }
+  blocks.sort((a, b) => (a.vehicleKey < b.vehicleKey ? -1 : a.vehicleKey > b.vehicleKey ? 1 : 0));
+  invariant(blocks.every((b, i) => i === 0 || at(blocks, i - 1).vehicleKey < b.vehicleKey), 'one block per vehicle key');
+  return blocks;
+}
+
+/**
+ * The block's vehicle at `epoch` — any finite instant, a fraction of a second included, so a map
+ * frame between whole seconds moves it smoothly — or null when it is not out (before its first
+ * trip, after its last, or in a gap longer than MAX_LAYOVER_S).
+ */
+export function placeVehicle(block: VehicleBlock, epoch: number, shapes: ReadonlyMap<number, ShapePath>): ScheduledVehicle | null {
+  invariant(Number.isFinite(epoch), `an instant is a finite epoch, got ${epoch}`);
+  invariant(block.trips.length > 0 && block.vehicleKey.startsWith(`${block.serviceDate}:`), 'a block has trips and is keyed by its day');
+  const placed = blockPlacementAt(block.trips, epoch - block.baseEpoch);
+  return placed === null ? null : toVehicle(block.vehicleKey, block.serviceDate, placed, shapes);
 }
 
 export type BlockPlacement = { readonly trip: ScheduledTrip; readonly distM: number; readonly state: VehicleState };

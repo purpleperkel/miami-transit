@@ -6,7 +6,7 @@ import {
   windowFrom,
 } from '../domain/gtfs/service-day';
 import { assembleDepartures, type Departure } from '../domain/schedule/departures';
-import { MAX_LAYOVER_S, type ScheduledVehicle, scheduledVehicles, type ShapePath } from '../domain/schedule/positions';
+import { MAX_LAYOVER_S, type ScheduledVehicle, scheduledVehicles, type ServiceDayTrips, type ShapePath } from '../domain/schedule/positions';
 import { assembleRides, judgeRides, type RidesOutcome } from '../domain/schedule/rides';
 import { invariant } from '../lib/invariant';
 import { err, ok, type Result } from '../lib/result';
@@ -69,6 +69,18 @@ export type RidesQueryOutcome = RidesOutcome | CalendarGap;
 
 export type VehiclesOutcome =
   | { readonly kind: 'vehicles'; readonly serviceDates: readonly number[]; readonly vehicles: readonly ScheduledVehicle[] }
+  | CalendarGap;
+
+/** The trips and shapes behind every vehicle of a span (timetableAround), or why the calendar has none. */
+export type TimetableOutcome =
+  | {
+      readonly kind: 'timetable';
+      readonly fromEpoch: number;
+      readonly toEpoch: number;
+      /** Each running service day with its trips around the span, in date order. */
+      readonly days: readonly ServiceDayTrips[];
+      readonly shapes: ReadonlyMap<number, ShapePath>;
+    }
   | CalendarGap;
 
 export class ScheduleRepo {
@@ -153,16 +165,32 @@ export class ScheduleRepo {
    */
   vehiclesAt(epoch: number): VehiclesOutcome {
     invariant(Number.isSafeInteger(epoch), `vehiclesAt needs a whole epoch second, got ${epoch}`);
-    const window = windowFrom(epoch - MAX_LAYOVER_S, 2 * MAX_LAYOVER_S);
+    const timetable = this.timetableAround(epoch, epoch);
+    if (timetable.kind !== 'timetable') {
+      return timetable;
+    }
+    const vehicles = scheduledVehicles(epoch, timetable.days, timetable.shapes);
+    const serviceDates = timetable.days.map(({ day }) => day.date);
+    invariant(vehicles.every((v) => serviceDates.includes(v.serviceDate)), 'every vehicle runs a block of a running service day');
+    return { kind: 'vehicles', serviceDates, vehicles };
+  }
+
+  /**
+   * The timetable behind the vehicles of a whole span (the map's frames, M5.10): every running
+   * service day's trips that run within MAX_LAYOVER_S of [fromEpoch, toEpoch], and every shape. With
+   * it, scheduledVehicles / placeVehicle place the vehicles at ANY instant of the span exactly as
+   * vehiclesAt would — read once per span, so no query runs per frame.
+   */
+  timetableAround(fromEpoch: number, toEpoch: number): TimetableOutcome {
+    invariant(Number.isSafeInteger(fromEpoch) && Number.isSafeInteger(toEpoch), 'a timetable span runs between whole epoch seconds');
+    invariant(fromEpoch <= toEpoch, 'a timetable span is ordered');
+    const window = windowFrom(fromEpoch - MAX_LAYOVER_S, toEpoch - fromEpoch + 2 * MAX_LAYOVER_S);
     const resolution = this.serviceDays(window);
     if (resolution.kind !== 'active') {
       return resolution;
     }
     const days = resolution.days.map((day) => ({ day, trips: readTripsAround(this.db, day, daySeconds(day, window)) }));
-    const vehicles = scheduledVehicles(epoch, days, this.shapePaths());
-    const serviceDates = resolution.days.map((day) => day.date);
-    invariant(vehicles.every((v) => serviceDates.includes(v.serviceDate)), 'every vehicle runs a block of a running service day');
-    return { kind: 'vehicles', serviceDates, vehicles };
+    return { kind: 'timetable', fromEpoch, toEpoch, days, shapes: this.shapePaths() };
   }
 
   /** What the live mappers need from the schedule (trip → line, stop → station, line tracks), plus each station's stops. */

@@ -90,3 +90,14 @@ describe('the root stack (M1.19, M5.5)', () => {
     }
   });
 });
+
+describe('the Layers sheet (M5.12)', () => {
+  it('the layers route opens as a formSheet titled Layers', () => {
+    const routes = appRoutes();
+    expect(pushedRoutes(routes)).toContain('layers');
+    const options = optionsOf(rootStack().screens, 'layers');
+    expect([options.presentation, options.title, options.headerShown]).toEqual(['formSheet', 'Layers', true]);
+    expect(options.sheetAllowedDetents).toEqual([0.5, 1]);
+    expect(isRealLabel(options.title, routeNames(routes))).toBe(true);
+  });
+});

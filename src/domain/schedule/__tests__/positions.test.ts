@@ -4,12 +4,14 @@ import type { ServiceDay } from '../../gtfs/service-day';
 import {
   blockPlacementAt,
   MAX_LAYOVER_S,
+  placeVehicle,
   pointAlongShape,
   type ScheduledTrip,
   scheduledVehicles,
   type ShapePath,
   type TripStop,
   tripProgressAt,
+  vehicleBlocks,
 } from '../positions';
 import { buildShapeGeometry } from '../shape-geometry';
 
@@ -237,5 +239,23 @@ describe('scheduled positions (M3.5, pure): contracts', () => {
     ]);
     expect(() => vehiclesAtWed(30_300, [lost])).toThrow(InvariantError);
     expect(() => vehiclesAtWed(30_300, [lost])).toThrow(/shape 5/);
+  });
+});
+
+describe('scheduled positions (M5.10): vehicle blocks placed between whole seconds', () => {
+  it('a block placed at a fraction of a second sits between its whole-second places, on the same key', () => {
+    const run = trip(1, 'B1', 0, [
+      [30_000, 30_000, 0],
+      [30_600, 30_600, LENGTH_M],
+    ]);
+    const [block, ...others] = vehicleBlocks([{ day: WED, trips: [run] }]);
+    expect(others).toHaveLength(0);
+    expect(block).toMatchObject({ vehicleKey: '20260930:B1', serviceDate: WED.date, baseEpoch: WED.baseEpoch, mode: 'mover' });
+    const [whole, quarter, half, next] = [30_300, 30_300.25, 30_300.5, 30_301].map((s) => placeVehicle(block!, WED.baseEpoch + s, SHAPES)?.distM ?? NaN);
+    expect(quarter).toBeGreaterThan(whole!);
+    expect(quarter).toBeLessThan(next!);
+    expect(half).toBeCloseTo((whole! + next!) / 2, 9);
+    expect(placeVehicle(block!, WED.baseEpoch + 30_300, SHAPES)).toEqual(vehiclesAtWed(30_300, [run])[0]);
+    expect(placeVehicle(block!, WED.baseEpoch + 29_000.5, SHAPES)).toBeNull();
   });
 });

@@ -16,6 +16,16 @@ const DATA_TITLE = 'Data & Settings';
 const DATA_OPTIONS = { headerShown: true, title: DATA_TITLE, headerBackButtonDisplayMode: 'minimal' } as const;
 // Diagnostics is reached from Data & Settings (one tap further), so its back button names it.
 const DIAGNOSTICS_OPTIONS = { headerShown: true, title: 'Diagnostics', headerBackTitle: DATA_TITLE } as const;
+// Layers (M5.12) is a native formSheet over the map (§4 Sheets): half height, pulled up to full, with a
+// grabber; the map under it stays bright at half height, so each switch is seen to change it.
+const LAYERS_OPTIONS = {
+  headerShown: true,
+  title: 'Layers',
+  presentation: 'formSheet',
+  sheetAllowedDetents: [0.5, 1] as number[],
+  sheetGrabberVisible: true,
+  sheetLargestUndimmedDetentIndex: 0,
+} as const;
 
 /**
  * The root: the bundled schedule DB (M3.8) is opened once, here, for every screen, and the live
@@ -30,6 +40,7 @@ export default function RootLayout() {
           <Stack.Screen name="(tabs)" />
           <Stack.Screen name="data" options={DATA_OPTIONS} />
           <Stack.Screen name="diagnostics" options={DIAGNOSTICS_OPTIONS} />
+          <Stack.Screen name="layers" options={LAYERS_OPTIONS} />
         </Stack>
       </LiveDataProvider>
     </ScheduleDbProvider>

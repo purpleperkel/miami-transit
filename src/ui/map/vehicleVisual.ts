@@ -1,3 +1,5 @@
+import { providerConfig } from '../../domain/live/constants';
+import type { LiveLineId, ProviderId } from '../../domain/live/types';
 import type { Mode } from '../../domain/network/stations';
 import { invariant } from '../../lib/invariant';
 import { COLOR_SCHEMES, type ColorScheme, lineColors, MAP_LAND } from '../colors';
@@ -71,5 +73,105 @@ export function stationVisual(input: StationVisualInput): StationVisual {
     hitPt: MIN_HIT_AREA_PT,
   };
   invariant(visual.diameterPt > 2 * visual.ringPt && visual.diameterPt <= visual.hitPt, 'the dot shows its fill and fits its hit area');
+  return visual;
+}
+
+/** The eight directions a vehicle's nose can point: 0 north, 1 north-east, 2 east … 7 north-west. */
+export const OCTANTS = [0, 1, 2, 3, 4, 5, 6, 7] as const;
+export type Octant = (typeof OCTANTS)[number];
+
+/**
+ * The compass octant nearest a bearing (degrees clockwise from north, any real number): ROUNDED to
+ * the nearest 45°, so 359° points north (0), not north-west — flooring would give 7.
+ */
+export function bearingOctant(bearing: number): Octant {
+  invariant(Number.isFinite(bearing), `a bearing is a finite number of degrees, got ${bearing}`);
+  const degrees = ((bearing % 360) + 360) % 360;
+  const octant = (Math.round(degrees / 45) % 8) as Octant;
+  invariant(OCTANTS.includes(octant), `${bearing}° gives octant ${octant}`);
+  return octant;
+}
+
+/** A live fix is STALE when it is older than its provider's fresh threshold (§3: Swiftly 75 s, Transitland 150 s). */
+export function isStale(provider: ProviderId, ageS: number): boolean {
+  invariant(Number.isFinite(ageS) && ageS >= 0, `a fix's age is a non-negative number of seconds, got ${ageS}`);
+  const { freshS } = providerConfig(provider);
+  invariant(freshS > 0, `${provider} has a fresh threshold`);
+  return ageS > freshS;
+}
+
+/** Rail vehicles are 24 pt rounded squares carrying a letter; Mover vehicles are 16 pt dots (plan §4 "Vehicles"). */
+export const RAIL_VEHICLE_PT = 24;
+export const MOVER_VEHICLE_PT = 16;
+/** A stale vehicle is drawn at half opacity, with a clock badge (§4). */
+export const STALE_OPACITY = 0.5;
+const RAIL_CORNER_PT = 6;
+const SOLID_RING_PT = 1.5;
+const HOLLOW_RING_PT = 2.5;
+
+/** The letter bullet of a rail line: G, O, or M for a train on the shared trunk whose line is unknown. */
+const RAIL_LETTER: Readonly<Partial<Record<LiveLineId, string>>> = { GREEN: 'G', ORANGE: 'O', RAIL_TRUNK: 'M' };
+
+export type VehicleVisualInput = {
+  readonly vehicleKey: string;
+  readonly mode: Mode;
+  readonly lineId: LiveLineId;
+  /** live = drawn at a live fix (solid); scheduled = a timetable position (hollow). */
+  readonly source: 'live' | 'scheduled';
+  /** The live fix's provider and age; null for a scheduled vehicle. */
+  readonly live: { readonly provider: ProviderId; readonly ageS: number } | null;
+  readonly bearing: number | null;
+  readonly scheme: ColorScheme;
+};
+
+export type VehicleVisual = {
+  readonly key: string;
+  readonly sizePt: number;
+  readonly cornerPt: number;
+  readonly fill: string;
+  readonly ring: string;
+  readonly ringPt: number;
+  /** The letter bullet (rail only) and its colour. */
+  readonly letter: string | null;
+  readonly letterColor: string;
+  readonly hollow: boolean;
+  readonly stale: boolean;
+  readonly opacity: number;
+  /** Where the heading nose points, or null when the bearing is unknown. */
+  readonly octant: Octant | null;
+  readonly hitPt: number;
+};
+
+/**
+ * How a vehicle marker looks (plan §4 "Vehicles", M5.9). LIVE is SOLID: filled with the line's
+ * stroke, ringed in its casing, the letter in its badge text. SCHEDULED is HOLLOW: land-filled,
+ * ringed and lettered in the line's ink (the casing on light land, the stroke on dark land, whichever
+ * carries the contrast). A STALE live vehicle is drawn at half opacity with a clock badge.
+ */
+export function vehicleVisual(input: VehicleVisualInput): VehicleVisual {
+  invariant((input.source === 'live') === (input.live !== null), 'a live vehicle carries its fix age, and only a live one does');
+  const colors = lineColors(input.lineId, input.scheme);
+  const hollow = input.source === 'scheduled';
+  const ink = input.scheme === 'light' ? colors.casing : colors.stroke;
+  const stale = input.live !== null && isStale(input.live.provider, input.live.ageS);
+  const octant = input.bearing === null ? null : bearingOctant(input.bearing);
+  const rail = input.mode === 'rail';
+  const visual: VehicleVisual = {
+    key: visualKey(`vehicle:${input.vehicleKey}`, { line: input.lineId, source: input.source, stale, heading: octant ?? 'none', scheme: input.scheme }),
+    sizePt: rail ? RAIL_VEHICLE_PT : MOVER_VEHICLE_PT,
+    cornerPt: rail ? RAIL_CORNER_PT : MOVER_VEHICLE_PT / 2,
+    fill: hollow ? MAP_LAND[input.scheme] : colors.stroke,
+    ring: hollow ? ink : colors.casing,
+    ringPt: hollow ? HOLLOW_RING_PT : SOLID_RING_PT,
+    letter: rail ? (RAIL_LETTER[input.lineId] ?? null) : null,
+    letterColor: hollow ? ink : colors.badgeText,
+    hollow,
+    stale,
+    opacity: stale ? STALE_OPACITY : 1,
+    octant,
+    hitPt: MIN_HIT_AREA_PT,
+  };
+  invariant(!rail || visual.letter !== null, `a train on ${input.lineId} carries a letter bullet`);
+  invariant(visual.sizePt < visual.hitPt && visual.fill !== visual.ring, 'the marker fits its hit area and its ring shows');
   return visual;
 }

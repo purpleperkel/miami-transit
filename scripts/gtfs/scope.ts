@@ -1,3 +1,4 @@
+import type { Mode } from '../../src/domain/network/stations';
 import { invariant } from '../../src/lib/invariant';
 
 /**
@@ -14,7 +15,8 @@ export const MOVER_OMNI_BRICKELL_ROUTE_ID = '14456';
 /** MIA airport mover — in the feed, deliberately out of scope. */
 export const EXCLUDED_AIRPORT_MOVER_ROUTE_ID = '14458';
 
-export type Mode = 'rail' | 'mover';
+/** One mode type for the pipeline and the domain (defined with the stations, which never mix modes). */
+export type { Mode };
 
 const ROUTE_MODES: ReadonlyMap<string, Mode> = new Map<string, Mode>([
   [RAIL_ROUTE_ID, 'rail'],

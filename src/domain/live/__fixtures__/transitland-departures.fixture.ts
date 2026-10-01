@@ -1,14 +1,17 @@
 /**
- * Transitland departures responses (M4.3b), hand-shaped and sanitized — no key, synthetic trip ids —
- * after the live probe of 2026-10-01 (`GET /api/v2/rest/stops/f-dhw-miamidadetransit:<stop_id>/departures?next=3600`).
+ * SYNTHETIC Transitland departures responses: hand-written mapper edge cases (M4.3b), NOT a capture
+ * and not generated. Synthetic trip ids ("fixture-…") and synthetic times, around stop ids and
+ * names from the public static GTFS. The generated whole-response fixtures beside it
+ * (synthetic-departures.ts, synthetic-vehicle-positions.ts) come from
+ * scripts/fixtures/make-live-fixtures.ts. Why synthetic: the public-repo data rule (plan §3): no real
+ * Transitland or Swiftly realtime content is ever committed; real captures stay in the gitignored
+ * capture directory and are compared by structure only.
  *
- * Field names CONFIRMED by that probe (arbiter note R-d): trip.schedule_relationship ('SCHEDULED'),
- * trip.trip_headsign ('ORANGE LINE AIRPORT STATION'), trip.route.route_short_name ('2600'), and
- * departure.scheduled_local / estimated_local / estimated_utc for stop 9513 (Orange due 08:28,
- * estimated 08:35:29).
- * ASSUMED from Transitland's REST v2 schema, to be confirmed by the captured fixture (plan M8.3):
- * the `stops[].departures[]` envelope, stops[].stop_id, trip.trip_id, trip.route.route_id, the
- * 'STATIC' and 'CANCELED' relationship values, and null for a missing estimate.
+ * CONFIRMED by the m8a probe's live captures (2026-10-01, structure only): the `stops[].departures[]`
+ * envelope, stops[].stop_id and stop_name, trip.trip_id, trip.trip_headsign, trip.route.route_id and
+ * route_short_name, departure.scheduled_local / estimated_local / estimated_utc, the
+ * trip.schedule_relationship values 'SCHEDULED' and 'STATIC', and null estimates on a STATIC row.
+ * Still ASSUMED from Transitland's REST v2 schema: the 'CANCELED' value (no live row has carried it yet).
  */
 
 /** Government Center rail, northbound platform (stop 9513), Wednesday 2026-10-01 from 08:20 EDT. */
@@ -30,8 +33,8 @@ export const DEPARTURES_9513 = {
           },
           departure: {
             scheduled_local: '2026-10-01T08:28:00-04:00',
-            estimated_local: '2026-10-01T08:35:29-04:00',
-            estimated_utc: '2026-10-01T12:35:29Z',
+            estimated_local: '2026-10-01T08:31:47-04:00',
+            estimated_utc: '2026-10-01T12:31:47Z',
           },
         },
         {
@@ -46,8 +49,8 @@ export const DEPARTURES_9513 = {
           },
           departure: {
             scheduled_local: '2026-10-01T08:34:00-04:00',
-            estimated_local: '2026-10-01T08:36:10-04:00',
-            estimated_utc: '2026-10-01T12:36:10Z',
+            estimated_local: '2026-10-01T08:35:02-04:00',
+            estimated_utc: '2026-10-01T12:35:02Z',
           },
         },
         {

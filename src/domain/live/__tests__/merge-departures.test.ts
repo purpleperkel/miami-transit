@@ -51,10 +51,10 @@ const B_0834 = departure('trip-b', 8, 34, 'GREEN');
 
 describe('departures merge (M4.7): §4 rule 6, overrides', () => {
   it('rule 6: same-trip override — a realtime prediction replaces the scheduled time and can reorder the board', () => {
-    const late = prediction('trip-a', { epoch: A_0828.epoch + 449 });
+    const late = prediction('trip-a', { epoch: A_0828.epoch + 437 });
     const merged = mergeDepartures([A_0828, B_0834], [late], BOARD);
-    expect(board(merged.rows)).toEqual(['trip-b 12:34:00 sched', 'trip-a 12:35:29 live']);
-    expect(merged.rows[1]).toMatchObject({ scheduledEpoch: A_0828.epoch, delayS: 449, destName: 'Airport', departure: A_0828, prediction: late });
+    expect(board(merged.rows)).toEqual(['trip-b 12:34:00 sched', 'trip-a 12:35:17 live']);
+    expect(merged.rows[1]).toMatchObject({ scheduledEpoch: A_0828.epoch, delayS: 437, destName: 'Airport', departure: A_0828, prediction: late });
     expect(merged.unused).toBe(0);
   });
 
@@ -104,8 +104,8 @@ describe('departures merge (M4.7): §4 rule 6, cancellations and unmatched predi
     const timetable = [departure('fixture-rail-0828', 8, 28), departure('fixture-rail-0834', 8, 34, 'GREEN'), departure('fixture-rail-0846', 8, 46), departure('fixture-rail-0858', 8, 58, 'GREEN'), departure('fixture-rail-0920', 9, 20)];
     const merged = mergeDepartures(timetable, live.ok ? live.value.items : [], BOARD);
     expect(board(merged.rows)).toEqual([
-      'fixture-rail-0828 12:35:29 live',
-      'fixture-rail-0834 12:36:10 live',
+      'fixture-rail-0828 12:31:47 live',
+      'fixture-rail-0834 12:35:02 live',
       'fixture-rail-0846 12:46:00 sched',
       'fixture-rail-0858 12:58:00 sched',
       'fixture-rail-0920 13:20:00 live STRUCK',

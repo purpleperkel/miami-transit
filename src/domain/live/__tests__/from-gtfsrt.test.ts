@@ -2,11 +2,14 @@ import {
   LIVE_TRIP_UPDATES_FIXTURE_DECODED,
   LIVE_VEHICLES_FIXTURE_DECODED,
 } from '../../gtfsrt/__fixtures__/live-feeds.fixture';
+import { decodeFeedMessage } from '../../gtfsrt/decode-feed';
 import type { FeedEntity, FeedMessage } from '../../gtfsrt/types';
+import type { LineId } from '../../lines/line-catalog';
+import { SYNTHETIC_VEHICLE_POSITIONS_BYTES, SYNTHETIC_VEHICLE_TRIP_LINES } from '../__fixtures__/synthetic-vehicle-positions';
 import { predictionsFromFeed, vehiclesFromFeed } from '../from-gtfsrt';
 import { distanceToTrackM, resolveLine } from '../line-from-position';
-import type { LiveVehicle } from '../types';
-import { TEST_TRACKS, testNetwork } from './test-network';
+import type { LiveNetwork, LiveVehicle } from '../types';
+import { TEST_TRACKS, TRIP_LINES, testNetwork } from './test-network';
 
 /**
  * M4.2: GTFS-realtime → LiveVehicle / LivePrediction, on the generated live-feeds fixture
@@ -173,5 +176,48 @@ describe('from-gtfsrt (M4.2): trip updates', () => {
   it('maps fixture trip updates: a vehicle feed has no predictions and a trip-update feed has no vehicles', () => {
     expect(predictionsFromFeed(LIVE_VEHICLES_FIXTURE_DECODED, testNetwork())).toEqual({ items: [], feedTimestamp: FEED_TIMESTAMP, dropped: {} });
     expect(vehiclesFromFeed(LIVE_TRIP_UPDATES_FIXTURE_DECODED, testNetwork())).toEqual({ items: [], feedTimestamp: FEED_TIMESTAMP, dropped: {} });
+  });
+});
+
+/** The generated whole-agency feed (scripts/fixtures/make-live-fixtures.ts: synthetic, from the public GTFS), read by our decoder. */
+function syntheticFeed(): FeedMessage {
+  const decoded = decodeFeedMessage(SYNTHETIC_VEHICLE_POSITIONS_BYTES);
+  expect(decoded.ok).toBe(true);
+  if (!decoded.ok) {
+    throw new Error(decoded.error.message);
+  }
+  expect(decoded.value.entity.length).toBeGreaterThanOrEqual(50);
+  return decoded.value;
+}
+
+/** The test network, also knowing the line of each real schedule.db trip the synthetic feed's vehicles run. */
+function syntheticNetwork(): LiveNetwork {
+  const trips = new Map<string, LineId>([...TRIP_LINES, ...SYNTHETIC_VEHICLE_TRIP_LINES]);
+  expect(trips.size).toBe(TRIP_LINES.size + SYNTHETIC_VEHICLE_TRIP_LINES.length);
+  expect(SYNTHETIC_VEHICLE_TRIP_LINES.length).toBeGreaterThan(0);
+  return testNetwork(trips);
+}
+
+describe('from-gtfsrt (M8.3): the generated whole-agency feed', () => {
+  it('synthetic capture maps rail and Mover vehicles: each on its real trip, its line from that trip, id and label kept', () => {
+    const feed = syntheticFeed();
+    const lines = new Map(SYNTHETIC_VEHICLE_TRIP_LINES);
+    const inScope = feed.entity.filter((entity) => IN_SCOPE.includes(entity.vehicle?.trip?.routeId ?? ''));
+    const mapped = vehiclesFromFeed(feed, syntheticNetwork());
+    expect(mapped.items.map((v) => v.vehicleId).sort()).toEqual(inScope.map((entity) => entity.vehicle?.vehicle?.id).sort());
+    expect(new Set(mapped.items.map((v) => `${v.routeId} ${v.mode}`))).toEqual(new Set(['31009 rail', '14456 mover', '14457 mover']));
+    expect(mapped.items.filter((v) => v.tripId === null || v.lineId !== lines.get(v.tripId) || v.lineSource === 'position')).toEqual([]);
+    expect(mapped.items.every((v) => v.label === v.vehicleId && v.vehicleId.startsWith('syn-') && v.timestamp <= (feed.header.timestamp ?? 0))).toBe(true);
+    expect([...new Set(mapped.items.map((v) => v.stopStatus))].sort()).toEqual(expect.arrayContaining(['in-transit', 'stopped']));
+  });
+
+  it('synthetic capture drops out-of-scope routes: every bus and every vehicle on no trip is counted, none kept', () => {
+    const feed = syntheticFeed();
+    const outside = feed.entity.filter((entity) => !IN_SCOPE.includes(entity.vehicle?.trip?.routeId ?? ''));
+    const mapped = vehiclesFromFeed(feed, syntheticNetwork());
+    expect(outside.some((entity) => entity.vehicle?.trip === null)).toBe(true);
+    expect(outside.some((entity) => entity.vehicle?.trip !== null)).toBe(true);
+    expect(mapped.dropped).toEqual({ 'out-of-scope': outside.length });
+    expect(mapped.items.length + outside.length).toBe(feed.entity.length);
   });
 });

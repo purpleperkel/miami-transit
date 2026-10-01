@@ -30,7 +30,7 @@ export function DiagnosticsScreen() {
   return (
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.content}>
       <Text style={styles.intro}>
-        Plan M1.19: run every probe on the phone. For the notification, background the app right after running it.
+        Plan M1.19: run every probe on the phone. For the notification, keep this screen open until it reports (about 5 s).
       </Text>
       <Pressable
         accessibilityRole="button"

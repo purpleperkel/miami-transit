@@ -46,7 +46,7 @@ export const PROBES: readonly ProbeSpec[] = [
   {
     id: 'notification',
     title: 'Local notification',
-    expectation: 'Arrives 5 s later, also with the app in the background',
+    expectation: 'Arrives about 5 s later and the probe sees it (keep Diagnostics open)',
     run: probeNotification,
     leavesApp: false,
   },

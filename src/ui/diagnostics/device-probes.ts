@@ -12,7 +12,7 @@ import { type ProbeOutcome, settleProbe } from './probe-kit';
 
 /**
  * M1.17 device-API probes, run on the phone inside Expo Go:
- *   probeNotification  a local notification 5 s out (Jamie backgrounds the app and watches for it)
+ *   probeNotification  a local notification 5 s out that the probe sees arrive (keep Diagnostics open)
  *   probeGeocode       Apple's geocoder puts Government Center within 1 km of the real station
  *   probeLocation      a foreground location fix
  *   probeLiquidGlass   Liquid Glass is available for the tab bar and floating chrome
@@ -26,19 +26,32 @@ const GOVERNMENT_CENTER: LatLon = { latitude: 25.776044, longitude: -80.19603 };
 const GEOCODE_QUERY = 'Government Center, Miami, FL';
 const GEOCODE_TOLERANCE_M = 1000;
 const NOTIFICATION_DELAY_S = 5;
+/** How long after scheduling the probe waits for its own notification: the 5 s delay plus slack. */
+const NOTIFICATION_WAIT_S = 15;
+/** Where iOS turns notifications on or off for Expo Go, which hosts this app on the phone. */
+const EXPO_GO_NOTIFICATION_SETTINGS = 'Settings > Notifications > Expo Go';
+const NOTIFICATION_TIMEOUT_ERROR =
+  `notification: nothing arrived within ${NOTIFICATION_WAIT_S} s. Keep Diagnostics open while it runs, ` +
+  `and check that ${EXPO_GO_NOTIFICATION_SETTINGS} allows notifications`;
 const MAPS_URL = `maps://?q=Government%20Center&ll=${GOVERNMENT_CENTER.latitude},${GOVERNMENT_CENTER.longitude}`;
+/** The maps:// probe's failure prefix names the exact URL, so a FAIL says what iOS could not open. */
+const MAPS_FAILURE_LABEL = `maps:// link: could not open ${MAPS_URL}`;
 /** Steps that may show a system permission prompt wait for a human; the rest answer quickly. */
 const PROMPT_TIMEOUT_MS = 60_000;
 const NETWORK_TIMEOUT_MS = 20_000;
 const QUICK_TIMEOUT_MS = 5_000;
 
+/**
+ * Passes only when the probe's own notification is seen to arrive. iOS reports an arrival to the app only
+ * while it is in the foreground, so Diagnostics stays open for the few seconds the probe runs.
+ */
 export function probeNotification(): Promise<ProbeOutcome> {
-  invariant(Number.isInteger(NOTIFICATION_DELAY_S) && NOTIFICATION_DELAY_S === 5, 'the probe notification is due 5 s out');
-  invariant(NOTIFICATION_DELAY_S * 1000 < PROMPT_TIMEOUT_MS, 'scheduling finishes well before the step deadline');
-  return settleProbe('notification', scheduleProbeNotification, PROMPT_TIMEOUT_MS);
+  invariant(NOTIFICATION_DELAY_S === 5 && NOTIFICATION_WAIT_S === 15, 'due 5 s out, awaited for up to 15 s');
+  invariant(NOTIFICATION_WAIT_S * 1000 < PROMPT_TIMEOUT_MS, 'the arrival wait fits inside the step deadline');
+  return settleProbe('notification', notifyAndAwaitArrival, PROMPT_TIMEOUT_MS);
 }
 
-async function scheduleProbeNotification(): Promise<ProbeOutcome> {
+async function notifyAndAwaitArrival(): Promise<ProbeOutcome> {
   const permission = await Notifications.requestPermissionsAsync();
   invariant(typeof permission.granted === 'boolean', 'a permission answer says granted or not');
   if (!permission.granted) {
@@ -49,12 +62,62 @@ async function scheduleProbeNotification(): Promise<ProbeOutcome> {
     handleNotification: () =>
       Promise.resolve({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false }),
   });
-  const id = await Notifications.scheduleNotificationAsync({
-    content: { title: 'Miami Transit probe', body: `Scheduled ${NOTIFICATION_DELAY_S} s earlier: local notifications work.` },
-    trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: NOTIFICATION_DELAY_S },
+  const outcome = await scheduleAndAwaitArrival();
+  invariant(outcome.ok || outcome.error.startsWith('notification:'), 'a notification failure names its probe');
+  return outcome;
+}
+
+/** Identifiers the received-listener has reported since the probe subscribed, and the wait to wake on each. */
+type Arrivals = { readonly seen: Set<string>; wake: (() => void) | null };
+
+/**
+ * Subscribes to received notifications BEFORE scheduling, so even a delivery that beats the schedule call's
+ * answer is recorded, then waits up to 15 s for the identifier scheduleNotificationAsync returned. Other
+ * notifications are ignored. The subscription is removed on every path: arrival, timeout, failed schedule.
+ */
+async function scheduleAndAwaitArrival(): Promise<ProbeOutcome> {
+  const arrivals: Arrivals = { seen: new Set(), wake: null };
+  const subscription = Notifications.addNotificationReceivedListener((notification) => {
+    arrivals.seen.add(notification.request.identifier);
+    arrivals.wake?.();
   });
-  invariant(id.length > 0, 'a scheduled notification has an identifier');
-  return ok(`due in ${NOTIFICATION_DELAY_S} s; background the app now and watch for it`);
+  invariant(typeof subscription.remove === 'function', 'the received-listener subscription can be removed');
+  try {
+    const scheduledAt = Date.now();
+    const id = await Notifications.scheduleNotificationAsync({
+      content: { title: 'Miami Transit probe', body: `Scheduled ${NOTIFICATION_DELAY_S} s earlier: local notifications work.` },
+      trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: NOTIFICATION_DELAY_S },
+    });
+    invariant(id.length > 0, 'a scheduled notification has an identifier');
+    const arrived = await awaitArrival(arrivals, id);
+    return arrived ? ok(`received after ${secondsSince(scheduledAt)} s`) : err(NOTIFICATION_TIMEOUT_ERROR);
+  } finally {
+    subscription.remove();
+  }
+}
+
+/** True as soon as `id` is among the arrivals (already, or when the listener next fires); false after 15 s. */
+async function awaitArrival(arrivals: Arrivals, id: string): Promise<boolean> {
+  invariant(id.length > 0, 'the probe waits for its own identifier');
+  invariant(arrivals.wake === null, 'one wait at a time');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), NOTIFICATION_WAIT_S * 1000);
+      arrivals.wake = () => (arrivals.seen.has(id) ? resolve(true) : undefined);
+      arrivals.wake();
+    });
+  } finally {
+    clearTimeout(timer);
+    arrivals.wake = null;
+  }
+}
+
+function secondsSince(startMs: number): number {
+  invariant(Number.isFinite(startMs), 'the start is a real timestamp');
+  const seconds = Math.max(0, Math.round((Date.now() - startMs) / 1000));
+  invariant(Number.isInteger(seconds) && seconds >= 0, 'elapsed time is whole, non-negative seconds');
+  return seconds;
 }
 
 export function probeGeocode(): Promise<ProbeOutcome> {
@@ -142,12 +205,14 @@ export function probeHaptics(): Promise<ProbeOutcome> {
 export function probeMapsLink(): Promise<ProbeOutcome> {
   invariant(MAPS_URL.startsWith('maps://'), 'the probe opens the Apple Maps URL scheme');
   invariant(!MAPS_URL.includes(' '), 'the maps URL is percent-encoded');
-  // openURL resolves true once iOS opened the link, and rejects (settleProbe → err) when nothing can.
+  // React Native's Linking.openURL is Promise<void> (Libraries/Linking/Linking.js:47): the promise resolving
+  // means iOS opened the link, a rejection means it could not (settleProbe turns that into err). The resolved
+  // value is no contract and is never read; reading it scored a link that did open as FAIL on the phone (M1.19).
   return settleProbe(
-    'maps:// link',
+    MAPS_FAILURE_LABEL,
     async () => {
-      const opened = await Linking.openURL(MAPS_URL);
-      return opened ? ok('Apple Maps opened at Government Center') : err('maps:// link: iOS did not open it');
+      await Linking.openURL(MAPS_URL);
+      return ok('Apple Maps opened at Government Center');
     },
     PROMPT_TIMEOUT_MS,
   );

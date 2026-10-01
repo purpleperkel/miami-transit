@@ -1,7 +1,14 @@
 import { deriveLine } from '../../src/domain/lines/derive-line';
 import { catalogStationKeys, LINE_CATALOG, type LineDef, type LineId, type LineVariant } from '../../src/domain/lines/line-catalog';
 import { buildStations, type Mode, type Station, type StationIndex, type StopInput } from '../../src/domain/network/stations';
-import { buildShapeGeometry, projectStops, type ShapeGeometry } from '../../src/domain/schedule/shape-geometry';
+import {
+  buildShapeGeometry,
+  extendShape,
+  overhangOf,
+  projectStops,
+  type Overhang,
+  type ShapeGeometry,
+} from '../../src/domain/schedule/shape-geometry';
 import type { LatLon } from '../../src/lib/geo';
 import { invariant } from '../../src/lib/invariant';
 import { err, ok, type Result } from '../../src/lib/result';
@@ -15,7 +22,11 @@ import { buildTransfers, type Transfer } from './transfers';
  * DB stores — stations, stop patterns with their derived line and stop distances, trips with their
  * destination, note and block link, and transfers. Every contradiction is an Err (a build error):
  * a stop served by two modes, a renamed sentinel station, a pattern touching both branches, a stop
- * > 100 m off its shape, an overlapping block.
+ * > 100 m off its shape (or a terminal platform > 150 m past its end), an overlapping block.
+ *
+ * Shapes are stored as DRAWN (the M2.11 ruling): each is lengthened along its terminal rays to the
+ * farthest overhanging terminal platform of the patterns that run on it, and every pattern's stop
+ * distances are measured on that lengthened shape.
  *
  * Output order is fixed (patterns by key, trips by route/service/start/trip_id), so the same feed
  * always gives the same indices — the DB build is byte-for-byte reproducible.
@@ -32,7 +43,7 @@ export type NetworkPattern = {
   readonly variant: LineVariant;
   readonly stopIds: readonly string[];
   readonly stationKeys: readonly string[];
-  /** Metres along the shape for each stop, non-decreasing. */
+  /** Metres along the (drawn) shape for each stop, non-decreasing, within [0, its lengthM]. */
   readonly distancesM: readonly number[];
 };
 
@@ -95,11 +106,12 @@ export function buildNetwork(feed: LoadedFeed): Result<NetworkModel, NetworkErro
   if (!trips.ok) {
     return trips;
   }
+  const drawn = extendShapes(shapes.value, patterns.value.patterns);
   const model: NetworkModel = {
     ...stations.value,
     lines: LINE_CATALOG,
-    shapes: [...shapes.value].map(([shapeId, geometry]) => ({ shapeId, geometry })),
-    patterns: patterns.value.patterns,
+    shapes: [...drawn.shapes].map(([shapeId, geometry]) => ({ shapeId, geometry })),
+    patterns: drawn.patterns,
     trips: trips.value,
     transfers: buildTransfers(stations.value.stations),
   };
@@ -257,6 +269,37 @@ function buildPattern(idx: number, draft: PatternDraft | undefined, context: Pat
   }
   const { line: lineId, variant } = line.value;
   return ok({ idx, ...draft, lineId, variant, stationKeys, distancesM: distancesM.value });
+}
+
+type DrawnShapes = { readonly shapes: ReadonlyMap<string, ShapeGeometry>; readonly patterns: readonly NetworkPattern[] };
+
+/**
+ * The M2.11 ruling, step 3: lengthen each shape along its terminal rays to the farthest overhanging
+ * terminal platform among ALL the patterns on it (shapes are shared, so the extension is decided
+ * once per shape), then shift every pattern's stop distances onto the lengthened shape.
+ */
+function extendShapes(shapes: ReadonlyMap<string, ShapeGeometry>, patterns: readonly NetworkPattern[]): DrawnShapes {
+  invariant(patterns.every((pattern) => shapes.has(pattern.shapeId)), 'every pattern runs on a built shape');
+  const overhangs = new Map<string, Overhang>();
+  for (const pattern of patterns) {
+    const shape = shapes.get(pattern.shapeId);
+    invariant(shape !== undefined, `shape ${pattern.shapeId} was built`);
+    const own = overhangOf(shape, pattern.distancesM);
+    const most = overhangs.get(pattern.shapeId) ?? own;
+    overhangs.set(pattern.shapeId, { startM: Math.max(most.startM, own.startM), endM: Math.max(most.endM, own.endM) });
+  }
+  const drawn = new Map([...shapes].map(([shapeId, shape]) => [shapeId, extendShape(shape, overhangs.get(shapeId) ?? { startM: 0, endM: 0 })]));
+  const shifted = patterns.map((pattern) => onDrawnShape(pattern, drawn.get(pattern.shapeId), overhangs.get(pattern.shapeId)?.startM ?? 0));
+  return { shapes: drawn, patterns: shifted };
+}
+
+/** A pattern's stop distances moved onto its drawn shape: + the start extension, inside [0, lengthM]. */
+function onDrawnShape(pattern: NetworkPattern, shape: ShapeGeometry | undefined, startM: number): NetworkPattern {
+  invariant(shape !== undefined && startM >= 0, `pattern ${pattern.idx} has a drawn shape`);
+  const distancesM = pattern.distancesM.map((d) => d + startM);
+  // A last stop that set the end extension lands on the new end point, up to float rounding.
+  invariant(distancesM.every((d) => d >= -1e-6 && d <= shape.lengthM + 1e-6), `pattern ${pattern.idx}: every stop lies on its drawn shape`);
+  return { ...pattern, distancesM: distancesM.map((d) => Math.min(shape.lengthM, Math.max(0, d))) };
 }
 
 type TripDraft = Omit<NetworkTrip, 'idx' | 'nextTripIdx'>;

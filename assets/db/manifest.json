@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "builderVersion": 1,
+  "feedUrl": "https://www.miamidade.gov/transit/googletransit/current/google_transit.zip",
+  "feedSha256": "785460181e910e47af9172ccb9da0b10aa61ba9d55539fd6b69d0ad181758ef5",
+  "feedEtag": "\"80443ab02821dd1:0\"",
+  "feedLastModified": "Fri, 31 Jul 2026 20:10:53 GMT",
+  "dbSha256": "51cee88920e7dfb8f52b9b5ed73866b0d08489e76bd9f809954aa35771139574",
+  "dbBytes": 2088960,
+  "sqliteVersion": "3.53.4",
+  "serviceStartDate": 20231113,
+  "serviceEnd": {
+    "rail": {
+      "date": 20261122,
+      "epoch": 1795410000
+    },
+    "mover": {
+      "date": 20261231,
+      "epoch": 1798779600
+    }
+  },
+  "counts": {
+    "stations": 44,
+    "patterns": 15,
+    "trips": 5137,
+    "stopTimes": 45937
+  }
+}

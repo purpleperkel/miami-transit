@@ -1,6 +1,15 @@
-import type { LatLon } from '../../../lib/geo';
+import { haversineMeters, type LatLon } from '../../../lib/geo';
 import { isOk, type Result } from '../../../lib/result';
-import { buildShapeGeometry, MAX_STOP_OFFSET_M, projectStops, type ShapeError, type ShapeGeometry } from '../shape-geometry';
+import {
+  buildShapeGeometry,
+  extendShape,
+  MAX_STOP_OFFSET_M,
+  MAX_TERMINAL_OVERHANG_M,
+  overhangOf,
+  projectStops,
+  type ShapeError,
+  type ShapeGeometry,
+} from '../shape-geometry';
 
 /** The IUGG mean radius geo.ts uses: on a sphere, a meridian arc is exactly R × Δφ. */
 const EARTH_RADIUS_M = 6_371_008.8;
@@ -108,5 +117,69 @@ describe('stop projection', () => {
     expect(error).toMatchObject({ reason: 'offset', index: 1 });
     expect(error.message).toMatch(/stop 1 is 150\.\d m from the shape \(max 100 m\)/);
     expect(okValue(projectStops(geometry, [at(0, 0), at(500, 99), at(1000, 0)])).map((d) => Math.round(d))).toEqual([0, 500, 1000]);
+  });
+});
+
+/** Each value rounded to the metre, for comparing projected distances. */
+function metres(values: readonly number[]): number[] {
+  expect(values.every(Number.isFinite)).toBe(true);
+  const rounded = values.map((d) => Math.round(d));
+  expect(rounded).toHaveLength(values.length);
+  return rounded;
+}
+
+describe('terminal stops (M2.11 ruling: the county shapes stop short of the end platforms)', () => {
+  it('terminal stop 103 m past the shape end on the track is accepted and the shape is extended to it', () => {
+    const geometry = shape([at(0, 0), at(500, 0), at(1000, 0)]);
+    const stops = [at(0, 3), at(500, -4), at(1103, 4.5)];
+    const distances = okValue(projectStops(geometry, stops));
+    expect(metres(distances)).toEqual([0, 500, 1103]);
+    const overhang = overhangOf(geometry, distances);
+    expect(overhang.startM).toBe(0);
+    expect(Math.abs(overhang.endM - 103)).toBeLessThan(0.5);
+    const extended = extendShape(geometry, overhang);
+    expect(extended.points).toHaveLength(4);
+    expect(extended.extendedM).toBe(overhang.endM);
+    expect(extended.lengthM).toBeCloseTo(geometry.lengthM + overhang.endM, 9);
+    expect(haversineMeters(extended.points[3] ?? ORIGIN, at(1103, 0))).toBeLessThan(0.5);
+    // On the extended shape the platform is ON the line: same distances, nothing left overhanging.
+    const again = okValue(projectStops(extended, stops));
+    expect(Math.max(...again.map((d, i) => Math.abs(d - (distances[i] ?? NaN))))).toBeLessThan(0.01);
+    expect(overhangOf(extended, again)).toEqual({ startM: 0, endM: 0 });
+    expect(extendShape(geometry, { startM: 0, endM: 0 })).toBe(geometry);
+  });
+
+  it('first stop 103 m before the shape start is accepted and the shape is extended back to it', () => {
+    const geometry = shape([at(0, 0), at(1000, 0)]);
+    const distances = okValue(projectStops(geometry, [at(-103, 5), at(400, 0), at(1000, 2)]));
+    expect(metres(distances)).toEqual([-103, 400, 1000]);
+    const overhang = overhangOf(geometry, distances);
+    expect(Math.abs(overhang.startM - 103)).toBeLessThan(0.5);
+    expect(overhang.endM).toBe(0);
+    const extended = extendShape(geometry, overhang);
+    expect(metres(extended.cumulativeM)).toEqual([0, 103, 1103]);
+    expect(metres(distances.map((d) => d + overhang.startM))).toEqual([0, 503, 1103]);
+    expect(haversineMeters(extended.points[0] ?? ORIGIN, at(-103, 0))).toBeLessThan(0.5);
+    expect(extended.extendedM).toBe(overhang.startM);
+  });
+
+  it(`terminal overhang > ${MAX_TERMINAL_OVERHANG_M} m -> Err naming the stop; 149 m is still accepted`, () => {
+    const geometry = shape([at(0, 0), at(1000, 0)]);
+    const error = errValue(projectStops(geometry, [at(0, 0), at(500, 0), at(1160, 2)]));
+    expect(error).toMatchObject({ reason: 'overhang', index: 2 });
+    expect(error.message).toMatch(/stop 2 is 160\.\d m past the shape end along the track \(max 150 m\)/);
+    const before = errValue(projectStops(geometry, [at(-151, 0), at(500, 0)]));
+    expect(before).toMatchObject({ reason: 'overhang', index: 0 });
+    expect(before.message).toMatch(/stop 0 is 151\.\d m past the shape start/);
+    expect(metres(okValue(projectStops(geometry, [at(0, 0), at(1149, 0)])))).toEqual([0, 1149]);
+  });
+
+  it(`terminal lateral > ${MAX_STOP_OFFSET_M} m -> Err naming the stop, even within the overhang limit`, () => {
+    const geometry = shape([at(0, 0), at(1000, 0)]);
+    const error = errValue(projectStops(geometry, [at(0, 0), at(500, 0), at(1050, 120)]));
+    expect(error).toMatchObject({ reason: 'offset', index: 2 });
+    expect(error.message).toMatch(/stop 2 is 120\.\d m from the shape \(max 100 m\)/);
+    expect(errValue(projectStops(geometry, [at(-50, 130), at(500, 0)]))).toMatchObject({ reason: 'offset', index: 0 });
+    expect(metres(okValue(projectStops(geometry, [at(0, 0), at(1050, 99)])))).toEqual([0, 1050]);
   });
 });

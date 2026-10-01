@@ -106,6 +106,41 @@ describe('buildNetwork: stations and patterns on the mini feed', () => {
   });
 });
 
+/** The point `metres` from `from` toward `to` (linear in degrees: exact enough over a few hundred metres). */
+function towards(from: readonly [number, number], to: readonly [number, number], metres: number): [number, number] {
+  const total = haversineMeters({ latitude: from[0], longitude: from[1] }, { latitude: to[0], longitude: to[1] });
+  assert.ok(metres > 0 && metres < total, 'the point lies between the two');
+  const f = metres / total;
+  const point: [number, number] = [from[0] + f * (to[0] - from[0]), from[1] + f * (to[1] - from[1])];
+  assert.ok(point.every(Number.isFinite));
+  return point;
+}
+
+describe('buildNetwork: shapes drawn to the terminal platforms (M2.11 ruling)', () => {
+  test('a shape that starts 103 m short of Palmetto is extended back to the platform; stop distances start at 0', () => {
+    // Shape 211239 (Green, Palmetto → Dadeland South) is traced through the platforms; start it 103 m
+    // down the track toward Okeechobee instead, as the county's real shape does.
+    const [palmetto, okeechobee] = [[25.843348, -80.323791], [25.839812, -80.301544]] as const;
+    const [lat, lon] = towards(palmetto, okeechobee, 103);
+    const model = expectOk(network(withLines('shapes.txt', ['211239,25.843348,-80.323791,1,', `211239,${lat.toFixed(7)},${lon.toFixed(7)},1,`])));
+    const shape = model.shapes.find((candidate) => candidate.shapeId === '211239')?.geometry;
+    assert.ok(shape !== undefined);
+    assert.ok(Math.abs(shape.extendedM - 103) < 0.5, `extended ${shape.extendedM} m`);
+    assert.ok(haversineMeters(shape.points[0] ?? { latitude: 0, longitude: 0 }, { latitude: palmetto[0], longitude: palmetto[1] }) < 1, 'the drawn line reaches the platform');
+    const green = model.patterns.find((pattern) => pattern.shapeId === '211239');
+    assert.equal(green?.distancesM[0], 0);
+    assert.ok((green?.distancesM.at(-1) ?? Infinity) <= shape.lengthM);
+    assert.equal(model.shapes.find((candidate) => candidate.shapeId === '211246')?.geometry.extendedM, 0, 'other shapes are untouched');
+  });
+
+  test('a shape that starts more than 150 m short of its first platform is a build error naming the stop and shape', () => {
+    const [lat, lon] = towards([25.843348, -80.323791], [25.839812, -80.301544], 160);
+    const error = expectErr(network(withLines('shapes.txt', ['211239,25.843348,-80.323791,1,', `211239,${lat.toFixed(7)},${lon.toFixed(7)},1,`])));
+    assert.equal(error.step, 'shapes');
+    assert.match(error.message, /shape 211239: stop 0 is 16\d\.\d m past the shape start along the track \(max 150 m\) \(stop_id 9486\)/);
+  });
+});
+
 describe('buildNetwork: block links (next_trip_idx)', () => {
   test('Inner Loop halves get next_trip_idx: A → B at Government Center, B → A again at Bayfront Park', () => {
     const [first, second, third] = F.innerLoopHalfTrips.map(trip);

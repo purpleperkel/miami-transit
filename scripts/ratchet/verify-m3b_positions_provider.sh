@@ -92,8 +92,9 @@ probe_retired() {
   need_file src/data/schedule-db-provider.tsx || return 1
   [ ! -e assets/db/probe.db ] || { echo "ratchet: assets/db/probe.db still exists — M3.8 removes the probe DB"; return 1; }
   [ ! -e scripts/probe ] || { echo "ratchet: scripts/probe/ still exists — M3.8 removes the probe generator"; return 1; }
+  [ ! -e assets/db/probe-manifest.json ] || { echo "ratchet: assets/db/probe-manifest.json still exists — M3.8 retires it with the probe DB (m1c added it as the accessory's data version)"; return 1; }
   if [ -f metro.config.js ]; then targets+=(metro.config.js); fi
-  hits=$(grep -rlE --exclude-dir=ratchet 'probe\.db|make-probe-db|scripts/probe/' "${targets[@]}") || rc=$?
+  hits=$(grep -rlE --exclude-dir=ratchet 'probe\.db|probe-manifest|make-probe-db|scripts/probe/' "${targets[@]}") || rc=$?
   [ "$rc" -eq 1 ] && return 0
   [ "$rc" -eq 0 ] && { echo "ratchet: the probe DB is still referenced in: $hits"; return 1; }
   echo "ratchet: grep failed (rc=$rc) while scanning for probe DB references"; return 1

@@ -27,13 +27,34 @@
     "react-native-worklets": "0.10.1"
   },
   "devDependencies": {
+    "@types/jest": "29.5.14",
+    "@types/node": "26.6.3",
     "@types/react": "~19.2.2",
+    "eslint": "^9.39.5",
+    "eslint-config-expo": "~57.0.2",
+    "jest": "~29.7.0",
+    "jest-expo": "~57.0.5",
+    "tsx": "4.23.15",
     "typescript": "~6.0.3"
   },
   "scripts": {
     "start": "expo start",
     "ios": "expo start --ios",
-    "lint": "expo lint"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p scripts/tsconfig.json",
+    "lint": "eslint . --max-warnings 0",
+    "standards": "tsx scripts/check/standards.ts",
+    "test": "jest --ci",
+    "test:scripts": "node --import tsx --test \"scripts/**/__tests__/*.test.ts\"",
+    "verify": "npm run typecheck && npm run lint && npm run standards && npm run test && npm run test:scripts"
   },
-  "private": true
+  "private": true,
+  "jest": {
+    "preset": "jest-expo/ios",
+    "roots": [
+      "<rootDir>/src"
+    ],
+    "testMatch": [
+      "<rootDir>/src/**/__tests__/**/*.test.[jt]s?(x)"
+    ]
+  }
 }

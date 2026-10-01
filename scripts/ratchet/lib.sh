@@ -9,22 +9,34 @@ set -euo pipefail
 export PATH="/opt/homebrew/bin:$PATH"   # hooks/drivers do not source the zsh profile
 export CI=1
 
-# jest on a path that must contain >=1 test; optional -t name filter. Fails if no test ran.
+# Test titles must be static: a test that reads process.argv/execArgv can rename itself after
+# whatever filter a gate passes, and so satisfy any pin. Fail any such test file.
+_no_argv_in_tests() {
+  local hits
+  hits=$(grep -rlE 'process\.(argv|execArgv)' --include='*.test.ts' --include='*.test.tsx' "$@" 2>/dev/null || true)
+  [ -z "$hits" ] || { echo "ratchet: test file(s) read process.argv/execArgv (titles must be static): $hits"; return 1; }
+}
+
+# jest on a path that must contain >=1 test. With a name, the run is UNFILTERED (--json) and the
+# name is matched here as a case-insensitive JS regex on each test's full name, so a test title can
+# never adapt to a -t argument and filtered-out tests are never mistaken for skips.
 jest_nonempty() {
-  local path="$1" name="${2:-}" out
+  local path="$1" name="${2:-}" out json
   [ -e "$path" ] || { echo "ratchet: missing $path — the milestone's tests do not exist yet"; return 1; }
-  if [ -n "$name" ]; then
-    out=$(local_bin jest --ci "$path" -t "$name" 2>&1) || { echo "$out" | tail -30; return 1; }
-  else
-    out=$(local_bin jest --ci "$path" 2>&1) || { echo "$out" | tail -30; return 1; }
-  fi
-  echo "$out" | grep -qE "Tests: +([0-9]+ skipped, )?[1-9][0-9]* passed" \
-    || { echo "$out" | tail -15; echo "ratchet: no jest tests passed under '$path' ${name:+(-t '$name')}"; return 1; }
-  # With -t, jest reports every test the NAME FILTER excluded as "skipped" — that is not a real
-  # skip. Real it.skip/xit/.only are forbidden repo-wide by scripts/check/standards.ts (skipped-test).
-  if [ -z "$name" ] && echo "$out" | grep -qE "Tests:.*[1-9][0-9]* skipped"; then
-    echo "ratchet: skipped tests under '$path' — skipped tests are forbidden"; return 1
-  fi
+  _no_argv_in_tests "$path" || return 1
+  json=$(mktemp -t ratchet-jest.XXXXXX)
+  out=$(local_bin jest --ci --json --outputFile="$json" "$path" 2>&1) || { echo "$out" | tail -30; rm -f "$json"; return 1; }
+  JEST_JSON="$json" PIN="$name" node -e '
+    const r = JSON.parse(require("fs").readFileSync(process.env.JEST_JSON, "utf8"));
+    const all = r.testResults.flatMap((f) => f.assertionResults);
+    const bad = all.filter((a) => a.status !== "passed");
+    if (bad.length) { console.log("ratchet: non-passing tests (" + bad.map((a) => a.status + ": " + a.fullName).slice(0, 5).join("; ") + ") — failing/skipped/todo tests are forbidden"); process.exit(1); }
+    const pin = process.env.PIN;
+    const hit = pin ? all.filter((a) => new RegExp(pin, "i").test(a.fullName)) : all;
+    if (!hit.length) { console.log("ratchet: no jest tests passed under " + (pin ? "/" + pin + "/i (unfiltered run, full names)" : "the path")); process.exit(1); }
+    console.log("ratchet: " + hit.length + " passing jest test(s)" + (pin ? " named /" + pin + "/i" : ""));
+  ' || { rm -f "$json"; return 1; }
+  rm -f "$json"
 }
 
 # --- node:test helpers -------------------------------------------------------------------
@@ -33,11 +45,10 @@ jest_nonempty() {
 # only real passing leaves (YAML `type: 'test'`, not suites, not SKIP/TODO, not the file wrapper)
 # and match names against the FULL path "suite > … > leaf", case-insensitively.
 
-_nodetest_run() {   # _nodetest_run <file> [name-pattern] -> TAP on stdout; .ts files load tsx
-  local file="$1" pat="${2:-}"
+_nodetest_run() {   # _nodetest_run <file> -> TAP on stdout (always UNFILTERED); .ts files load tsx
+  local file="$1"
   local args=(--test --test-reporter=tap)
   case "$file" in *.ts|*.tsx) args=(--import tsx "${args[@]}") ;; esac
-  [ -n "$pat" ] && args+=("--test-name-pattern=/$pat/i")
   node "${args[@]}" "$file" 2>&1
 }
 
@@ -77,6 +88,7 @@ _nodetest_clean() { # stdin: TAP. fails unless 0 fail, 0 skipped, 0 todo, 0 canc
 nodetest_nonempty() {
   local file="$1" out n
   [ -f "$file" ] || { echo "ratchet: missing $file — the milestone's tests do not exist yet"; return 1; }
+  _no_argv_in_tests "$file" || return 1
   out=$(_nodetest_run "$file") || { echo "$out" | tail -30; echo "ratchet: node:test red in $file"; return 1; }
   echo "$out" | _nodetest_clean || return 1
   n=$(echo "$out" | _nodetest_count "" "$file")
@@ -87,7 +99,8 @@ nodetest_nonempty() {
 nodetest_case() {
   local file="$1" pat="$2" min="${3:-1}" out n lc
   [ -f "$file" ] || { echo "ratchet: missing $file — the milestone's tests do not exist yet"; return 1; }
-  out=$(_nodetest_run "$file" "$pat") || { echo "$out" | tail -30; echo "ratchet: tests matching /$pat/i are red in $file"; return 1; }
+  _no_argv_in_tests "$file" || return 1
+  out=$(_nodetest_run "$file") || { echo "$out" | tail -30; echo "ratchet: node:test red in $file (unfiltered run)"; return 1; }
   echo "$out" | _nodetest_clean || return 1
   lc=$(printf '%s' "$pat" | tr '[:upper:]' '[:lower:]')
   n=$(echo "$out" | _nodetest_count "$lc" "$file")
@@ -116,6 +129,7 @@ need_file() {
 
 # The repo-wide gate (exists once m1a_guardrails lands).
 full_gate() {
+  _no_argv_in_tests src scripts || return 1
   npm run verify || { echo "ratchet: npm run verify is red"; return 1; }
 }
 

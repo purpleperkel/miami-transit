@@ -23,6 +23,8 @@ SDK 57; never trust memory for Expo APIs).
   Anonymous callbacks ≤ 5 lines are exempt; longer ones need 2 assertions (in test files
   `expect(...)`, `assert(...)`, `assert.x(...)` count). `describe`/`suite` callbacks are containers —
   each test inside is checked on its own. `invariant` itself is the one exemption.
+  NOTE: the 60-line limit (eslint + standards) DOES apply to `describe` callbacks — split a long suite into
+  several describe blocks (found by the mfix builder, 2026-10-01).
 - No recursion (bounded loops only). No silent catch — return `err(...)` or rethrow.
 - Check every return value / promise (no floating promises). Zero warnings
   (`eslint --max-warnings 0`, `tsc` strict).

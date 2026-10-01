@@ -129,16 +129,26 @@ console.log(`ratchet: ${mocks} jest.mock call(s) under ${dir}: all packages, all
 NODE
 }
 
-# Metro bundles the app for iOS (lib.sh ios_export, which empties .cache/export first) and the
-# shipped Hermes bundle carries the literal — proof the component is reachable from a route.
+# Metro bundles the app for iOS (lib.sh ios_export: the plan's Hermes export) AND the app's iOS JS
+# carries the text — proof the component is reachable from a route. The text is NOT grepped in the
+# Hermes .hbc: its string table packs strings back to back, so the bytes can appear across unrelated
+# strings (m5b found "No trips yet" that way on its unbuilt tree, 2026-10-01; the arbiter found
+# "Scheduled" and "position" each already present here at 18:01). So the same app is also exported
+# with --no-bytecode, where string literals stay whole and comments are stripped. The text may sit
+# inside a longer label or template literal, so it is matched as plain text, not as a whole quoted
+# literal (arbiter hardening before the m5c build, 2026-10-01).
 ios_bundle_carries() {
-  local text="$1" rc=0
+  local text="$1" dir=.cache/export-m5c-js out rc=0
   ios_export || return 1
   [ -d .cache/export/_expo/static/js/ios ] || { echo "ratchet: the export wrote no .cache/export/_expo/static/js/ios bundle"; return 1; }
-  grep -rqaF -- "$text" .cache/export/_expo/static/js/ios || rc=$?
+  rm -rf "$dir" || { echo "ratchet: cannot clear $dir"; return 1; }
+  out=$(npx expo export --platform ios --no-bytecode --output-dir "$dir" 2>&1) \
+    || { echo "$out" | tail -30; echo "ratchet: the --no-bytecode iOS export failed"; return 1; }
+  [ -d "$dir/_expo/static/js/ios" ] || { echo "$out" | tail -10; echo "ratchet: the --no-bytecode export wrote no $dir/_expo/static/js/ios bundle"; return 1; }
+  grep -rqF -- "$text" "$dir/_expo/static/js/ios" || rc=$?
   [ "$rc" -eq 0 ] && return 0
-  [ "$rc" -eq 1 ] && { echo "ratchet: the iOS bundle does not contain \"$text\" — VehicleMarker is not reachable from the Map route (dead code) or lost its label"; return 1; }
-  echo "ratchet: grep failed (rc=$rc) while scanning the iOS bundle"; return 1
+  [ "$rc" -eq 1 ] && { echo "ratchet: the iOS JS bundle does not contain \"$text\" — VehicleMarker is not reachable from the Map route (dead code) or lost its label"; return 1; }
+  echo "ratchet: grep failed (rc=$rc) while scanning $dir"; return 1
 }
 
 # card_full_gate — the repo-wide gate, run only WITH this card's modules in the tree: every M5.9–M5.12

@@ -3,6 +3,9 @@
 # Every helper fails LOUD with a named reason; a silent pass-with-nothing-run is the exact
 # false green these scripts exist to prevent.
 set -euo pipefail
+# AUTHORING RULE: never write a top-level gate as `cmd && gate`. Under set -e, a failure on the
+# LEFT of && does not stop the script, so the gate is silently skipped (false green). Put each
+# gate on its own line, or end a chain with `|| { echo "ratchet: <why>"; return 1; }`.
 export PATH="/opt/homebrew/bin:$PATH"   # hooks/drivers do not source the zsh profile
 export CI=1
 

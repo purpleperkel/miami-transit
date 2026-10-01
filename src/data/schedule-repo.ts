@@ -10,6 +10,7 @@ import { MAX_LAYOVER_S, type ScheduledVehicle, scheduledVehicles, type ShapePath
 import { assembleRides, judgeRides, type RidesOutcome } from '../domain/schedule/rides';
 import { invariant } from '../lib/invariant';
 import { err, ok, type Result } from '../lib/result';
+import { readRuntimeNetwork, type RuntimeNetwork } from './live-network';
 import {
   daySeconds,
   findStation,
@@ -74,6 +75,8 @@ export class ScheduleRepo {
   private readonly bounds: ServiceCalendarBounds;
   /** Every shape's path, read on the first positions call and kept (15 shapes, ~2,400 points). */
   private shapes: ReadonlyMap<number, ShapePath> | null = null;
+  /** The live runtime's trip / stop / track lookups (M4.9), read on first use and kept. */
+  private network: RuntimeNetwork | null = null;
 
   private constructor(db: SqlExecutor, meta: ScheduleMeta, bounds: ServiceCalendarBounds) {
     invariant(meta.schemaVersion === SCHEDULE_SCHEMA_VERSION, 'the repo reads only the schema it was written for');
@@ -156,6 +159,15 @@ export class ScheduleRepo {
     const serviceDates = resolution.days.map((day) => day.date);
     invariant(vehicles.every((v) => serviceDates.includes(v.serviceDate)), 'every vehicle runs a block of a running service day');
     return { kind: 'vehicles', serviceDates, vehicles };
+  }
+
+  /** What the live mappers need from the schedule (trip → line, stop → station, line tracks), plus each station's stops. */
+  liveNetwork(): RuntimeNetwork {
+    const network = this.network ?? readRuntimeNetwork(this.db);
+    this.network = network;
+    invariant(network.tracks.length > 0, 'the schedule DB has line tracks');
+    invariant(this.network === network, 'the network is read once, then kept');
+    return network;
   }
 
   private shapePaths(): ReadonlyMap<number, ShapePath> {

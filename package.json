@@ -56,7 +56,8 @@
     "test": "jest --ci",
     "test:scripts": "node --import tsx --test \"scripts/**/__tests__/*.test.ts\"",
     "gtfs:build": "tsx scripts/gtfs/build.ts",
-    "verify": "npm run typecheck && npm run lint && npm run standards && npm run test && npm run test:scripts"
+    "verify": "npm run typecheck && npm run lint && npm run standards && npm run test && npm run test:scripts",
+    "publish": "npm run verify && npx expo export --platform ios --output-dir .cache/export && npx tsx scripts/check/embedded-keys.ts && npx eas-cli@24.8.0 update --skip-bundler --input-dir .cache/export --channel production --environment production --platform ios --non-interactive"
   },
   "private": true,
   "jest": {

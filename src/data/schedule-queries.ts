@@ -1,4 +1,6 @@
 import type { ServiceCalendarBounds, ServiceDay, TimeWindow } from '../domain/gtfs/service-day';
+import { LINE_IDS, type LineId } from '../domain/lines/line-catalog';
+import type { LineTrack } from '../domain/live/types';
 import type { Mode } from '../domain/network/stations';
 import type { StopVisit } from '../domain/schedule/departures';
 import type { ScheduledTrip, ShapePath, TripStop } from '../domain/schedule/positions';
@@ -8,8 +10,9 @@ import { invariant } from '../lib/invariant';
 import type { SqlExecutor, SqlRow, SqlValue } from './sql-executor';
 
 /**
- * Every SQL statement the schedule engine runs (M3.2–M3.5), written against the plan §4 DDL, and
- * the checked readers that turn their rows into domain values.
+ * Every SQL statement the schedule engine runs (M3.2–M3.5, plus the live runtime's network lookups,
+ * M4.9), written against the plan §4 DDL, and the checked readers that turn their rows into domain
+ * values.
  *
  * This module imports only the SqlExecutor CONTRACT, through relative paths — never expo-sqlite,
  * never node:sqlite, never the app's `@/` alias — so the phone runs it over expo-sqlite and the
@@ -113,6 +116,21 @@ const TRIPS_AROUND_SQL = `
 
 /** Every shape's points in order, with their cumulative distance (the M2.11 geometry, extensions included). */
 const SHAPE_POINTS_SQL = 'SELECT shape_idx, seq, lat, lon, dist_m FROM shape_point ORDER BY shape_idx, seq';
+
+/** Every trip's line, through its stop pattern (the M2.10 derivation): what a live trip_id means (M4.9). */
+const TRIP_LINES_SQL = 'SELECT t.trip_id, p.line_id FROM trip AS t JOIN pattern AS p ON p.pattern_idx = t.pattern_idx ORDER BY t.trip_id';
+
+/** Every stop with its station: a live stop_id's station, and a station's stops (per-stop departures). */
+const STOP_STATIONS_SQL = `
+  SELECT s.stop_id, st.station_key
+  FROM stop AS s JOIN station AS st ON st.station_idx = s.station_idx
+  ORDER BY st.station_key, s.stop_id`;
+
+/** Each line's track points (line_shape: rail = its longest direction-0 shape, Mover = all its shapes), in order. */
+const LINE_TRACKS_SQL = `
+  SELECT ls.line_id, ls.shape_idx, sp.seq, sp.lat, sp.lon
+  FROM line_shape AS ls JOIN shape_point AS sp ON sp.shape_idx = ls.shape_idx
+  ORDER BY ls.line_id, ls.shape_idx, sp.seq`;
 
 /** line.mode as the schema stores it (scripts/gtfs/schema.ts MODE_CODES: rail 0, mover 1). */
 const MODES_BY_CODE: ReadonlyMap<number, Mode> = new Map<number, Mode>([
@@ -248,6 +266,54 @@ export function readShapePaths(db: SqlExecutor): ReadonlyMap<number, ShapePath> 
   }
   invariant([...paths.values()].every((p) => p.points.length >= 2 && p.distM[0] === 0), 'every shape has >= 2 points, measured from 0');
   return paths;
+}
+
+/** trip_id → its pattern's line, for every trip in the schedule. */
+export function readTripLines(db: SqlExecutor): ReadonlyMap<string, LineId> {
+  const rows = db.all(TRIP_LINES_SQL);
+  const lines = new Map(rows.map((row) => [text(row, 'trip_id'), lineId(row)] as const));
+  invariant(lines.size === rows.length, 'trip ids are unique');
+  invariant(lines.size > 0, 'the schedule DB has trips');
+  return lines;
+}
+
+/** stop_id → station key, and station key → its stop_ids (sorted), for every stop in the schedule. */
+export function readStopStations(db: SqlExecutor): { readonly stationOfStop: ReadonlyMap<string, string>; readonly stopsOfStation: ReadonlyMap<string, readonly string[]> } {
+  const rows = db.all(STOP_STATIONS_SQL);
+  const stationOfStop = new Map<string, string>();
+  const stopsOfStation = new Map<string, string[]>();
+  for (const row of rows) {
+    const [stopId, stationKey] = [text(row, 'stop_id'), text(row, 'station_key')];
+    stationOfStop.set(stopId, stationKey);
+    stopsOfStation.set(stationKey, [...(stopsOfStation.get(stationKey) ?? []), stopId]);
+  }
+  invariant(stationOfStop.size === rows.length && rows.length > 0, 'stop ids are unique, and the DB has stops');
+  invariant([...stopsOfStation.values()].every((stops) => stops.length > 0), 'every station listed has a stop');
+  return { stationOfStop, stopsOfStation };
+}
+
+/** One track per (line, shape) in line_shape, each its shape's points in order. */
+export function readLineTracks(db: SqlExecutor): LineTrack[] {
+  const rows = db.all(LINE_TRACKS_SQL);
+  const tracks = new Map<string, { lineId: LineId; points: LatLon[] }>();
+  for (const row of rows) {
+    const key = `${text(row, 'line_id')}:${int(row, 'shape_idx')}`;
+    const track = tracks.get(key) ?? { lineId: lineId(row), points: [] };
+    tracks.set(key, track);
+    invariant(int(row, 'seq') === track.points.length, `track ${key} lists its points 0, 1, 2…`);
+    track.points.push({ latitude: real(row, 'lat'), longitude: real(row, 'lon') });
+  }
+  const list = [...tracks.values()];
+  invariant(list.length > 0 && list.every((track) => track.points.length >= 2), 'every line has a track of at least one segment');
+  return list;
+}
+
+/** The row's line_id, which must be a catalog line. */
+function lineId(row: SqlRow): LineId {
+  const id = text(row, 'line_id');
+  invariant((LINE_IDS as readonly string[]).includes(id), `line_id "${id}" is a catalog line`);
+  invariant(id.length > 0, 'a line id is never empty');
+  return id as LineId;
 }
 
 function toStopVisit(row: SqlRow): StopVisit {

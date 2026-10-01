@@ -9,6 +9,9 @@ import { LiveDataProvider } from '@/live/live-context';
 const ROOT_SCREEN_OPTIONS = { headerShown: false } as const;
 // Pushed screens above the tabs get a native header with a back button.
 const DIAGNOSTICS_OPTIONS = { headerShown: true, title: 'Diagnostics' } as const;
+// Data & Settings (M8b.1) sits on the map's tabs, whose route name "(tabs)" would be the back label
+// (M1.19): the back button shows only its chevron.
+const DATA_OPTIONS = { headerShown: true, title: 'Data & Settings', headerBackButtonDisplayMode: 'minimal' } as const;
 
 /**
  * The root: the bundled schedule DB (M3.8) is opened once, here, for every screen, and the live
@@ -21,6 +24,7 @@ export default function RootLayout() {
       <LiveDataProvider>
         <Stack screenOptions={ROOT_SCREEN_OPTIONS}>
           <Stack.Screen name="(tabs)" />
+          <Stack.Screen name="data" options={DATA_OPTIONS} />
           <Stack.Screen name="diagnostics" options={DIAGNOSTICS_OPTIONS} />
         </Stack>
       </LiveDataProvider>

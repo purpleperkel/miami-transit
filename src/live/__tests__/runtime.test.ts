@@ -63,6 +63,7 @@ describe('LiveRuntime (M4.9): start and polling', () => {
     runtime.start();
     await settle();
     expect(latest(states).hasKey).toEqual({ swiftly: false, transitland: true });
+    expect(latest(states).keyHints).toEqual({ swiftly: null, transitland: '••••test' });
     expect(latest(states).swiftlyAgency).toBe('miami');
     expect(JSON.stringify(states)).not.toContain(TL_KEY);
     expect(server.requests).toEqual([]);

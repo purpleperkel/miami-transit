@@ -1,3 +1,4 @@
+import { router } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { PlatformColor, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
@@ -21,6 +22,7 @@ const PROBE_IDS: ReadonlySet<string> = new Set(PROBES.map((spec) => spec.id));
  * The M1 Diagnostics screen: every capability probe as a row Jamie runs on the phone (M1.19).
  * Tap a row to run that probe; "Run all" runs the in-app probes one at a time (so permission
  * prompts never stack) and leaves the maps:// probe, which switches apps, to its own tap.
+ * It is reached from Data & Settings (M8b.1), and its own link goes back there.
  */
 export function DiagnosticsScreen() {
   invariant(PROBES.length === 9, 'the screen lists the nine M1 probes');
@@ -32,6 +34,9 @@ export function DiagnosticsScreen() {
       <Text style={styles.intro}>
         Plan M1.19: run every probe on the phone. For the notification, keep this screen open until it reports (about 5 s).
       </Text>
+      <Pressable accessibilityRole="link" onPress={() => router.dismissTo('/data')} style={styles.settingsLink}>
+        <Text style={styles.settingsLinkText}>Data & Settings: keys, live status, attribution</Text>
+      </Pressable>
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ disabled: busy }}
@@ -140,6 +145,8 @@ function rowVerdict(state: RowState): Verdict {
 const styles = StyleSheet.create({
   content: { padding: 16, gap: 12 },
   intro: { fontSize: 15, color: PlatformColor('secondaryLabel') },
+  settingsLink: { paddingVertical: 4 },
+  settingsLinkText: { fontSize: 15, color: PlatformColor('link') },
   runAll: { borderRadius: 12, paddingVertical: 12, alignItems: 'center', backgroundColor: PlatformColor('systemBlue') },
   runAllText: { fontSize: 17, fontWeight: '600', color: 'white' },
   summary: { fontSize: 15, fontVariant: ['tabular-nums'], color: PlatformColor('label') },

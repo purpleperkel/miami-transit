@@ -6,7 +6,8 @@ import { invariant } from '@/lib/invariant';
  * The data version the tab bar's accessory shows (M1.18, repointed at M3.8 to the schedule DB): the
  * feed hash read from the copy the phone actually opened (its meta.feed_sha256), and the first date
  * the bundled schedule runs out (the manifest's earliest service end). While the DB opens, or if it
- * fails, the accessory says so instead.
+ * fails, the accessory says so instead. Tapping it opens Data & Settings (M8b.1), which links on to
+ * Diagnostics.
  */
 
 const SHORT_SHA_LENGTH = 8;
@@ -14,6 +15,14 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 
 export type AccessoryPlacement = 'regular' | 'inline';
 export type AccessoryText = { readonly text: string; readonly accessibilityLabel: string };
+
+/** A feed hash as shown in the app: its first 8 hex digits. */
+export function shortFeedHash(sha256: string): string {
+  invariant(/^[0-9a-f]{64}$/.test(sha256), 'a feed hash is 64 lowercase hex digits');
+  const short = sha256.slice(0, SHORT_SHA_LENGTH);
+  invariant(short.length === SHORT_SHA_LENGTH && sha256.startsWith(short), 'the short hash is the hash\'s first digits');
+  return short;
+}
 
 /** A YYYYMMDD service date as "Nov 22". */
 export function shortServiceDate(date: number): string {
@@ -36,15 +45,15 @@ export function firstServiceEnd(): string {
 export function dataVersionText(state: ScheduleDbState, placement: AccessoryPlacement): AccessoryText {
   invariant(placement === 'regular' || placement === 'inline', 'the accessory renders in a known placement');
   if (state.kind === 'opening') {
-    return { text: placement === 'inline' ? 'Schedule…' : 'Opening schedule · Diagnostics', accessibilityLabel: 'Schedule data opening. Opens Diagnostics.' };
+    return { text: placement === 'inline' ? 'Schedule…' : 'Opening schedule · Settings', accessibilityLabel: 'Schedule data opening. Opens Data & Settings.' };
   }
   if (state.kind === 'failed') {
-    const accessibilityLabel = `Schedule data unavailable: ${state.message}. Opens Diagnostics.`;
-    return { text: placement === 'inline' ? 'No schedule' : 'No schedule · Diagnostics', accessibilityLabel };
+    const accessibilityLabel = `Schedule data unavailable: ${state.message}. Opens Data & Settings.`;
+    return { text: placement === 'inline' ? 'No schedule' : 'No schedule · Settings', accessibilityLabel };
   }
-  const feed = state.repo.meta.feedSha256;
-  invariant(/^[0-9a-f]{64}$/.test(feed), 'the open copy records its feed hash');
-  const [version, serviceEnd] = [`Data ${feed.slice(0, SHORT_SHA_LENGTH)}`, firstServiceEnd()];
-  const accessibilityLabel = `Schedule data ${feed.slice(0, SHORT_SHA_LENGTH)}, ${serviceEnd}. Opens Diagnostics.`;
-  return { text: placement === 'inline' ? version : `${version} · ${serviceEnd} · Diagnostics`, accessibilityLabel };
+  const feed = shortFeedHash(state.repo.meta.feedSha256);
+  invariant(state.repo.meta.feedSha256.startsWith(feed), 'the version names the open copy\'s feed');
+  const [version, serviceEnd] = [`Data ${feed}`, firstServiceEnd()];
+  const accessibilityLabel = `Schedule data ${feed}, ${serviceEnd}. Opens Data & Settings.`;
+  return { text: placement === 'inline' ? version : `${version} · ${serviceEnd} · Settings`, accessibilityLabel };
 }

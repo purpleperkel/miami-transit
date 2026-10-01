@@ -47,6 +47,26 @@ const AGENCY_KEY = /^[A-Za-z0-9_-]{1,64}$/;
 /** expo-secure-store as a SecretStore. */
 export const KEYCHAIN: SecretStore = SecureStore;
 
+/** What a masked key starts with: four bullets stand for the hidden characters, whatever their number. */
+export const KEY_MASK = '••••';
+/** A masked key shows at most this many of its last characters… */
+const HINT_MAX_CHARS = 4;
+/** …and never more than one in this many of the key's characters (a short key shows fewer, or none). */
+const HINT_SHARE = 4;
+
+/**
+ * A key as Data & Settings shows it: `••••` + its last 4 characters (`••••WXYZ`), so Jamie can tell
+ * which key is stored without the key ever being rendered. At most a quarter of the key is shown,
+ * so a key shorter than 16 characters shows fewer of its last characters, and one under 4 shows none.
+ */
+export function maskKey(key: string): string {
+  invariant(key.length > 0, 'only a stored (non-empty) key is masked');
+  const shown = Math.min(HINT_MAX_CHARS, Math.floor(key.length / HINT_SHARE));
+  const masked = `${KEY_MASK}${key.slice(key.length - shown)}`;
+  invariant(masked.length - KEY_MASK.length === shown && shown * HINT_SHARE <= key.length, 'at most a quarter of the key shows');
+  return masked;
+}
+
 /** The Keychain item holding `provider`'s API key, e.g. `live.key.transitland`. */
 export function keyItem(provider: ProviderId): string {
   invariant((PROVIDER_IDS as readonly string[]).includes(provider), `"${provider}" is a realtime provider`);

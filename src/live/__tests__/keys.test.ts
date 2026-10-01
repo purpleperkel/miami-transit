@@ -1,4 +1,4 @@
-import { clearKey, keyItem, readKey, readLiveKeys, readSwiftlyAgency, saveKey, saveSwiftlyAgency, type SecretStore, SWIFTLY_AGENCY_ITEM } from '../keys';
+import { clearKey, KEY_MASK, keyItem, maskKey, readKey, readLiveKeys, readSwiftlyAgency, saveKey, saveSwiftlyAgency, type SecretStore, SWIFTLY_AGENCY_ITEM } from '../keys';
 
 /**
  * M4.8: keys.ts over an in-memory SecretStore standing in for the iOS Keychain (expo-secure-store
@@ -89,5 +89,14 @@ describe('keys (M4.8, Keychain only)', () => {
     const writes = await Promise.all([saveKey('transitland', 'fake-key', keychain), clearKey('transitland', keychain), saveSwiftlyAgency('miami', keychain)]);
     expect([...reads, ...writes].map((result) => !result.ok && result.error.kind)).toEqual(Array(6).fill('keychain'));
     expect(!reads[0].ok && reads[0].error.message).toBe('could not read the swiftly key: User interaction is not allowed.');
+  });
+});
+
+describe('maskKey (M8b.1: a stored key is shown only as its last 4)', () => {
+  it('a key shows as four bullets and its last 4 characters, never more than a quarter of it', () => {
+    expect(KEY_MASK).toBe('••••');
+    expect(maskKey('fake-transitland-WXYZ')).toBe('••••WXYZ');
+    expect([maskKey('fake-key-123'), maskKey('fake1234'), maskKey('abc')]).toEqual(['••••123', '••••34', '••••']);
+    expect(() => maskKey('')).toThrow('only a stored (non-empty) key is masked');
   });
 });

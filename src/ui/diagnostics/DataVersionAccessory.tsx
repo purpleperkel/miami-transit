@@ -9,8 +9,9 @@ import { dataVersionText } from './data-version';
 
 /**
  * The NativeTabs bottom accessory (M1.18): shows the data version — the schedule DB the phone has
- * open (M3.8) — and opens Diagnostics. iOS renders one copy per placement (regular above the tab
- * bar, inline beside it); the DB state comes from the root ScheduleDbProvider.
+ * open (M3.8) — and opens Data & Settings (M8b.1; Diagnostics is one tap further). iOS renders one
+ * copy per placement (regular above the tab bar, inline beside it); the DB state comes from the root
+ * ScheduleDbProvider.
  */
 export function DataVersionAccessory() {
   const placement = NativeTabs.BottomAccessory.usePlacement();
@@ -21,7 +22,7 @@ export function DataVersionAccessory() {
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
-      onPress={() => router.push('/diagnostics')}
+      onPress={() => router.push('/data')}
       style={styles.accessory}>
       <Text numberOfLines={1} style={styles.text}>
         {text}

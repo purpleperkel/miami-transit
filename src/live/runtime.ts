@@ -6,7 +6,7 @@ import { invariant } from '../lib/invariant';
 import type { Result } from '../lib/result';
 import { ByteCounter, type ByteTallies, EXPO_FETCH, type FetchFn, httpGet } from './http';
 import { detach } from './detach';
-import { clearKey, KEYCHAIN, type KeyError, type LiveKeys, NO_KEYS, readLiveKeys, saveKey, saveSwiftlyAgency, type SecretStore } from './keys';
+import { clearKey, KEY_MASK, KEYCHAIN, type KeyError, type LiveKeys, maskKey, NO_KEYS, readLiveKeys, saveKey, saveSwiftlyAgency, type SecretStore } from './keys';
 import { LivePoller, type LiveSnapshot } from './poller';
 import type { ProviderDeps } from './providers/batches';
 import { NONE_PROVIDER } from './providers/none';
@@ -34,6 +34,8 @@ export type LiveState = LiveSnapshot & {
   readonly callsThisMonth: Readonly<Record<ProviderId, number>>;
   /** Which providers have a key in the Keychain (never the key itself). */
   readonly hasKey: Readonly<Record<ProviderId, boolean>>;
+  /** Each stored key as Data & Settings shows it — `••••` + its last 4 (keys.ts maskKey) — or null; never the key itself. */
+  readonly keyHints: Readonly<Record<ProviderId, string | null>>;
   readonly swiftlyAgency: string;
   /** Why the Keychain could not be read when the runtime started, or null. */
   readonly keysError: KeyError | null;
@@ -250,12 +252,22 @@ export class LiveRuntime {
       bytes: this.counter.snapshot(),
       callsThisMonth: Object.freeze({ swiftly: callsThisMonth(this.quota, 'swiftly', nowS), transitland: callsThisMonth(this.quota, 'transitland', nowS) }),
       hasKey: Object.freeze({ swiftly: this.keys.swiftly !== null, transitland: this.keys.transitland !== null }),
+      keyHints: Object.freeze({ swiftly: hintOf(this.keys.swiftly), transitland: hintOf(this.keys.transitland) }),
       swiftlyAgency: this.keys.swiftlyAgency,
       keysError: this.keysError,
       internalError: this.internalError,
     });
     invariant(state.status === poller.snapshot.status, 'the state carries the poller\'s status');
     invariant(Object.values(state.hasKey).every((has) => typeof has === 'boolean'), 'the state says only whether a key exists');
+    invariant(PROVIDER_IDS.every((id) => (state.keyHints[id] === null) === !state.hasKey[id]), 'a key has a masked hint, and only a key has one');
     this.options.onChange(state);
   }
+}
+
+/** A key's masked hint (`••••` + its last 4), or null for no key. */
+function hintOf(key: string | null): string | null {
+  const hint = key === null ? null : maskKey(key);
+  invariant(hint === null || hint.startsWith(KEY_MASK), 'a hint is masked');
+  invariant(hint === null || key === null || hint.length - KEY_MASK.length < key.length, 'a hint never shows the whole key');
+  return hint;
 }

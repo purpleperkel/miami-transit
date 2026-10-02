@@ -39,6 +39,9 @@ SDK 57; never trust memory for Expo APIs).
 - Jest timer trap (found by the mfix5 builder, 2026-10-02): `act()` renders only when its scope ends, so one long
   `advanceTimersByTimeAsync` collapses every 15 s tick into a single render. Sheet/clock tests must step the fake clock
   in small increments (e.g. 1 s) inside act.
+- Location (mfix6, 2026-10-02): ONE app-wide `UserLocationProvider` (src/ui/location/) owns the only `watchPositionAsync`;
+  any test rendering something that reads the rider's position (`useUserPosition`) must wrap it in `<UserLocationProvider>`
+  or it throws by design. Never open a second watch.
 - `babel.config.js` exists because jest-expo 57.0.5's `jest-expo/ios` preset needs Expo's babel preset
   to parse React Native's jest setup. TypeScript 6 defaults `types` to `[]` — the tsconfigs set it explicitly.
 

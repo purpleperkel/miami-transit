@@ -99,9 +99,14 @@ describe('an abandoned request never touches the walks', () => {
     await act(async () => visibility.set('hidden'));
     await act(async () => visibility.set('visible'));
     await step(1);
-    expect([walks.asked.length, walks.signals.map((signal) => signal.aborted)]).toEqual([2, [true, false]]);
+    // Request 0 was still ASKED: the next waits out the 60 s gap from its start, so flipping never bursts requests.
+    expect([walks.asked.length, walks.signals.map((signal) => signal.aborted)]).toEqual([1, [true]]);
     await expectDroppedQuietly(() => walks.land(0, 'walks'), live, walks.asked);
     expect(walkSeen('a', FIFTH).source).toBe('estimated');
+    await stepUntil(askedAt(walks.asked, 0) + 59);
+    expect(walks.asked).toHaveLength(1);
+    await stepUntil(askedAt(walks.asked, 0) + 62);
+    expect([walks.asked.length, walks.signals.map((signal) => signal.aborted)]).toEqual([2, [true, false]]);
     await act(async () => walks.land(1, 'walks'));
     await step(1);
     expect([statusSeen.latest?.cache?.lastRequestAtS, walkSeen('a', FIFTH).source]).toEqual([askedAt(walks.asked, 1), 'routed']);
@@ -112,8 +117,10 @@ describe('an abandoned request never touches the walks', () => {
     await act(async () => appState('background'));
     await act(async () => appState('active'));
     await step(1);
-    expect([walks.asked.length, walks.signals.map((signal) => signal.aborted)]).toEqual([4, [true, false, true, false]]);
+    expect([walks.asked.length, walks.signals.map((signal) => signal.aborted)]).toEqual([3, [true, false, true]]);
     await expectDroppedQuietly(() => walks.land(2, 'throwing'), live, walks.asked);
+    await stepUntil(askedAt(walks.asked, 2) + 62);
+    expect([walks.asked.length, walks.signals.map((signal) => signal.aborted)]).toEqual([4, [true, false, true, false]]);
     await act(async () => walks.land(3, 'walks'));
     await step(1);
     expect([statusSeen.latest?.cache?.lastRequestAtS, statusSeen.latest?.bug, live.states.at(-1)?.internalError]).toEqual([askedAt(walks.asked, 3), null, null]);

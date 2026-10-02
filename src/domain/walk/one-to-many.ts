@@ -115,6 +115,17 @@ export function parseWalkTimes(json: unknown, n: number): Result<readonly (WalkP
 }
 
 /**
+ * A JSON value named for a refusal message without ever converting it: String() on an object whose toString is not a
+ * function throws, and a malformed answer must be an Err, never a throw.
+ */
+function described(value: unknown): string {
+  const named = typeof value === 'number' || typeof value === 'boolean' ? String(value) : typeof value === 'string' ? JSON.stringify(value) : value === null ? 'null' : value === undefined ? 'undefined' : Array.isArray(value) ? 'a list' : 'an object';
+  invariant(named.length > 0, 'a value is always named');
+  invariant(typeof value === 'string' || named.length <= 24, 'a value that is not text is named in a few words');
+  return named;
+}
+
+/**
  * One answer entry: null for {} (no walk reaches the target), its WalkPath for exactly {duration, distance} (finite, not
  * negative), else what it holds instead. Decided by the key COUNT and the exact key names, never by a joined string: a
  * JSON body can name a key "" ({"": 5}), which joins to the same text as no key at all.
@@ -133,7 +144,7 @@ function walkOf(entry: unknown): Result<WalkPath | null, string> {
   } else if (record === null) {
     read = err(Array.isArray(entry) ? 'a list' : typeof entry === 'string' ? JSON.stringify(entry) : String(entry));
   } else {
-    read = err(`keys ${JSON.stringify([...names].sort())} with distance ${String(record.distance)}, duration ${String(record.duration)}`);
+    read = err(`keys ${JSON.stringify([...names].sort())} with distance ${described(record.distance)}, duration ${described(record.duration)}`);
   }
   invariant(!read.ok || (read.value === null) === (record !== null && names.length === 0), 'only an entry with no key at all is no walk');
   invariant(read.ok || read.error.length > 0, 'a refused entry says what it held instead');

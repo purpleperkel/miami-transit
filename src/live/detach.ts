@@ -14,8 +14,19 @@ export function detach(work: Promise<unknown>, onBug: (message: string) => void)
   invariant(typeof work.catch === 'function', 'detach() starts a promise');
   invariant(typeof onBug === 'function', 'a detached task reports its bugs');
   void work.catch((error: unknown) => {
-    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    const message = error instanceof Error ? `${printable(error.name)}: ${printable(error.message)}` : printable(error);
     onBug(message);
     return err(message);
   });
+}
+
+/**
+ * Text for anything a rejection can carry, without ever throwing: String() throws on an object whose toString is not a
+ * function (or one with no prototype), and the catch handler that reports a bug must never become a bug itself.
+ */
+function printable(value: unknown): string {
+  const text = typeof value === 'string' ? value : value !== null && typeof value === 'object' ? Object.prototype.toString.call(value) : String(value);
+  invariant(typeof text === 'string', 'a reported bug is text');
+  invariant(text.length > 0 || value === '', 'only an empty message prints as empty');
+  return text;
 }

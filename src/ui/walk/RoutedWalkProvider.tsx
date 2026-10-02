@@ -7,6 +7,7 @@ import {
   dropStaleWalks,
   mergeWalks,
   needsWalkRequest,
+  MIN_REQUEST_GAP_S,
   nextWalkCheckS,
   requestTargets,
   type WalkAnswer,
@@ -102,7 +103,8 @@ const NO_CONSUMERS: Wanted = new Map();
  * The provider's request bookkeeping across renders — the request in flight, failures in a row, when the backoff ends
  * (epoch s) — and the walks held: the one copy answers merge into, which the provider renders through its status.
  */
-type WalkRun = { inFlight: AbortController | null; failures: number; backoffUntilS: number; cache: WalkCache | null };
+/** `sinceS`: when the request in flight was asked (epoch s), 0 with none in flight. */
+type WalkRun = { inFlight: AbortController | null; sinceS: number; failures: number; backoffUntilS: number; cache: WalkCache | null };
 
 /** Where a walk bug goes: the live runtime's bug channel (LiveRuntime.reportBug), which outlives this provider. */
 type BugReporter = (message: string) => void;
@@ -114,7 +116,7 @@ export function RoutedWalkProvider({ children, fetchWalk = expoWalkFetch }: Rout
   const [wanted, setWanted] = useState<Wanted>(NO_CONSUMERS);
   const [status, setStatus] = useState<WalkStatus>(NO_STATUS);
   const [wake, setWake] = useState(0);
-  const run = useRef<WalkRun>({ inFlight: null, failures: 0, backoffUntilS: 0, cache: null });
+  const run = useRef<WalkRun>({ inFlight: null, sinceS: 0, failures: 0, backoffUntilS: 0, cache: null });
   const reporter = useRef<BugReporter | null>(null);
   const onWake = useCallback(() => setWake((n) => n + 1), []);
   useEffect(() => {
@@ -171,8 +173,14 @@ function requestLifetime(run: WalkRun, active: boolean): (() => void) | undefine
 function abandon(run: WalkRun): void {
   invariant(run.inFlight === null || !run.inFlight.signal.aborted, 'a request in flight is cancelled here, and only here');
   invariant(run.failures === 0 || run.backoffUntilS > 0, 'abandoning keeps the backoff: a failure always set when it ends');
+  // An abandoned request was still ASKED (it almost surely reached Transitous): the 60 s gap runs from its start, so
+  // flipping the app while a request is out never bursts requests. Not a failure: the failure count is untouched.
+  if (run.inFlight !== null) {
+    run.backoffUntilS = Math.max(run.backoffUntilS, run.sinceS + MIN_REQUEST_GAP_S);
+  }
   run.inFlight?.abort();
   run.inFlight = null;
+  run.sinceS = 0;
 }
 
 /** Drops the walks asked more than STALE_ORIGIN_M from where the rider is now, and renders what is left. */
@@ -240,6 +248,7 @@ function startRequest(turn: Turn, origin: LatLon, targets: readonly WalkStop[], 
   invariant(request.ok, `a walk request from a fix to ${targets.length} stops can always be made`);
   const sent: Sent = { origin, requestedAtS: nowS, targets, controller: new AbortController(), report: turn.report };
   turn.run.inFlight = sent.controller;
+  turn.run.sinceS = nowS;
   // The executor runs fetchWalk at once, and turns a synchronous throw into a rejection: a bug, like any other.
   const answer = new Promise<Result<unknown, LiveError>>((resolve) => resolve(turn.fetchWalk(request.value, sent.controller.signal)));
   detach(answer.then((got) => settle(turn, sent, got)), (message) => bugged(turn, sent, message));
@@ -302,6 +311,7 @@ function finish(turn: Turn, sent: Sent, failed: boolean): void {
   turn.run.failures = failed ? turn.run.failures + 1 : 0;
   turn.run.backoffUntilS = failed ? Date.now() / 1000 + backoffS(turn.run.failures) : 0;
   turn.run.inFlight = null;
+  turn.run.sinceS = 0;
   turn.onWake();
 }
 

@@ -126,4 +126,11 @@ describe('parseWalkTimes never throws', () => {
     ]);
     expect(parseWalkTimes(JSON.parse('[{}]'), 1)).toEqual({ ok: true, value: [null] });
   });
+
+  it('describes an exotic value in a refusal without ever converting it', () => {
+    const exotic = parseWalkTimes(JSON.parse('[{"distance": {"toString": 1}, "duration": 5}, {"distance": [1], "duration": "5"}]'), 2);
+    expect(exotic.ok).toBe(false);
+    expect(exotic.ok ? null : exotic.error.message).toContain('distance an object, duration 5');
+  });
 });
+

@@ -347,13 +347,19 @@ check(JSON.stringify(its) === before, 'overlayLive mutated its input itineraries
 check(Array.isArray(out) && out.length === its.length, 'overlayLive returns every itinerary, in order');
 const live = new Map(preds.map((p) => [`${p.tripId}@${p.stopId}`, p]));
 let matched = 0;
-fx.itineraries.forEach((raw, i) => raw.legs.forEach((rl, j) => {
+fx.itineraries.forEach((raw, i) => { let carry = 0; raw.legs.forEach((rl, j) => {
   const got = out[i]?.legs?.[j]; const where = `itinerary ${i} leg ${j} (${rl.mode} ${rl.routeShortName ?? ''})`;
   const p = rl.tripId !== undefined ? live.get(`${tripOf(rl.tripId)}@${unprefix(rl.from.stopId)}`) : undefined;
-  if (p === undefined) { same(got, its[i].legs[j], `${where}: a leg no live prediction matches must be unchanged`); return; }
-  matched += 1;
+  if (p === undefined) {
+    // Amended at the mfix5 flip (arbiter ruling 2026-10-02): a WALK right after a late ride shifts by the delay of that ride;
+    // a ride no prediction matches keeps its schedule and absorbs the delay (later legs are compared unchanged).
+    if (rl.tripId === undefined && carry !== 0) { const l = its[i].legs[j]; same(got, { ...l, from: { ...l.from, epoch: l.from.epoch + carry }, to: { ...l.to, epoch: l.to.epoch + carry } }, `${where}: a walk right after a late ride must shift by its delay (${carry} s)`); return; }
+    if (rl.tripId !== undefined) carry = 0;
+    same(got, its[i].legs[j], `${where}: a leg no live prediction matches must be unchanged`); return;
+  }
+  matched += 1; carry = p.delayS ?? 0;
   check(got?.from?.epoch === p.epoch && got?.live === true, `${where}: boarding live trip ${p.tripId} at stop ${p.stopId} must take the live departure ${p.epoch} and be marked live (got epoch ${got?.from?.epoch}, live ${got?.live})`);
-}));
+}); });
 check(matched >= 2, `only ${matched} leg(s) matched the rail + Mover predictions — match on the GTFS trip_id and stop_id (strip the Transitous prefixes)`);
 const staticRows = preds.map((p) => ({ ...p, realtime: false, epoch: null, delayS: null }));
 same(call(() => overlayLive(its, staticRows), 'overlayLive(scheduled-only)'), its, 'scheduled-only predictions (realtime false, epoch null) must leave every leg unchanged');
@@ -412,7 +418,7 @@ need_import src/domain/routes/overlay.ts '\.\./live/types'
 need_file src/domain/hurry/verdict.ts
 # 17. firstLegVerdict runs m7c's engine (overlay.ts imports ../hurry/verdict), not a second copy of the rules.
 need_import src/domain/routes/overlay.ts '\.\./hurry/verdict'
-# 18. Direct tsx call on REAL ids: matched rail + Mover legs take the live departure and are marked live; everything else is unchanged.
+# 18. Direct tsx call on REAL ids: matched rail + Mover legs take the live departure and are marked live; a walk right after a late ride shifts by its delay (mfix5); everything else is unchanged.
 card_node overlay-real-ids "$JS_OVERLAY_REAL" "$OVERLAY" "$TRANSITOUS" "$FIXTURE" "$SCHEDULE_DB"
 # 19. A (M10a.2): matched leg updated and marked live — its own passing test.
 jest_pin src/domain/routes/__tests__/overlay.test.ts 'matched leg -> live departure, marked live'

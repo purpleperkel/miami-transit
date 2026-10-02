@@ -36,6 +36,9 @@ SDK 57; never trust memory for Expo APIs).
 - TS trap (found by the m10a builder, 2026-10-02): `invariant(Array.isArray(x))` on a `readonly T[]` parameter narrows `x` to
   `readonly T[] & any[]`, and every callback on `x` then gets implicit-any parameters (TS7006). Use a meaningful precondition
   instead (e.g. on length or element shape), not extra type annotations.
+- Jest timer trap (found by the mfix5 builder, 2026-10-02): `act()` renders only when its scope ends, so one long
+  `advanceTimersByTimeAsync` collapses every 15 s tick into a single render. Sheet/clock tests must step the fake clock
+  in small increments (e.g. 1 s) inside act.
 - `babel.config.js` exists because jest-expo 57.0.5's `jest-expo/ios` preset needs Expo's babel preset
   to parse React Native's jest setup. TypeScript 6 defaults `types` to `[]` — the tsconfigs set it explicitly.
 

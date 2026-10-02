@@ -37,7 +37,7 @@ CARD_PINS=("${PINS_TRANSITOUS[@]}" "${PINS_OVERLAY[@]}" "${PINS_POLITE[@]}")
 # and no other card pin is equal to it or a word-boundary suffix of it (or it of them), case-insensitively.
 _pin_in_universe() {
   local s="$1" p ls lp found=0
-  if printf '%s' "$s" | _qgrep '[][.*+?^${}()|\\]'; then
+  if printf '%s' "$s" | _qgrep '[].*+?^${}()|\\[]'; then
     echo "ratchet: authoring error: pin '$s' holds a regex metacharacter"; return 1
   fi
   ls=$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')

@@ -33,6 +33,9 @@ SDK 57; never trust memory for Expo APIs).
   labelled `// test-time mock of native module` at the `jest.mock` call.
 - Install Expo packages with `npx expo install <pkg>` (SDK-pinned; for dev deps use `npx expo install <pkg> --dev`,
   NOT `-- --save-dev`, which lands them in dependencies), other dev tools with `npm i -D --save-exact`.
+- TS trap (found by the m10a builder, 2026-10-02): `invariant(Array.isArray(x))` on a `readonly T[]` parameter narrows `x` to
+  `readonly T[] & any[]`, and every callback on `x` then gets implicit-any parameters (TS7006). Use a meaningful precondition
+  instead (e.g. on length or element shape), not extra type annotations.
 - `babel.config.js` exists because jest-expo 57.0.5's `jest-expo/ios` preset needs Expo's babel preset
   to parse React Native's jest setup. TypeScript 6 defaults `types` to `[]` — the tsconfigs set it explicitly.
 

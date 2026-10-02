@@ -88,9 +88,6 @@ function pointText(point: LatLon): string {
   return text;
 }
 
-/** The keys a walk answers with: exactly these two (withDistance=true), or none at all ({}: no walk). */
-const WALK_KEYS = 'distance,duration';
-
 /**
  * The answer to a request with `n` targets: per target, in order, its WalkPath (null: no walk); an Err for anything else.
  * It reads each walk's DISTANCE (metres along the streets) and its COST (the router's `duration`, a preference score),
@@ -106,20 +103,39 @@ export function parseWalkTimes(json: unknown, n: number): Result<readonly (WalkP
   const entries: readonly unknown[] = json;
   const paths: (WalkPath | null)[] = [];
   for (const [i, entry] of entries.entries()) {
-    const record = entry !== null && typeof entry === 'object' && !Array.isArray(entry) ? (entry as Readonly<Record<string, unknown>>) : null;
-    const keys = record === null ? null : Object.keys(record).sort().join(',');
-    const distance = keys === WALK_KEYS ? record?.distance : undefined;
-    const duration = keys === WALK_KEYS ? record?.duration : undefined;
-    if (keys === '') {
-      paths.push(null);
-    } else if (typeof distance === 'number' && typeof duration === 'number' && Number.isFinite(distance) && Number.isFinite(duration) && distance >= 0 && duration >= 0) {
-      paths.push({ distanceM: distance, costS: duration });
-    } else {
-      const got = record === null ? (Array.isArray(entry) ? 'a list' : String(entry)) : `{${keys ?? ''}} with distance ${String(record.distance)}, duration ${String(record.duration)}`;
-      return err({ kind: 'malformed', message: `walk ${i}: want {} or exactly a finite, non-negative {duration, distance}, got ${got}` });
+    const read = walkOf(entry);
+    if (!read.ok) {
+      return err({ kind: 'malformed', message: `walk ${i}: want {} or exactly a finite, non-negative {duration, distance}, got ${read.error}` });
     }
+    paths.push(read.value);
   }
   invariant(paths.every((path, i) => (path === null) === (Object.keys(entries[i] as object).length === 0)), 'exactly the {} entries are targets no walk reaches');
   invariant(paths.length === n, `one walk, or none, for each of the ${n} targets, in order`);
   return ok(paths);
+}
+
+/**
+ * One answer entry: null for {} (no walk reaches the target), its WalkPath for exactly {duration, distance} (finite, not
+ * negative), else what it holds instead. Decided by the key COUNT and the exact key names, never by a joined string: a
+ * JSON body can name a key "" ({"": 5}), which joins to the same text as no key at all.
+ */
+function walkOf(entry: unknown): Result<WalkPath | null, string> {
+  const record = entry !== null && typeof entry === 'object' && !Array.isArray(entry) ? (entry as Readonly<Record<string, unknown>>) : null;
+  const names = record === null ? [] : Object.keys(record);
+  const isWalk = names.length === 2 && names.includes('distance') && names.includes('duration');
+  const distance = isWalk ? record?.distance : undefined;
+  const duration = isWalk ? record?.duration : undefined;
+  let read: Result<WalkPath | null, string>;
+  if (record !== null && names.length === 0) {
+    read = ok(null);
+  } else if (typeof distance === 'number' && typeof duration === 'number' && Number.isFinite(distance) && Number.isFinite(duration) && distance >= 0 && duration >= 0) {
+    read = ok({ distanceM: distance, costS: duration });
+  } else if (record === null) {
+    read = err(Array.isArray(entry) ? 'a list' : typeof entry === 'string' ? JSON.stringify(entry) : String(entry));
+  } else {
+    read = err(`keys ${JSON.stringify([...names].sort())} with distance ${String(record.distance)}, duration ${String(record.duration)}`);
+  }
+  invariant(!read.ok || (read.value === null) === (record !== null && names.length === 0), 'only an entry with no key at all is no walk');
+  invariant(read.ok || read.error.length > 0, 'a refused entry says what it held instead');
+  return read;
 }

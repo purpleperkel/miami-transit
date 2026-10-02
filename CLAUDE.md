@@ -39,6 +39,10 @@ SDK 57; never trust memory for Expo APIs).
 - Jest timer trap (found by the mfix5 builder, 2026-10-02): `act()` renders only when its scope ends, so one long
   `advanceTimersByTimeAsync` collapses every 15 s tick into a single render. Sheet/clock tests must step the fake clock
   in small increments (e.g. 1 s) inside act.
+- Gate trap (found by the mfix9 reviewer, 2026-10-02): the verify scripts' `mocks_native_only` reads EVERY source file under a
+  scanned `__tests__` directory, helper files included, and takes a `jest.mock(` written inside a doc comment for a real call
+  (then demands a package target and the label). In a helper's comments, describe such a mock in prose ("each test file mocks
+  'expo-location' with …"), never as a `jest.mock(…)` example.
 - Location (mfix6, 2026-10-02): ONE app-wide `UserLocationProvider` (src/ui/location/) owns the only `watchPositionAsync`;
   any test rendering something that reads the rider's position (`useUserPosition`) must wrap it in `<UserLocationProvider>`
   or it throws by design. Never open a second watch.

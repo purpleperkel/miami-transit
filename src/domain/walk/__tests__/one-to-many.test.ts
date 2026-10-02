@@ -103,10 +103,27 @@ describe('parseWalkTimes never throws', () => {
     const extra = [{ duration: 519, distance: 292.7, geometry: 'kv}oC~dbiN' }, { distance: 292.7, duration: 519, steps: [] }, { error: 'no route' }];
     const kinds = extra.map((entry) => parseWalkTimes([{}, entry], 2)).map((r) => (r.ok ? 'ok' : r.error.message));
     expect(kinds).toEqual([
-      'walk 1: want {} or exactly a finite, non-negative {duration, distance}, got {distance,duration,geometry} with distance 292.7, duration 519',
-      'walk 1: want {} or exactly a finite, non-negative {duration, distance}, got {distance,duration,steps} with distance 292.7, duration 519',
-      'walk 1: want {} or exactly a finite, non-negative {duration, distance}, got {error} with distance undefined, duration undefined',
+      'walk 1: want {} or exactly a finite, non-negative {duration, distance}, got keys ["distance","duration","geometry"] with distance 292.7, duration 519',
+      'walk 1: want {} or exactly a finite, non-negative {duration, distance}, got keys ["distance","duration","steps"] with distance 292.7, duration 519',
+      'walk 1: want {} or exactly a finite, non-negative {duration, distance}, got keys ["error"] with distance undefined, duration undefined',
     ]);
     expect(parseWalkTimes([{}, { distance: 292.7, duration: 519 }], 2)).toEqual({ ok: true, value: [null, { distanceM: 292.7, costS: 519 }] });
+  });
+
+  // ARBITER Z1 (review of 7c0bab8): JSON can name a key "", and ["", ...].join(',') reads exactly like no key at all.
+  it('an entry whose only key is empty is an Err, never a throw', () => {
+    const bodies: readonly string[] = ['[{"": 5}]', '[{}, {"": 5, "distance": 5, "duration": 5}]', '[{"": null}]', '[{"distance": 5, "": 5}]'];
+    const read = bodies.map((text) => {
+      const body: unknown = JSON.parse(text);
+      return parseWalkTimes(body, (body as unknown[]).length);
+    });
+    expect(read.map((r) => (r.ok ? 'ok' : r.error.kind))).toEqual(bodies.map(() => 'malformed'));
+    expect(read.map((r) => (r.ok ? '' : r.error.message))).toEqual([
+      'walk 0: want {} or exactly a finite, non-negative {duration, distance}, got keys [""] with distance undefined, duration undefined',
+      'walk 1: want {} or exactly a finite, non-negative {duration, distance}, got keys ["","distance","duration"] with distance 5, duration 5',
+      'walk 0: want {} or exactly a finite, non-negative {duration, distance}, got keys [""] with distance undefined, duration undefined',
+      'walk 0: want {} or exactly a finite, non-negative {duration, distance}, got keys ["","distance"] with distance 5, duration undefined',
+    ]);
+    expect(parseWalkTimes(JSON.parse('[{}]'), 1)).toEqual({ ok: true, value: [null] });
   });
 });

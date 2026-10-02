@@ -2,10 +2,15 @@ import { router } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { PlatformColor, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { HEARTBEAT_MS } from '@/domain/live/constants';
 import { invariant } from '@/lib/invariant';
 import { err } from '@/lib/result';
+import { useLive } from '@/live/live-context';
 
+import { useNowS } from '../clock';
 import { type TickTimeReadout, tickTimeReadout } from '../map/tickTime';
+import { formatAge } from '../settings/settings-text';
+import { useWalkStatus } from '../walk/RoutedWalkProvider';
 import { PROBES, type ProbeSpec } from './probe-catalog';
 import type { ProbeOutcome } from './probe-kit';
 
@@ -16,6 +21,7 @@ type RowState =
 
 const IDLE: RowState = { kind: 'idle' };
 const RUNNING: RowState = { kind: 'running' };
+const LIVE_DATA_NOTE = "A bug in the live runtime, never an ordinary failure. Data & Settings shows each provider's health.";
 const IN_APP_PROBES = PROBES.filter((spec) => !spec.leavesApp);
 const PROBE_IDS: ReadonlySet<string> = new Set(PROBES.map((spec) => spec.id));
 
@@ -24,7 +30,8 @@ const PROBE_IDS: ReadonlySet<string> = new Set(PROBES.map((spec) => spec.id));
  * Tap a row to run that probe; "Run all" runs the in-app probes one at a time (so permission
  * prompts never stack) and leaves the maps:// probe, which switches apps, to its own tap.
  * It is reached from Data & Settings (M8b.1), and its own link goes back there. Above the probes, the
- * map's frame-tick time (M5.13: "Diagnostics tick time < 4 ms").
+ * map's frame-tick time (M5.13: "Diagnostics tick time < 4 ms") and the two bug channels (mfix9): the live
+ * runtime's internal error (src/live/detach.ts) and the routed walks' status (useWalkStatus).
  */
 export function DiagnosticsScreen() {
   invariant(PROBES.length === 9, 'the screen lists the nine M1 probes');
@@ -50,6 +57,8 @@ export function DiagnosticsScreen() {
         <Text style={styles.runAllText}>{busy ? 'Running…' : `Run all (${IN_APP_PROBES.length} in-app probes)`}</Text>
       </Pressable>
       <MapTickRow />
+      <LiveDataRow />
+      <RoutedWalksRow />
       <Text style={styles.summary}>{`${passed} of ${PROBES.length} passed`}</Text>
       {PROBES.map((spec) => (
         <ProbeRow key={spec.id} spec={spec} state={states[spec.id] ?? IDLE} disabled={busy} onRun={runOne} />
@@ -83,6 +92,43 @@ function MapTickRow() {
       <Text style={styles.rowTitle}>Map frame tick</Text>
       <Text style={styles.detail}>{text}</Text>
       <Text style={styles.expectation}>Plan M5.13: under 4 ms. Measured on each frame while the map is on screen.</Text>
+    </View>
+  );
+}
+
+/** The live runtime's latest bug (LiveState.internalError): where detached work's bugs land, in every build. */
+function LiveDataRow() {
+  const { state } = useLive();
+  const bug = state === null ? null : state.internalError;
+  invariant(bug === null || bug.length > 0, 'a reported bug says what broke');
+  const text = state === null ? 'Not started yet' : bug === null ? 'No bug reported' : `Bug: ${bug}`;
+  invariant(bug === null || text.endsWith(bug), 'a bug is shown whole, never cut');
+  return (
+    <View testID="live-data" accessible accessibilityLabel={`Live data: ${text}`} style={styles.row}>
+      <Text style={styles.rowTitle}>Live data</Text>
+      <Text style={styles.detail}>{text}</Text>
+      <Text style={styles.expectation}>{LIVE_DATA_NOTE}</Text>
+    </View>
+  );
+}
+
+/** The routed-walk runtime's status (useWalkStatus): when its last answer was asked, its last failure, its last bug. */
+function RoutedWalksRow() {
+  const { cache, lastError, bug } = useWalkStatus();
+  const nowS = useNowS(HEARTBEAT_MS);
+  invariant(cache === null || cache.lastRequestAtS > 0, 'the last answer was asked at a real instant, so its age is real');
+  invariant(lastError === null || lastError.message.length > 0, 'a failure says what went wrong');
+  const answer = cache === null ? 'Last answer: none yet' : `Last answer: asked ${formatAge(nowS - cache.lastRequestAtS)}`;
+  const lines = [answer, `Last error: ${lastError === null ? 'none' : lastError.message}`, `Bug: ${bug === null ? 'none' : bug.message}`];
+  return (
+    <View testID="routed-walks" accessible accessibilityLabel={`Routed walks: ${lines.join('. ')}`} style={styles.row}>
+      <Text style={styles.rowTitle}>Routed walks</Text>
+      {lines.map((line) => (
+        <Text key={line.slice(0, line.indexOf(':'))} style={styles.detail}>
+          {line}
+        </Text>
+      ))}
+      <Text style={styles.expectation}>Street walks to the platforms, from Transitous, for the hurry verdicts.</Text>
     </View>
   );
 }

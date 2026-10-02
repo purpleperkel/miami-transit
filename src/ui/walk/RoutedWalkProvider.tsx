@@ -38,7 +38,7 @@ import { fetchWalkJson, type WalkGet } from './walk-fetch';
  * that render the bar and the sheet bare keep their verdicts.
  *
  * REQUEST RULES (Transitous's terms, transitous#2538: FEW requests): only while AppState is 'active', with a fix and
- * at least one wanted stop; one request in flight; every consumer's stops in ONE request — the nearest
+ * at least one wanted stop; one request in flight (see ABANDON); every consumer's stops in ONE request — the nearest
  * WALK_MAX_TARGETS, and only those count as wanted, so farther stops never re-trigger it; needsWalkRequest decides
  * (a wanted stop with no entry, or one asked from more than REFRESH_MOVE_M away), and when the 60 s gap or a backoff
  * ends the provider looks again on its own (a timer, never a poll). An answer is MERGED into the cache (mergeWalks: its
@@ -48,10 +48,18 @@ import { fetchWalkJson, type WalkGet } from './walk-fetch';
  * off 60 → 120 → 240 → 480 → 600 s, and is kept quietly as the status's lastError for Diagnostics (useWalkStatus); a
  * success resets both. The clock is the wall clock (Date.now).
  *
+ * ABANDON: a request lives only while the provider is mounted and the app is in the foreground. Leaving either —
+ * unmounting, going to the background, Fast Refresh, an <Activity> hidden (and shown again) — cancels it and frees the
+ * way for the next. An answer is applied only by the request that is currently in flight, so an abandoned request's
+ * late answer is dropped unread: no state change, no bug, no backoff.
+ *
  * BUGS (src/live/detach.ts's contract): a request is detached work, and every expected failure is a Result, so a throw
  * while handling an answer — or a fetchWalk that rejects instead of answering a Result — is a BUG. It never vanishes:
- * it goes where the live runtime's own bugs go (LiveRuntime.reportBug, its state's internalError) and stays in the
- * status; the request it broke counts as a failure, so the provider backs off rather than asking again at once.
+ * it goes to the live runtime's bug channel (LiveRuntime.reportBug, its state's internalError, which Diagnostics
+ * shows) through the reporter captured when the request STARTED, so a bug that surfaces after the provider has gone
+ * still arrives; it also stays in the status. The request it broke, when still in flight, counts as a failure, so the
+ * provider backs off rather than asking again at once. With no live runtime yet (the schedule DB still opening), the
+ * status — Diagnostics' "Routed walks" row — is its only channel.
  *
  * fetchWalk is injectable (tests never touch the network); by default it is the app's typed HTTP, src/live/http.ts's
  * EXPO_FETCH, under walk-fetch.ts's abort timer.
@@ -96,6 +104,9 @@ const NO_CONSUMERS: Wanted = new Map();
  */
 type WalkRun = { inFlight: AbortController | null; failures: number; backoffUntilS: number; cache: WalkCache | null };
 
+/** Where a walk bug goes: the live runtime's bug channel (LiveRuntime.reportBug), which outlives this provider. */
+type BugReporter = (message: string) => void;
+
 export function RoutedWalkProvider({ children, fetchWalk = expoWalkFetch }: RoutedWalkProviderProps) {
   const position = useUserPosition().coordinate;
   const active = useAppActive();
@@ -104,15 +115,15 @@ export function RoutedWalkProvider({ children, fetchWalk = expoWalkFetch }: Rout
   const [status, setStatus] = useState<WalkStatus>(NO_STATUS);
   const [wake, setWake] = useState(0);
   const run = useRef<WalkRun>({ inFlight: null, failures: 0, backoffUntilS: 0, cache: null });
+  const reporter = useRef<BugReporter | null>(null);
   const onWake = useCallback(() => setWake((n) => n + 1), []);
   useEffect(() => {
-    const current = run.current;
-    return () => abandon(current);
-  }, []);
+    reporter.current = runtime === null ? null : (message) => runtime.reportBug(message);
+  }, [runtime]);
+  useEffect(() => requestLifetime(run.current, active), [active]);
   useEffect(() => dropBehind(run.current, position, setStatus), [position]);
-  useEffect(() => (runtime === null || status.bug === null ? undefined : runtime.reportBug(`Routed walks: ${status.bug.message}`)), [runtime, status.bug]);
   useEffect(
-    () => walkTurn({ position, active, stops: [...wanted.values()].flat(), fetchWalk, run: run.current, onStatus: setStatus, onWake }),
+    () => walkTurn({ position, active, stops: [...wanted.values()].flat(), fetchWalk, run: run.current, report: reporter.current, onStatus: setStatus, onWake }),
     [position, active, wanted, status.cache, wake, fetchWalk, onWake],
   );
   const register = useCallback((consumer: string, stops: readonly WalkStop[]) => registerStops(setWanted, consumer, stops), []);
@@ -146,10 +157,20 @@ function withoutConsumer(wanted: Wanted, consumer: string): Wanted {
   return next;
 }
 
-/** Cancels the request in flight (the provider has gone): its late answer is dropped by settle. */
+/**
+ * A request lives while the app is in the foreground and the provider mounted (ABANDON): in the foreground the effect's
+ * teardown is abandon, which runs on going to the background, on unmount, on Fast Refresh and on an <Activity> hidden.
+ */
+function requestLifetime(run: WalkRun, active: boolean): (() => void) | undefined {
+  invariant(active || run.inFlight === null, 'in the background nothing is in flight: leaving the foreground abandoned it');
+  invariant(run.inFlight === null || !run.inFlight.signal.aborted, 'the request in flight was never cancelled: abandon clears what it aborts');
+  return active ? () => abandon(run) : undefined;
+}
+
+/** Cancels the request in flight, if any, and frees the way for the next: settle drops its late answer unread. */
 function abandon(run: WalkRun): void {
   invariant(run.inFlight === null || !run.inFlight.signal.aborted, 'a request in flight is cancelled here, and only here');
-  invariant(Number.isSafeInteger(run.failures) && run.failures >= 0, 'the run counts failures in a row');
+  invariant(run.failures === 0 || run.backoffUntilS > 0, 'abandoning keeps the backoff: a failure always set when it ends');
   run.inFlight?.abort();
   run.inFlight = null;
 }
@@ -172,6 +193,8 @@ type Turn = {
   readonly stops: readonly WalkStop[];
   readonly fetchWalk: WalkFetch;
   readonly run: WalkRun;
+  /** The live runtime's bug channel as it is now (null: no runtime yet); a request keeps the one it started with. */
+  readonly report: BugReporter | null;
   readonly onStatus: Dispatch<SetStateAction<WalkStatus>>;
   /** Asks for another look at the rules (a timer, a settled request). */
   readonly onWake: () => void;
@@ -198,15 +221,24 @@ function walkTurn(turn: Turn): (() => void) | undefined {
   return () => clearTimeout(timer);
 }
 
-/** A request on its way: where and when it was asked, the stops it carries, and its cancel. */
-type Sent = { readonly origin: LatLon; readonly requestedAtS: number; readonly targets: readonly WalkStop[]; readonly controller: AbortController };
+/**
+ * A request on its way: where and when it was asked, the stops it carries, its cancel, and the bug channel it was
+ * started with (kept by the request itself, so a bug after the provider has gone still arrives).
+ */
+type Sent = {
+  readonly origin: LatLon;
+  readonly requestedAtS: number;
+  readonly targets: readonly WalkStop[];
+  readonly controller: AbortController;
+  readonly report: BugReporter | null;
+};
 
 /** Asks for every target from the rider's position; the answer settles the run, and a bug reports itself. */
 function startRequest(turn: Turn, origin: LatLon, targets: readonly WalkStop[], nowS: number): void {
-  invariant(turn.run.inFlight === null, 'one request in flight: the next is asked only once the last has settled');
+  invariant(turn.run.inFlight === null, 'one request in flight: the next is asked only once the last has finished or been abandoned');
   const request = buildWalkRequest(origin, targets, appVersion());
   invariant(request.ok, `a walk request from a fix to ${targets.length} stops can always be made`);
-  const sent: Sent = { origin, requestedAtS: nowS, targets, controller: new AbortController() };
+  const sent: Sent = { origin, requestedAtS: nowS, targets, controller: new AbortController(), report: turn.report };
   turn.run.inFlight = sent.controller;
   // The executor runs fetchWalk at once, and turns a synchronous throw into a rejection: a bug, like any other.
   const answer = new Promise<Result<unknown, LiveError>>((resolve) => resolve(turn.fetchWalk(request.value, sent.controller.signal)));
@@ -214,15 +246,16 @@ function startRequest(turn: Turn, origin: LatLon, targets: readonly WalkStop[], 
 }
 
 /**
- * The answer lands: a list of walks is merged into the cache and resets the backoff; any failure keeps the cache, is
- * kept as the status's lastError, and backs off. The request stays in flight until finish, the last step, so a throw
- * anywhere before it is a bug that bugged() still finishes.
+ * The answer lands. Only the request in flight applies it: an abandoned one's is dropped unread. A list of walks is
+ * merged into the cache and resets the backoff; any failure keeps the cache, is kept as the status's lastError, and
+ * backs off. The request stays in flight until finish, the last step, so a throw anywhere before it is a bug that
+ * bugged() still finishes.
  */
 function settle(turn: Turn, sent: Sent, answer: Result<unknown, LiveError>): void {
-  invariant(turn.run.inFlight === null || turn.run.inFlight === sent.controller, 'one request in flight: none was started while this one was out');
+  invariant(turn.run.inFlight === sent.controller || sent.controller.signal.aborted, 'a request leaves flight only by finishing after its own answer, or by abandon, which cancels it');
   invariant(sent.targets.length >= 1 && sent.targets.length <= WALK_MAX_TARGETS, 'a request carried 1 to WALK_MAX_TARGETS stops');
-  if (turn.run.inFlight === null) {
-    return; // the provider has gone (abandon): nobody reads a late answer
+  if (turn.run.inFlight !== sent.controller) {
+    return; // abandoned: an answer is applied only by the request in flight
   }
   const read = answer.ok ? walksOf(answer.value, sent) : answer;
   if (read.ok) {
@@ -245,13 +278,18 @@ function walksOf(body: unknown, sent: Sent): Result<WalkAnswer, LiveError> {
 }
 
 /**
- * A bug while handling the answer, or a fetchWalk that rejected: reported first (it must never vanish), then the request
- * ends as a failure when settle did not finish it, so the provider backs off instead of asking again at once.
+ * A bug while handling the answer, or a fetchWalk that rejected. It runs in detach's catch, where a throw would be an
+ * unhandled rejection that vanishes in a release build, so it holds in every state the run can be in: the provider
+ * mounted or gone, this request in flight, abandoned, or followed by another. It is reported first, through the
+ * reporter the request started with (never through the provider's state, which dies with it); then kept in the
+ * status; then, when this request is still the one in flight, it ends as a failure, so the provider backs off.
  */
 function bugged(turn: Turn, sent: Sent, message: string): void {
-  turn.onStatus((prev) => ({ ...prev, bug: { message: `a walk answer could not be handled: ${message}` } }));
-  invariant(turn.run.inFlight === null || turn.run.inFlight === sent.controller, 'one request in flight: none was started while this one was out');
-  invariant(sent.targets.length >= 1, 'a request carried at least one stop');
+  invariant(sent.targets.length >= 1 && sent.targets.length <= WALK_MAX_TARGETS, 'a request carried 1 to WALK_MAX_TARGETS stops');
+  invariant(turn.run.inFlight !== sent.controller || !sent.controller.signal.aborted, 'the request in flight was never cancelled: abandon clears what it aborts');
+  const bug: WalkBug = { message: `a walk answer could not be handled: ${message}` };
+  sent.report?.(`Routed walks: ${bug.message}`);
+  turn.onStatus((prev) => ({ ...prev, bug }));
   if (turn.run.inFlight === sent.controller) {
     finish(turn, sent, true);
   }
@@ -275,6 +313,7 @@ function finish(turn: Turn, sent: Sent, failed: boolean): void {
  * rider is located, and only for a stop in `stops` (by walkKey: its stop_id at its place).
  */
 export function useWalkTo(stops: readonly WalkStop[]): WalkTo {
+  invariant(stops.every((stop) => stop.stopId.length > 0 && isLatLon(stop)), 'every stop is a GTFS stop_id at a real coordinate (walkKey keys it by both)');
   const shared = useContext(WalkContext);
   const position = useUserPosition().coordinate;
   const consumer = useId();
@@ -282,7 +321,6 @@ export function useWalkTo(stops: readonly WalkStop[]): WalkTo {
   const cache = shared === null ? null : shared.status.cache;
   useEffect(() => (register === null ? undefined : register(consumer, stops)), [register, consumer, stops]);
   const walk = useMemo(() => walker(cache, stops, position), [cache, stops, position]);
-  invariant(shared !== null || cache === null, 'only a provider knows routed walks');
   invariant(consumer.length > 0, 'a consumer registers under its React id');
   return walk;
 }
@@ -302,7 +340,7 @@ function walker(cache: WalkCache | null, stops: readonly WalkStop[], position: L
 export function useWalkStatus(): WalkStatus {
   const shared = useContext(WalkContext);
   const status = shared === null ? NO_STATUS : shared.status;
-  invariant(shared !== null || status === NO_STATUS, 'without a provider nothing was asked, failed or broke');
-  invariant(status.cache === null || Number.isFinite(status.cache.lastRequestAtS), 'a cache remembers when it was last asked');
+  invariant(status.cache === null || status.cache.lastRequestAtS > 0, 'a cache remembers the real instant its latest answer was asked at');
+  invariant(status.bug === null || status.bug.message.length > 0, 'a bug says what broke');
   return status;
 }

@@ -117,7 +117,7 @@ export function walkFor(cache: WalkCache | null, stop: WalkStop, position: LatLo
  */
 export function mergeWalks(cache: WalkCache | null, answer: WalkAnswer): WalkCache {
   invariant(answer.stops.length >= 1 && answer.stops.length === answer.paths.length, 'an answer gives one walk, or none, per stop asked for');
-  invariant(cache === null || answer.requestedAtS >= cache.lastRequestAtS, 'answers merge in the order they were asked (one request in flight)');
+  invariant(cache === null || answer.requestedAtS >= cache.lastRequestAtS, 'answers merge in the order they were asked (only the request in flight, always the latest asked, merges its answer)');
   const entries = new Map<string, WalkEntry>();
   for (const [key, entry] of cache?.entries ?? []) {
     if (haversineMeters(entry.origin, answer.origin) <= STALE_ORIGIN_M) {

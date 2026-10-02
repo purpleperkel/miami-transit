@@ -211,10 +211,10 @@ card_export_carries() {
 # Expected values come from the shipped engine (tripRides, nearestPlatform, hurryVerdict, tripCards, heroOf).
 # The rider P = (25.7690, -80.1940): 301 m from Brickell City Centre, 176 m from Fifth Street (the nearest station).
 # Cases: where_to trip_verdict soonest countdown near_boundary near_exact live_merge watch budget copy copy_unchanged chip_walk
-# first_leg_optin save_trip
+# first_leg_optin save_trip late_train
 mfix8_oracle() {
   local which="$1" dir out rc=0
-  case "$which" in where_to|trip_verdict|soonest|countdown|near_boundary|near_exact|live_merge|watch|budget|copy|copy_unchanged|chip_walk|first_leg_optin|save_trip) ;;
+  case "$which" in where_to|trip_verdict|soonest|countdown|near_boundary|near_exact|live_merge|watch|budget|copy|copy_unchanged|chip_walk|first_leg_optin|save_trip|late_train) ;;
     *) echo "ratchet: verify-script authoring error: unknown mfix8 oracle case '$which'"; return 1 ;; esac
   need_files src/ui/now/NowAccessory.tsx src/ui/location/UserLocationProvider.tsx src/data/user-db-provider.tsx src/ui/trips/__tests__/trip-db.ts || return 1
   mkdir -p .cache || { echo "ratchet: cannot create .cache"; return 1; }
@@ -657,6 +657,81 @@ const CASES: Record<string, () => Promise<void>> = {
     if (hostsByTestID(multi.root, 'itinerary-save-trip').length !== 0) fail('a multi-ride itinerary offers no save');
     if (why.length < 1 || textOf(why[0]).trim().length === 0 || textOf(why[0]).includes('\n')) fail('a multi-ride itinerary says in one line why it cannot be saved (testID itinerary-save-trip-why)');
   },
+  late_train: async () => {
+    // Arbiter ruling F1: rides are read over the station sheet's lead (SHEET_LEAD_S before now), merged with their OWN
+    // trips' predictions, and only THEN dropped when their merged time is before now. The saved trip Brickell City
+    // Centre -> Bayfront Park at 08:03:20: its 08:03:00 ride left 20 s ago by the timetable.
+    const repo = realScheduleRepo();
+    const { tripVerdict: shipped } = load('src/ui/hurry/trip-verdict', ['tripVerdict']);
+    const { SHEET_LEAD_S } = load('src/ui/stations/station-sheet', ['SHEET_LEAD_S']);
+    const { TRIP_HORIZON_S } = load('src/ui/trips/trip-card', ['TRIP_HORIZON_S']);
+    if (SHEET_LEAD_S !== 300) fail(`premise: the station sheet's lead SHEET_LEAD_S is 300 s, got ${show(SHEET_LEAD_S)}`);
+    const first = repo.tripRides(BCC, BAYFRONT, windowFrom(WED_0800, 3600));
+    if (!first.ok || first.value.kind !== 'rides') fail('premise: Brickell City Centre -> Bayfront Park has rides after 08:00');
+    const late = first.value.rides.find((r: any) => r.depEpoch >= WED_0800);
+    const nowS = late.depEpoch + 20;
+    const wide = repo.tripRides(BCC, BAYFRONT, windowFrom(nowS - SHEET_LEAD_S, SHEET_LEAD_S + TRIP_HORIZON_S));
+    if (!wide.ok || wide.value.kind !== 'rides') fail('premise: the trip has rides over the lead window');
+    const rides = wide.value.rides;
+    const ahead = rides.filter((r: any) => r.depEpoch >= nowS);
+    const LIVE_AT = nowS + 120;
+    if (!rides.some((r: any) => r.boardTripIdx === late.boardTripIdx && r.depEpoch === late.depEpoch)) fail('premise: the late ride is a ride over the lead window');
+    if (ahead.length < 3 || ahead[0].depEpoch <= LIVE_AT) fail(`premise: no other ride leaves before the late ride's live time (next ride ${ahead[0]?.depEpoch - nowS} s after now)`);
+    const deps = repo.departures(BCC, windowFrom(nowS - 600, 1200));
+    const all = deps.ok && deps.value.kind === 'departures' ? deps.value.departures : [];
+    const own = all.find((d: any) => d.serviceDate === late.serviceDate && d.tripIdx === late.boardTripIdx && d.stopId === late.boardStopId && d.epoch === late.depEpoch);
+    const rideTrips = new Set(rides.map((r: any) => `${r.serviceDate}:${r.boardTripIdx}`));
+    const other = all.filter((d: any) => d.epoch < nowS && !rideTrips.has(`${d.serviceDate}:${d.tripIdx}`)).pop();
+    if (own === undefined || other === undefined || other.tripId === own.tripId) fail('premise: the late ride boards one of BCC\'s departures, and another trip (no ride of this saved trip) left BCC before now');
+    // The rider stands 60 m from the late ride's platform: a walk still makes the late train at its live time.
+    const board = repo.platforms().find((p: any) => p.stopId === late.boardStopId);
+    const perDeg = haversineMeters(board, { latitude: board.latitude + 1, longitude: board.longitude });
+    const rider = { latitude: board.latitude - 60 / perDeg, longitude: board.longitude };
+    const boardsOf = (rs: any[]) => repo.platforms().filter((p: any) => rs.some((r: any) => r.boardStopId === p.stopId));
+    const walkMeters = nearestPlatform(rider, boardsOf([late, ...ahead]), null).walkMeters;
+    if (nearestPlatform(rider, boardsOf(rides), null).walkMeters !== walkMeters) fail('premise: every ride over the lead window boards a platform as near as the judged rides\'');
+    const pace = { walkMps: 1.35, jogMps: 2.7 };
+    const sched = (r: any) => ({ epoch: r.depEpoch, live: false, lineId: r.lineId, headsign: null });
+    const schedV = hurryVerdict({ now: nowS, walkMeters, departures: ahead.map(sched), ...pace });
+    const liveV = hurryVerdict({ now: nowS, walkMeters, departures: [{ epoch: LIVE_AT, live: true, lineId: late.lineId, headsign: null }, ...ahead.map(sched)], ...pace });
+    const days = repo.serviceDays(windowFrom(nowS, TRIP_HORIZON_S));
+    const ctx = { now: nowS, clock: clockFor(days.days.map((d: any) => d.baseEpoch)) };
+    if (liveV.kind !== 'CHILL' || statusLine(liveV, ctx) === statusLine(schedV, ctx)) fail(`premise: a walk makes the late train at its live time, and that changes the status line (${statusLine(liveV, ctx)} vs ${statusLine(schedV, ctx)})`);
+    // live_merge's prediction fixtures, fetched at now (fresh).
+    const pred = (d: any, epoch: number, at: Record<string, unknown> = {}) => ({ tripId: d.tripId, routeId: String(d.lineId), lineId: d.lineId, stopId: d.stopId, stationKey: BCC, epoch, scheduledEpoch: d.epoch, delayS: epoch - d.epoch, realtime: true, canceled: false, headsign: null, ...at });
+    const batch = (items: unknown[]) => ({ items, feedTimestamp: nowS, dropped: {}, provider: 'transitland', fetchedAt: nowS, bytes: 1 });
+    const ownLive = [pred(own, LIVE_AT)];
+    // Another trip's live news: at its own stop, and (a matching probe) at the late ride's own stop and scheduled second.
+    const decoys = [pred(other, LIVE_AT), pred(other, LIVE_AT, { stopId: late.boardStopId, scheduledEpoch: late.depEpoch, delayS: LIVE_AT - late.depEpoch })];
+    const judge = (items: unknown[] | null) => shipped(repo, { from: BCC, to: BAYFRONT, position: rider, nowS, pace, batch: items === null ? null : batch(items) });
+    const at = (d: any) => (d === null || d === undefined ? null : { afterNowS: d.epoch - nowS, live: d.live });
+    const withOwn = judge(ownLive);
+    const d1 = withOwn?.verdict.departure;
+    if (withOwn === null || d1 === null || d1.epoch !== LIVE_AT || d1.live !== true || withOwn.verdict.live !== true || d1.stale === true) {
+      fail(`the ride scheduled 20 s before now (${ctx.clock(late.depEpoch)}) whose OWN trip is predicted live ${LIVE_AT - nowS} s after now must be the verdict's first departure, live and fresh: tripVerdict's first departure is ${show(at(d1))} — it was dropped by its SCHEDULED time before the live merge`);
+    }
+    if (statusLine(withOwn.verdict, withOwn.ctx) !== statusLine(liveV, ctx) || withOwn.walkMeters !== walkMeters) fail(`tripVerdict with the late train live: want ${show(statusLine(liveV, ctx))} walking ${walkMeters} m, got ${show(statusLine(withOwn.verdict, withOwn.ctx))} walking ${withOwn.walkMeters} m`);
+    for (const [name, items] of [['no prediction', null], ['only another trip\'s predictions', decoys]] as const) {
+      const got = judge(items as unknown[] | null);
+      const judged = got === null ? [] : [got.verdict.departure, got.verdict.next, got.verdict.nested?.departure].filter((d: any) => d !== null && d !== undefined);
+      if (got === null || judged.some((d: any) => d.epoch === late.depEpoch || d.epoch === LIVE_AT) || got.verdict.departure?.epoch !== ahead[0].depEpoch || got.verdict.live) {
+        fail(`${name}: the ride scheduled 20 s before now is not judged (first departure: the next ride, ${ahead[0].depEpoch - nowS} s after now, scheduled), got ${show(at(got?.verdict.departure))}`);
+      }
+      if (statusLine(got.verdict, got.ctx) !== statusLine(schedV, ctx)) fail(`${name}: want the timetable's ${show(statusLine(schedV, ctx))}, got ${show(statusLine(got.verdict, got.ctx))}`);
+    }
+    // The REAL bar on the saved trip at 08:03:20: the live late train is what it judges; without its own news, the next ride.
+    const live = (items: unknown[]) => ({ runtime: idleRuntime(), state: { vehicles: null, status: {}, predictions: new Map([[BCC, batch(items)]]) } });
+    const want = (v: any) => ['Bayfront Park', statusLine(v, ctx)];
+    const lit = await bar('regular', [trip('late', BCC, BAYFRONT)], rider, nowS, live(ownLive));
+    if (show(lit.lines) !== show(want(liveV))) fail(`the bar judges the late train at its live time: want ${show(want(liveV))}, got ${show(lit.lines)}`);
+    if (!lit.label.includes(hurrySentence(liveV, ctx))) fail(`the label says the live sentence ${show(hurrySentence(liveV, ctx))}: ${show(lit.label)}`);
+    await unmountAll();
+    for (const [name, value] of [['no prediction', NO_LIVE], ['only another trip\'s predictions', live(decoys)]] as const) {
+      const b = await bar('regular', [trip('late', BCC, BAYFRONT)], rider, nowS, value);
+      if (show(b.lines) !== show(want(schedV))) fail(`${name}: the bar never judges the ride scheduled 20 s before now: want ${show(want(schedV))}, got ${show(b.lines)}`);
+      await unmountAll();
+    }
+  },
 };
 it('ratchet oracle', async () => {
   const run = CASES[CASE];
@@ -674,6 +749,181 @@ TSX
   echo "$out" | _qgrep -E "Tests: +1 passed, 1 total" \
     || { echo "$out" | tail -15; echo "ratchet: the mfix8 oracle '$which' did not run"; return 1; }
   echo "ratchet: mfix8 oracle '$which' holds on the shipped app"
+}
+
+# mfix8_plan_oracle chip_follows — arbiter ruling F2 on the SHIPPED route options sheet (mfix8_oracle's pattern: a
+# throwaway jest test in the gitignored .cache, removed whether it passes or fails). mfix5's PlanScreen harness
+# (plan-route-from-here.test.tsx): the REAL PlanScreen under the REAL UserLocationProvider and ScheduleDbProvider (the
+# committed assets/db/schedule.db through node:sqlite), jest fake timers at the fixture's ASKED_AT_S stepped 1 s per act,
+# Transitous answering with the committed fixture, Brickell picked from the recent places; labelled native mocks of
+# expo-sqlite, expo-sqlite/kv-store, expo-location and expo/fetch only. The plan is from the rider's OWN location
+# (fromStation null), at the fixture's START. m10a's firstLegVerdict is watched through a call-through jest.spyOn.
+mfix8_plan_oracle() {
+  local which="$1" dir out rc=0
+  case "$which" in chip_follows) ;;
+    *) echo "ratchet: verify-script authoring error: unknown mfix8 plan oracle case '$which'"; return 1 ;; esac
+  need_files src/ui/routes/PlanScreen.tsx src/ui/routes/use-route-plan.ts src/ui/location/UserLocationProvider.tsx src/ui/routes/__tests__/route-fixtures.ts src/domain/routes/__fixtures__/transitous-plan.json src/ui/trips/__tests__/trip-db.ts || return 1
+  mkdir -p .cache || { echo "ratchet: cannot create .cache"; return 1; }
+  dir="$PWD/.cache/ratchet-mfix8-plan-oracle.$$.$RANDOM"
+  mkdir -p "$dir" || { echo "ratchet: cannot create $dir"; return 1; }
+  cat > "$dir/plan.oracle.test.tsx" <<'TSX'
+const path = require('node:path');
+const CASE = process.env.MFIX8_CASE ?? '';
+const fail = (m: string): never => { throw new Error(`ratchet-oracle: ${CASE}: ${m}`); };
+const show = (v: unknown): string => JSON.stringify(v);
+const load = (rel: string, names: string[]): Record<string, any> => {
+  let mod: Record<string, any> = {};
+  try { mod = require(path.join(process.cwd(), rel)); } catch (e) { fail(`${rel} does not load under jest: ${(e as Error).message}`); }
+  for (const n of names) if (mod[n] === undefined) fail(`${rel} exports no ${n}`);
+  return mod;
+};
+type Fix = { latitude: number; longitude: number };
+let mockStart: Fix | null = null;
+let mockOnFix: ((fix: unknown) => void) | null = null;
+let mockCopy: unknown = null;
+const mockAsked: string[] = [];
+// test-time mock of native module
+jest.mock('expo-sqlite', () => ({ SQLiteProvider: mockProvider, useSQLiteContext: mockScheduleCopy }));
+// test-time mock of native module
+jest.mock('expo-sqlite/kv-store', () => mockKvStore());
+// test-time mock of native module
+jest.mock('expo-location', () => ({ Accuracy: { Balanced: 3 }, requestForegroundPermissionsAsync: mockAsk, getCurrentPositionAsync: mockCurrent, watchPositionAsync: mockWatch }));
+// test-time mock of native module
+jest.mock('expo/fetch', () => ({ fetch: mockFetch }));
+function mockProvider({ children }: { children?: unknown }) { return children as never; }
+function mockScheduleCopy() {
+  if (mockCopy === null) {
+    const { nodeBackedDatabase } = require(require('node:path').join(process.cwd(), 'src/ui/trips/__tests__/trip-db'));
+    const { SCHEDULE_DB_NAME } = jest.requireActual(require('node:path').join(process.cwd(), 'src/data/schedule-db-provider'));
+    mockCopy = { ...nodeBackedDatabase(`${process.cwd()}/assets/db/schedule.db`, true), databasePath: `file:///documents/schedule-db/${SCHEDULE_DB_NAME}` };
+  }
+  return mockCopy;
+}
+function mockKvStore() { return jest.requireActual(require('node:path').join(process.cwd(), 'src/ui/settings/__tests__/native-fakes')).kvStoreModule(); }
+function mockAsk() { return Promise.resolve({ granted: true, status: 'granted', canAskAgain: false, expires: 'never' }); }
+function mockCoords(at: Fix) { return { coords: { ...at, altitude: null, accuracy: 10, altitudeAccuracy: null, heading: null, speed: null }, timestamp: Date.now() }; }
+function mockCurrent() { if (mockStart === null) throw new Error('ratchet-oracle: no start fix set'); return Promise.resolve(mockCoords(mockStart)); }
+function mockWatch(_o: unknown, onFix: (fix: unknown) => void) {
+  mockOnFix = onFix;
+  if (mockStart !== null) onFix(mockCoords(mockStart));
+  return Promise.resolve({ remove: () => undefined });
+}
+function mockFetch(url: unknown) {
+  mockAsked.push(String(url));
+  const fixture = jest.requireActual(require('node:path').join(process.cwd(), 'src/domain/routes/__fixtures__/transitous-plan.json'));
+  return Promise.resolve({ status: 200, headers: { get: () => null }, text: async () => JSON.stringify(fixture) });
+}
+const { act, create } = require('react-test-renderer');
+const { hostsByTestID } = load('src/ui/primitives/__tests__/render-primitive', ['hostsByTestID']);
+const { closeTripDbs } = load('src/ui/trips/__tests__/trip-db', ['closeTripDbs']);
+const f = load('src/ui/routes/__tests__/route-fixtures', ['START', 'END', 'ASKED_AT_S']);
+const { press } = load('src/ui/stations/__tests__/press', ['press']);
+const { PlanScreen } = load('src/ui/routes/PlanScreen', ['PlanScreen']);
+const { RouteOptionsList } = load('src/ui/routes/RouteOptionsList', ['RouteOptionsList']);
+const { UserLocationProvider } = load('src/ui/location/UserLocationProvider', ['UserLocationProvider']);
+const { ScheduleDbProvider } = load('src/data/schedule-db-provider', ['ScheduleDbProvider']);
+const { recordRecentPlace } = load('src/ui/routes/recent-places', ['recordRecentPlace']);
+const { readWalkingPace } = load('src/ui/settings/walking-pace', ['readWalkingPace']);
+const { hurryShort } = load('src/ui/hurry/copy', ['hurryShort']);
+const { copy } = load('src/ui/copy', ['copy']);
+const { haversineMeters } = load('src/lib/geo', ['haversineMeters']);
+const overlay = load('src/domain/routes/overlay', ['firstLegVerdict']);
+const trees: any[] = [];
+afterEach(async () => { await act(async () => trees.splice(0).forEach((t) => t.unmount())); jest.useRealTimers(); jest.restoreAllMocks(); });
+afterAll(() => closeTripDbs());
+async function settle(seconds: number): Promise<void> {
+  for (let i = 0; i < seconds; i += 1) await act(async () => { await jest.advanceTimersByTimeAsync(1_000); });
+}
+/** The routed metres of an itinerary's WALK legs before its first ride, or null when it has none to sum (chip_walk's rule). */
+function routedOf(itinerary: any): number | null {
+  const legs = itinerary.legs;
+  const first = legs.findIndex((l: any) => l.tripId !== null);
+  const before = legs.slice(0, first).filter((l: any) => l.mode === 'WALK');
+  return first < 1 || before.length === 0 || before.some((l: any) => l.distanceM === null) ? null : before.reduce((s: number, l: any) => s + l.distanceM, 0);
+}
+/** The one RouteOptionsList the sheet renders: its options and the clock and instant its chips are drawn at. */
+function shownList(tree: any): { options: any[]; ctx: { now: number; clock: (e: number) => string } } {
+  const lists = tree.root.findAll((n: any) => n.type === RouteOptionsList);
+  if (lists.length !== 1) fail(`the sheet renders ${lists.length} RouteOptionsList(s), want 1`);
+  const p = lists[0].props;
+  return { options: p.options, ctx: { now: p.nowS, clock: p.clock } };
+}
+/** Every rendered chip shows hurryShort of its option's verdict (the chip re-renders what it judges). */
+function chipsShow(tree: any, where: string): void {
+  const { options, ctx } = shownList(tree);
+  options.forEach((option: any, row: number) => {
+    if (option.verdict === null) return;
+    const host = hostsByTestID(tree.root, `route-option-${row}-hurry-text`)[0];
+    const text = host === undefined ? null : String(host.props.children);
+    if (text !== hurryShort(option.verdict, ctx)) fail(`${where}: option ${row}'s chip shows ${show(text)}, not its verdict ${show(hurryShort(option.verdict, ctx))}`);
+  });
+}
+const CASES: Record<string, () => Promise<void>> = {
+  chip_follows: async () => {
+    jest.useFakeTimers({ now: f.ASKED_AT_S * 1000 });
+    const verdicts = jest.spyOn(overlay, 'firstLegVerdict');
+    const { walkMps } = readWalkingPace();
+    mockStart = f.START;
+    if (!recordRecentPlace(f.END).ok) fail('premise: Brickell is saved as a recent place');
+    await act(async () => void trees.push(create(<UserLocationProvider><ScheduleDbProvider><PlanScreen fromStation={null} /></ScheduleDbProvider></UserLocationProvider>)));
+    const tree = trees[0];
+    await settle(1);
+    const from = hostsByTestID(tree.root, 'plan-from')[0]?.props.children;
+    if (from !== copy.yourLocation) fail(`premise: the sheet plans from the rider's own location ("${copy.yourLocation}"), its From line reads ${show(from)}`);
+    await press(tree, 'plan-recent-0');
+    await settle(2);
+    if (mockAsked.length !== 1 || !mockAsked[0].includes(`fromPlace=${f.START.latitude},${f.START.longitude}&`)) fail(`premise: the sheet asked Transitous once, from the rider's fix at the fixture's START, got ${show(mockAsked)}`);
+    if (mockOnFix === null) fail('premise: the app\'s one location watch is running');
+    // 1. The rider at the plan's start: every option whose first ride is reached by routed WALK legs walks their sum.
+    let routed = 0;
+    for (const option of shownList(tree).options) {
+      const metres = routedOf(option.itinerary);
+      if (metres === null) continue;
+      if (option.verdict === null || Math.abs(option.verdict.walkS - metres / walkMps) > 0.05) fail(`at the plan's start, option ${option.id}'s chip must walk the routed ${metres} m (walkS ${(metres / walkMps).toFixed(1)}), got ${show(option.verdict?.walkS)}`);
+      routed += 1;
+    }
+    if (routed < 2) fail(`premise: only ${routed} option(s) have a routed first walk — the oracle needs >= 2`);
+    chipsShow(tree, 'at the plan\'s start');
+    const before = verdicts.mock.calls.map((c: unknown[]) => c[1] as Fix);
+    if (before.length === 0 || before.some((p) => haversineMeters(p, f.START) > 1)) fail(`premise: the spy sees the sheet's first-leg verdicts, all at the plan's start, got ${before.length} call(s) at ${show(before.slice(-2))}`);
+    // 2. The rider walks 300 m south (the watch's next fix): the chip follows them — mfix5's straight line from the rider.
+    const moved = { latitude: f.START.latitude - 300 / 111_195, longitude: f.START.longitude };
+    verdicts.mockClear();
+    await act(async () => { (mockOnFix as (fix: unknown) => void)(mockCoords(moved)); });
+    await settle(2);
+    const calls = verdicts.mock.calls;
+    const last = calls.length === 0 ? null : (calls[calls.length - 1] as unknown[])[1] as Fix;
+    if (last === null || haversineMeters(last, moved) > 1) {
+      fail(`after the rider moved 300 m from the start of a plan from their OWN location, firstLegVerdict must receive the moved coordinate ${show(moved)}: it was called ${calls.length} time(s)${last === null ? '' : `, last at ${show(last)} (${haversineMeters(last, moved).toFixed(0)} m from the rider)`} — the chip still measures from the plan's static start`);
+    }
+    let straight = 0;
+    for (const option of shownList(tree).options) {
+      const ride = option.itinerary.legs.find((l: any) => l.tripId !== null);
+      if (ride === undefined || option.verdict === null) continue;
+      const metres = haversineMeters(moved, { latitude: ride.from.latitude, longitude: ride.from.longitude }) * 1.3;
+      if (Math.abs(option.verdict.walkS - metres / walkMps) > 0.05) fail(`300 m from the start, option ${option.id}'s chip walks the straight line from the rider x 1.3 (walkS ${(metres / walkMps).toFixed(1)}), got ${show(option.verdict.walkS)}`);
+      straight += 1;
+    }
+    if (straight < 2) fail(`only ${straight} chip(s) judged after the move — the oracle needs >= 2`);
+    chipsShow(tree, '300 m from the start');
+  },
+};
+it('ratchet oracle', async () => {
+  const run = CASES[CASE];
+  if (run === undefined) fail('unknown oracle case');
+  await run();
+  expect(CASE.length).toBeGreaterThan(0);
+}, 120_000); // a real-DB sheet render stepped second by second: never trip jest's 5 s default on a busy machine
+TSX
+  out=$(MFIX8_CASE="$which" local_bin jest --ci --rootDir "$PWD" --roots "$dir" --testMatch '**/*.oracle.test.tsx' 2>&1) || rc=$?
+  rm -rf "$dir"
+  if [ "$rc" -ne 0 ]; then
+    if echo "$out" | _qgrep "ratchet-oracle:"; then echo "$out" | grep -m1 -o "ratchet-oracle:.*"; else echo "$out" | tail -25; fi
+    echo "ratchet: mfix8 plan oracle '$which' failed"; return 1
+  fi
+  echo "$out" | _qgrep -E "Tests: +1 passed, 1 total" \
+    || { echo "$out" | tail -15; echo "ratchet: the mfix8 plan oracle '$which' did not run"; return 1; }
+  echo "ratchet: mfix8 plan oracle '$which' holds on the shipped app"
 }
 
 
@@ -757,10 +1007,16 @@ after_card mocks_native_only src/ui/now/__tests__
 after_card mocks_native_only src/ui/routes/__tests__
 after_card mocks_native_only src/ui/hurry/__tests__
 
+# --- Arbiter rulings on 0451a6c: F1 the late train, F2 the chip follows the rider ---------------------------------
+# 21b. Oracle (F1): the saved trip Brickell City Centre -> Bayfront Park at 08:03:20 (its 08:03:00 ride left 20 s ago by the timetable), the rider 60 m from that ride's platform. tripVerdict (signature unchanged) reads the rides from SHEET_LEAD_S before now, merges their OWN trips' predictions, and only then drops what leaves before now: with a fresh live prediction for the 08:03:00 ride's own trip at its boarding stop, 120 s after now, the verdict's first departure IS that ride, live, and the REAL bar reads ["Bayfront Park", the status line of that live verdict] with its live sentence in the label; with no prediction, or with only another trip's predictions (at its own stop, and at the late ride's stop and scheduled second), the 08:03:00 ride is not judged and the bar shows the timetable's verdict.
+mfix8_oracle late_train
+# 21c. Oracle (F2): the REAL PlanScreen planning from the rider's OWN location (not "Route from here"; mfix5's harness): with the rider at the plan's start, every chip whose first ride is reached by routed WALK legs walks their sum; after the location watch's next fix 300 m south, firstLegVerdict receives the moved coordinate and every chip walks mfix5's straight line from the rider x 1.3; the rendered chips show hurryShort of those verdicts.
+mfix8_plan_oracle chip_follows
+
 # --- Repo-wide ----------------------------------------------------------------------------------------------------
 # 22. With this card's files in the tree: tsc (app + scripts), eslint --max-warnings 0, standards, jest (every test), node:test — all green.
 card_full_gate
 # 23. (guarded) Metro bundles the app for iOS on a private cache, and the --no-bytecode bundle carries "Where to?".
 card_export_carries 'Where to?'
 
-echo "mfix8_trip_bar: all 35 gate lines green"
+echo "mfix8_trip_bar: all 37 gate lines green"

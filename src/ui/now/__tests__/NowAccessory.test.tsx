@@ -195,7 +195,10 @@ describe('the Now strip (R2): no feed hash', () => {
         }
       }
     }
-    expect(seen.length).toBeGreaterThanOrEqual(2 * 3 * 3 * 2);
+    // 2 placements × 3 fixes × 3 schedule states, each saying its lines and its label: 36 while every state said
+    // one line (before mfix8), and 3 more now — in the three 'ready' states above the tab bar the saved trip shows,
+    // as two lines (its destination over its verdict near Government Center, or over its countdown otherwise).
+    expect(seen).toHaveLength(2 * 3 * 3 * 2 + 3);
     // Every state was said: the saved trip judged (its destination first, then the trip in words), and where to
     // (no trip near, no fix, the schedule opening or failed).
     expect(seen.some((said) => said.includes('Trip to Brickell from Government Center'))).toBe(true);
@@ -206,7 +209,7 @@ describe('the Now strip (R2): no feed hash', () => {
 });
 
 describe('the Now strip (mfix8): a saved trip from the nearest station', () => {
-  it('says hurry or chill for the nearest station in both placements', async () => {
+  it('judges the saved trip that starts at the nearest station, in both placements', async () => {
     const captured: { db: ScheduleDbState } = { db: { kind: 'opening' } };
     await renderPrimitive(<ScheduleDbProvider><DbProbe onState={(state) => void (captured.db = state)} /></ScheduleDbProvider>);
     await settle();
@@ -240,7 +243,7 @@ function idleRuntime(): LiveRuntime {
 }
 
 describe('the Now strip (M7c.3, mfix8): the realtime cost rule', () => {
-  it('watches the nearest station only, and none from across town', async () => {
+  it('watches only the near saved trip\'s origin, and nothing from across town', async () => {
     const runtime = idleRuntime();
     const watch = jest.spyOn(runtime, 'watchStations');
     // The saved trip leaves from the nearest station, so its predictions are watched — and nothing else.
@@ -251,6 +254,9 @@ describe('the Now strip (M7c.3, mfix8): the realtime cost rule', () => {
     watch.mockClear();
     mockFix = ACROSS_TOWN;
     const far = await renderAccessory('ready', 'regular', [TO_BRICKELL], { state: null, runtime });
+    // Across town (~9 km south) the trip is not near, so nothing is judged: the bar shows m7b's countdown for it —
+    // its destination over when to leave, the long walk to Government Center included — and watches nothing.
+    expect(far.lines).toEqual(['Brickell', 'Leave in 7 min']);
     expect(far.label).not.toMatch(/going by (live|scheduled) times|estimated/);
     expect(watch).not.toHaveBeenCalled();
   });
@@ -292,7 +298,8 @@ describe('the Now strip (M7c.3, mfix8): inline and full', () => {
 
   it('without a verdict it says where to, or why no train runs', () => {
     expect(nowStripText({ kind: 'unknown' }, null, 'regular')).toEqual({ lines: ['Where to?'], label: 'Where to? Opens route options.' });
-    expect(nowStripText({ kind: 'nearest', stationKey: 'rail:palmetto', stationName: 'Palmetto', distanceM: 12_400 }, null, 'inline').lines).toEqual(['Where to?']);
+    // At a station with no saved trip from it, the bar still never judges the station: it asks where to.
+    expect(nowStripText({ kind: 'station', stationKey: 'rail:palmetto', stationName: 'Palmetto', distanceM: 40, autoPresent: false }, null, 'inline').lines).toEqual(['Where to?']);
     const night = nowStripText({ kind: 'noService', reopens: { mode: 'rail', at: { epoch: WED_0800 - 3 * 3600, serviceDate: 20260930, serviceSec: 5 * 3600 } } }, null, 'regular');
     expect(night.lines).toEqual(['No trains now', 'Metrorail opens 5:00 AM']);
     expect(night.label).toBe('No trains or Metromover cars run now. Metrorail opens 5:00 AM. Opens Data & Settings.');

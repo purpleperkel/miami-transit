@@ -27,8 +27,9 @@ import { type OriginState, type PlanState, useChipPosition, useLiveOptions, useP
  * hurry chip; a tapped option opens its legs here in the sheet, with walking directions one tap away.
  * When Transitous cannot answer, Apple Maps can ("Open in Apple Maps"). The credits sit at the bottom.
  * mfix5: once the first option has left, the open sheet asks again — once per answer, and not while an
- * option's legs are open (the rider may be on that train) — and for "Route from here" the hurry chips
- * walk from the rider when the location module has a fix, since the plan itself starts at the station.
+ * option's legs are open (the rider may be on that train) — and the hurry chips walk from the rider when
+ * the location module has a fix: for "Route from here", whose plan starts at the station, and (mfix8) for
+ * a plan from the rider's own location too, whose start is the one fix taken when the sheet opened.
  *
  *   PlanScreen (schedule DB, location, Transitous, live runtime, clock) → PlanBody (props only)
  */

@@ -28,7 +28,7 @@ import { boardingStations, type OptionContext, optionLeavesS, predictionsAt, typ
  *   usePlanRequest   Transitous's itineraries for (start, destination) through the app's polite client;
  *                    'superseded' (a newer call replaced this one) is ignored, never shown as an error
  *   useReplanOnceLeft  asks again ONCE per answer, once its first option has left (mfix5)
- *   useChipPosition  where the hurry chips walk from: for "Route from here", the rider when located (mfix5)
+ *   useChipPosition  where the hurry chips walk from: the rider when located, for every plan (mfix5; mfix8)
  *   useLiveOptions   the itineraries corrected by m4b's live predictions (m10a's overlay) for their
  *                    boarding stations — watched only while the sheet is open, at most MAX_WATCHED_STATIONS
  *                    (REALTIME COST RULE) — as rows sorted by arrival, each with its hurry chip
@@ -175,14 +175,19 @@ function replanIfLeft(watched: { current: Watched | null }, itineraries: readonl
 }
 
 /**
- * Where the hurry chips measure the walk from: for "Route from here" (the plan starts at the station),
- * the rider — followed by the app's ONE location module while the sheet is open — once located; the
- * plan's start otherwise (and always for a plan from the rider's own location, which IS that start).
+ * Where the hurry chips measure the walk from, for EVERY plan: the rider — followed by the app's ONE location
+ * watch (mfix6) while the sheet is open, so following costs nothing — once located; the plan's start without
+ * a fix. A "Route from here" plan starts at the station (mfix5), and a plan from the rider's own location starts
+ * at the ONE fix the sheet took when it opened: either way the rider may have moved on since, and the chip
+ * asks whether the RIDER makes the train. That is what lets route-options.ts keep the routed first walk only
+ * while the rider is within CHIP_ROUTED_START_M of the itinerary's start, and fall back to the straight line
+ * from the rider once they have walked off (mfix8). `fromStation` names the kind of plan; the rule is the same.
  */
 export function useChipPosition(fromStation: string | null, start: LatLon | null): LatLon | null {
-  const rider = useUserPosition(fromStation !== null);
-  const position = fromStation !== null && rider.coordinate !== null ? rider.coordinate : start;
-  invariant(fromStation !== null || rider.coordinate === null, 'the rider is only followed for a plan from a station');
+  invariant(fromStation === null || fromStation.includes(':'), `a plan starts at a station keyed mode:name, got "${fromStation}"`);
+  const rider = useUserPosition(true);
+  const position = rider.coordinate ?? start;
+  invariant(rider.coordinate === null || position === rider.coordinate, 'once the rider is located the chip walks from them, whatever kind of plan');
   invariant(position === null || isLatLon(position), 'the chip walks from a real coordinate');
   return position;
 }

@@ -48,7 +48,6 @@ export function nowStripText(context: HomeContext, verdict: TripVerdict | null, 
       said = noServiceText(context, placement);
       break;
     case 'station':
-    case 'nearest':
     case 'unknown':
       said = WHERE_TO;
       break;

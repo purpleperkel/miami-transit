@@ -18,9 +18,10 @@ import { clockFor } from '../hurry/hurry-reading';
  *
  * sorted by ARRIVAL (the question is "when do I get there?"), each with its line badges, a Live badge when
  * any leg runs on a live prediction, and hurry or chill for the FIRST transit leg — m7c's engine through
- * m10a's firstLegVerdict, walking to the boarding stop at Jamie's paces from the plan's start — or, for
- * "Route from here", from the rider when located (mfix5; OptionContext.position). A late leg that may
- * cost a connection says so on its row: "Tight transfer · may miss 26".
+ * m10a's firstLegVerdict, walking to the boarding stop at Jamie's paces from the rider when located, else
+ * from the plan's start — for every plan, "Route from here" (mfix5) or from the rider's own location (mfix8;
+ * OptionContext.position, use-route-plan.ts useChipPosition). A late leg that may cost a connection says so
+ * on its row: "Tight transfer · may miss 26".
  *
  * The chip's walk (mfix8, Jamie: "it seems to say chill when the walk is 11 min and train leaves in 2"):
  * while the rider is still within CHIP_ROUTED_START_M of where the itinerary starts, the walk is the one

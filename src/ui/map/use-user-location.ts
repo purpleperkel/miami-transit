@@ -23,7 +23,7 @@ import { copy } from '../copy';
  * new fix every WATCH_DISTANCE_M, enough to keep "350 m" honest without running GPS hard. It shares the
  * answer and the latest fix through LocationContext, which this module owns. The Stations list (m6b R7),
  * the hurry hook and the Now strip, the Trips tab and a trip's screen, and the route options sheet's
- * "Route from here" chips (mfix5) read the fix through useUserPosition; the map's blue dot reads the
+ * hurry chips (mfix5; every plan since mfix8) read the fix through useUserPosition; the map's blue dot reads the
  * answer through useUserLocation. So the dot, the list's distances and the chips agree, and the phone
  * runs one watch, not one per caller (the Now strip alone is mounted twice on iOS 26, once per accessory
  * placement). This module holds the pieces the provider uses and never imports the provider.
@@ -173,7 +173,7 @@ export const LocationContext = createContext<SharedLocation | null>(null);
 /**
  * The rider's position: the latest fix of the app's ONE location watch, or why there is none (the Stations
  * list, the hurry hook and the Now strip, the Trips tab, a trip's screen, and the route options sheet's
- * hurry chips for "Route from here", mfix5). Not `enabled`: no position, whatever the watch has. Outside
+ * hurry chips, mfix5 and mfix8). Not `enabled`: no position, whatever the watch has. Outside
  * UserLocationProvider it fails loud: there is no fallback that would open a watch of its own.
  */
 export function useUserPosition(enabled: boolean = true): UserPosition {

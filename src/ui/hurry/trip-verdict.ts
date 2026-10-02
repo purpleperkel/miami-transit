@@ -11,6 +11,7 @@ import type { LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
 import type { Result } from '../../lib/result';
 import type { WalkingPace } from '../settings/walking-pace';
+import { SHEET_LEAD_S } from '../stations/station-sheet';
 import { TRIP_HORIZON_S } from '../trips/trip-card';
 import type { HurryCopyContext } from './copy';
 import { clockFor, liveIsStale } from './hurry-reading';
@@ -20,17 +21,30 @@ import { clockFor, liveIsStale } from './hurry-reading';
  * worth it next in 10 min fifth street' without me even entering where I wanna go"): hurry or chill for a
  * SAVED TRIP — the pure half of the Now bar's verdict. Only trains that take the rider where the trip goes count:
  *
- *   rides    the schedule's tripRides(from, to) over the trip card's own horizon (TRIP_HORIZON_S), departing
- *            from now on — never the other direction, never a train that does not reach the destination
+ *   rides    the schedule's tripRides(from, to) over verdictWindow(now): from SHEET_LEAD_S before now (the
+ *            station sheet's rule, m6a) to the trip card's horizon (TRIP_HORIZON_S) — never the other
+ *            direction, never a train that does not reach the destination
  *   live     m4a's merge over those rides' boarding departures, fed ONLY the predictions for those very GTFS
- *            trips (a prediction for another trip — the other direction, another station — never moves a
- *            ride); a canceled ride drops out (board.ts); live data past its provider's fresh limit is stale
- *   walk     the straight line from the rider to the nearest of the rides' boarding platforms, which m7c's
- *            engine turns into a walk with its 1.3 detour at Jamie's paces: an ESTIMATE, and the bar says so
+ *            trips (a prediction for another trip — the other direction, another station — never moves a ride)
+ *   coming   ONLY THEN are trains that have gone dropped (board.ts): a ride counts when its MERGED time is now
+ *            or later, so a train scheduled 7:59:40 and predicted for 8:02 is still caught at 8:00:00, while one
+ *            scheduled before now with no prediction is gone. A canceled ride drops out; live data past its
+ *            provider's fresh limit is stale
+ *   walk     the straight line from the rider to the nearest boarding platform of the rides still to come (the
+ *            origin's nearest platform when none is), which m7c's engine turns into a walk with its 1.3 detour
+ *            at Jamie's paces: an ESTIMATE, and the bar says so
  *   verdict  m7c's hurryVerdict over those departures
  *
- * Null when the schedule cannot judge the trip now — a station it does not know, a pair that needs a transfer,
- * or no timetable. When nothing leaves the origin (night) the verdict is NO_SERVICE.
+ * Two halves, so the Now bar reads the schedule once a minute (as the station sheet's stationTimetable does) yet
+ * judges every tick with the latest live batch, position and instant (useNearTripVerdict):
+ *
+ *   tripTimetable  the schedule reads: the rides over a window, their boarding departures, the origin's
+ *                  platforms and the clock's service-day bases
+ *   judgeTrip      the verdict at one instant, over a timetable whose window holds that instant's verdictWindow
+ *   tripVerdict    both, read over exactly verdictWindow(now)
+ *
+ * Null when the schedule cannot judge the trip — a station it does not know, a pair that needs a transfer, or no
+ * timetable. When nothing leaves the origin (night) the verdict is NO_SERVICE.
  */
 
 export type TripVerdict = {
@@ -59,48 +73,112 @@ export type TripVerdictInput = {
   readonly batch: LiveBatch<LivePrediction> | null;
 };
 
+/** The schedule's half of a trip's verdict, read once over `window` and judged at any instant whose verdictWindow it holds. */
+export type TripTimetable = {
+  readonly from: string;
+  readonly to: string;
+  readonly window: TimeWindow;
+  /** Each ride's boarding: the origin's timetable departure that IS the ride (its trip, stop and second, on its service day). */
+  readonly boardings: readonly Departure[];
+  /** The origin station's platforms. */
+  readonly platforms: readonly Platform[];
+  /** The running service days' base epochs: what a clock time counts from. */
+  readonly bases: readonly number[];
+};
+
+/** The window whose rides the verdict at `nowS` weighs: the station sheet's lead before now, the trip card's horizon after. */
+export function verdictWindow(nowS: number): TimeWindow {
+  invariant(Number.isSafeInteger(nowS), 'a trip is judged at a whole second');
+  const window = windowFrom(nowS - SHEET_LEAD_S, SHEET_LEAD_S + TRIP_HORIZON_S);
+  invariant(window.fromEpoch < nowS && nowS < window.toEpoch, 'the window holds now');
+  return window;
+}
+
+/** The window read once for the minute starting `minuteS`: it holds the verdictWindow of every second of that minute. */
+export function tripMinuteWindow(minuteS: number): TimeWindow {
+  invariant(Number.isSafeInteger(minuteS) && minuteS % 60 === 0, 'a minute starts on the minute');
+  const window = windowFrom(minuteS - SHEET_LEAD_S, SHEET_LEAD_S + TRIP_HORIZON_S + 59);
+  invariant(holds(window, verdictWindow(minuteS)) && holds(window, verdictWindow(minuteS + 59)), 'every second of the minute is judged inside the read');
+  return window;
+}
+
+/** The trip's verdict at `input.nowS`, its rides read over exactly verdictWindow(now); null when the schedule cannot judge it. */
 export function tripVerdict(source: TripVerdictSource, input: TripVerdictInput): TripVerdict | null {
   invariant(input.from !== input.to && input.from.includes(':') && input.to.includes(':'), 'a trip joins two stations keyed mode:name');
-  invariant(Number.isSafeInteger(input.nowS), 'a trip is judged at a whole second');
-  const window = windowFrom(input.nowS, TRIP_HORIZON_S);
-  const outcome = source.tripRides(input.from, input.to, window);
+  const timetable = tripTimetable(source, input.from, input.to, verdictWindow(input.nowS));
+  const judged = timetable === null ? null : judgeTrip(timetable, input);
+  invariant(judged === null || judged.ctx.now === input.nowS, 'the trip is judged at the instant asked');
+  return judged;
+}
+
+/** The trip's rides over `window` and what judging them needs; null when the schedule cannot judge the trip. */
+export function tripTimetable(source: TripVerdictSource, from: string, to: string, window: TimeWindow): TripTimetable | null {
+  invariant(from !== to && from.includes(':') && to.includes(':'), 'a trip joins two stations keyed mode:name');
+  const outcome = source.tripRides(from, to, window);
   if (!outcome.ok || (outcome.value.kind !== 'rides' && outcome.value.kind !== 'no-service')) {
     return null;
   }
-  const rides = outcome.value.kind === 'rides' ? outcome.value.rides.filter((ride) => ride.depEpoch >= input.nowS) : [];
-  const boards = new Set(rides.map((ride) => ride.boardStopId));
-  const platforms = source.platforms().filter((platform) => (boards.size > 0 ? boards.has(platform.stopId) : platform.stationKey === input.from));
-  const nearest = nearestPlatform(input.position, platforms, null);
-  invariant(nearest !== null, `${input.from} has a platform to walk to`);
+  const rides = outcome.value.kind === 'rides' ? outcome.value.rides : [];
   const days = source.serviceDays(window);
   invariant(days.kind === 'active', 'a window the schedule has rides for, or nothing leaving in, has running service days');
-  const departures = rideDepartures(source, rides, input, window);
-  const verdict = hurryVerdict({ now: input.nowS, walkMeters: nearest.walkMeters, departures, ...input.pace });
-  return { verdict, ctx: { now: input.nowS, clock: clockFor(days.days.map((day) => day.baseEpoch)) }, walkMeters: nearest.walkMeters };
+  const platforms = source.platforms().filter((platform) => platform.stationKey === from);
+  invariant(platforms.length > 0, `${from} has a platform to walk to`);
+  return { from, to, window, boardings: boardingDepartures(source, rides, from, window), platforms, bases: days.days.map((day) => day.baseEpoch) };
 }
 
-/** The rides' boarding departures, each moved by its OWN trip's live prediction (m4a's merge): boardable, still to come, earliest first. */
-function rideDepartures(source: TripVerdictSource, rides: readonly Ride[], input: TripVerdictInput, window: TimeWindow): HurryDeparture[] {
-  invariant(rides.every((ride) => ride.depEpoch >= window.fromEpoch && ride.depEpoch <= window.toEpoch), 'every ride boards inside the window');
-  if (rides.length === 0) {
-    return [];
-  }
-  const scheduled = boardingDepartures(source, rides, input.from, window);
+/** The trip's verdict at `input.nowS`, over a timetable read for a window that holds that instant's verdictWindow. */
+export function judgeTrip(timetable: TripTimetable, input: TripVerdictInput): TripVerdict {
+  invariant(timetable.from === input.from && timetable.to === input.to, 'the timetable is the trip judged');
+  const window = verdictWindow(input.nowS);
+  invariant(holds(timetable.window, window), 'the timetable holds every ride the instant weighs');
+  const coming = comingDepartures(timetable, window, input);
+  const platforms = coming.stopIds.size > 0 ? timetable.platforms.filter((platform) => coming.stopIds.has(platform.stopId)) : timetable.platforms;
+  const nearest = nearestPlatform(input.position, platforms, null);
+  invariant(nearest !== null, `${input.from} has a platform to walk to`);
+  const verdict = hurryVerdict({ now: input.nowS, walkMeters: nearest.walkMeters, departures: coming.departures, ...input.pace });
+  return { verdict, ctx: { now: input.nowS, clock: clockFor(timetable.bases) }, walkMeters: nearest.walkMeters };
+}
+
+/** The departures still to come, and the platforms they board at. */
+type Coming = { readonly departures: readonly HurryDeparture[]; readonly stopIds: ReadonlySet<string> };
+
+/**
+ * The rides scheduled inside `window`, each moved by its OWN trip's live prediction (m4a's merge), and only then
+ * the ones still to come (board.ts): boardable, merged time now or later, earliest first.
+ */
+function comingDepartures(timetable: TripTimetable, window: TimeWindow, input: TripVerdictInput): Coming {
+  const scheduled = timetable.boardings.filter((departure) => departure.epoch >= window.fromEpoch && departure.epoch <= window.toEpoch);
   const trips = new Set(scheduled.map((departure) => departure.tripId));
   const own = (input.batch?.items ?? []).filter((prediction) => prediction.tripId !== null && trips.has(prediction.tripId));
   const rows = mergeDepartures(scheduled, own, window).rows;
-  const stopIds = [...new Set(rides.map((ride) => ride.boardStopId))];
-  const departures = hurryDepartures(rows, { stopIds, now: input.nowS, liveStale: liveIsStale(input.batch, input.nowS) });
-  invariant(departures.length <= rides.length + own.length, 'live news adds no train the trip does not ride');
-  return departures;
+  const boards = [...new Set(scheduled.map((departure) => departure.stopId))];
+  const departures = hurryDepartures(rows, { stopIds: boards, now: input.nowS, liveStale: liveIsStale(input.batch, input.nowS) });
+  const kept = new Set(departures.map((departure) => departure.key));
+  const stopIds = new Set(rows.filter((row) => kept.has(row.key)).flatMap((row) => (row.stopId === null ? [] : [row.stopId])));
+  invariant(departures.length <= scheduled.length + own.length, 'live news adds no train the trip does not ride');
+  invariant(departures.every((departure) => departure.key !== undefined), 'every departure keeps its board row\'s key, so its platform is known');
+  invariant(departures.every((departure) => departure.epoch >= input.nowS), 'only trains still to come are weighed');
+  return { departures, stopIds };
 }
 
 /** The origin's timetable departures that ARE the rides' boardings (the same trip, stop and second on the same service day). */
 function boardingDepartures(source: TripVerdictSource, rides: readonly Ride[], from: string, window: TimeWindow): Departure[] {
+  invariant(rides.every((ride) => ride.depEpoch >= window.fromEpoch && ride.depEpoch <= window.toEpoch), 'every ride boards inside the window');
+  if (rides.length === 0) {
+    return [];
+  }
   const read = source.departures(from, window);
   invariant(read.ok && read.value.kind === 'departures', `${from}, which has rides in the window, has departures in it`);
   const boardings = new Set(rides.map((ride) => `${ride.serviceDate}:${ride.boardTripIdx}:${ride.boardStopId}:${ride.depEpoch}`));
   const scheduled = read.value.departures.filter((d) => boardings.has(`${d.serviceDate}:${d.tripIdx}:${d.stopId}:${d.epoch}`));
   invariant(scheduled.length === rides.length, 'every ride boards one of its station\'s departures, each once');
   return scheduled;
+}
+
+/** `outer` holds every second of `inner`. */
+function holds(outer: TimeWindow, inner: TimeWindow): boolean {
+  invariant(outer.fromEpoch <= outer.toEpoch && inner.fromEpoch <= inner.toEpoch, 'both windows are ordered');
+  const held = outer.fromEpoch <= inner.fromEpoch && inner.toEpoch <= outer.toEpoch;
+  invariant(!held || outer.toEpoch - outer.fromEpoch >= inner.toEpoch - inner.fromEpoch, 'a held window is no longer than its holder');
+  return held;
 }

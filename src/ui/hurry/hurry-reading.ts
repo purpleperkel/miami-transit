@@ -28,7 +28,8 @@ import { actionableVerdict, type HurryCopyContext } from './copy';
  *   hurryReading      per direction: the nearest platform serving it (walkMeters), the timetable with the
  *                     live predictions merged in (m4a's merge, as the sheet's DirectionGroup does), the
  *                     boardable departures (board.ts) and the verdict (verdict.ts); or why there is none
- *   soonestBoard      the direction whose recommended train leaves first (the Now strip's pick until mfix8)
+ *   soonestBoard      the direction whose recommended train leaves first (the Now strip's pick until mfix8;
+ *                     kept for the mfix8 verify oracle, see its doc)
  *
  * Live data is stale past its provider's fresh limit (providerConfig(provider).freshS, mfix3's relative
  * rule): its departures carry `stale`, so the verdict's confidence is low and the badge says how old.
@@ -192,6 +193,11 @@ export function clockFor(bases: readonly number[]): (epoch: number) => string {
  * NOT_WORTH_IT verdict's next train, a MISSED verdict's nested one); a tie keeps direction order. It was the
  * Now strip's verdict until mfix8, when the bar began judging a saved trip's own rides instead (trip-verdict.ts):
  * a station's soonest train is often going the wrong way for the rider.
+ *
+ * No app code calls it any more. It is KEPT because the mfix8 verify oracle (scripts/ratchet/verify-mfix8_trip_bar.sh,
+ * its trip_verdict case) loads it by name, to prove the bar no longer judges the nearest station's soonest
+ * direction: at 08:04 the soonest Brickell City Centre train either way is not a Bayfront Park ride, and the bar
+ * must still judge only the Bayfront Park rides.
  */
 export function soonestBoard(boards: readonly HurryBoard[]): HurryBoard {
   invariant(boards.length > 0, 'a station reading has at least one board');

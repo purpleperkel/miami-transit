@@ -56,7 +56,8 @@ describe('the home context: at a station (M7.7)', () => {
     const context = contextNear(120, WED_0800, new NowStore());
     expect(context).toMatchObject({ kind: 'station', stationKey: 'rail:dadeland-north', autoPresent: true });
     expect(context.kind === 'station' ? Math.round(context.distanceM) : null).toBe(120);
-    expect(contextNear(AT_STATION_M + 50, WED_0800, new NowStore())).toMatchObject({ kind: 'nearest', stationKey: 'rail:dadeland-north' });
+    // Beyond AT_STATION_M (and no saved trip) the context knows nothing the rider wants: the bar asks where to.
+    expect(contextNear(AT_STATION_M + 50, WED_0800, new NowStore())).toEqual({ kind: 'unknown' });
   });
 
   it('after a map gesture: no auto-present, until the rider has left the map alone for a while', () => {

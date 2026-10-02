@@ -11,7 +11,7 @@ import { readWalkingPace } from '../settings/walking-pace';
 import type { HomeContext } from '../now/homeContext';
 import { watchStation } from '../stations/use-station-predictions';
 import { type HurryReading, hurryReading, stationTimetable } from './hurry-reading';
-import { type TripVerdict, tripVerdict, type TripVerdictInput, type TripVerdictSource } from './trip-verdict';
+import { judgeTrip, tripMinuteWindow, type TripTimetable, tripTimetable, type TripVerdict, type TripVerdictInput, type TripVerdictSource } from './trip-verdict';
 
 /**
  * Plan M7c.3: hurry-or-chill, live. Composes the real pieces —
@@ -24,6 +24,10 @@ import { type TripVerdict, tripVerdict, type TripVerdictInput, type TripVerdictS
  *                           direction, recomputed every HURRY_TICK_MS
  *   useNearTripVerdict      the Now bar (mfix8): the saved trip the rider is near (homeContext.ts 'nearTrip'),
  *                           judged over that trip's own rides (trip-verdict.ts) at the home context's instant
+ *
+ * SCHEDULE READS ONCE A MINUTE: each reader reads the schedule DB once per minute — the sheet its station's
+ * timetable (stationTimetable), the bar its near trip's rides and their boarding departures (tripTimetable over
+ * tripMinuteWindow) — while the live batch, the position and the instant move the verdict on every tick.
  *
  * REALTIME COST RULE: each reader watches ONE station's predictions — the sheet its station, the bar its near
  * trip's origin, and the bar nothing at all without a near trip. Watches are counted per station
@@ -65,8 +69,10 @@ function useHurryVerdict(stationKey: string, clock: () => number = wallClockNowS
 /**
  * The Now bar's verdict (mfix8): hurry or chill for the near saved trip the home context chose, over that
  * trip's own rides, walked from the rider — live, with its ORIGIN's predictions watched while it is the trip
- * judged. Null whenever the context is not 'nearTrip'. It reads the same schedule, position and instant the
- * context was worked out from, so a near trip the schedule can judge always comes with its verdict.
+ * judged. Null whenever the context is not 'nearTrip'. The trip's rides are read once a minute (useTripTimetable);
+ * the verdict is judged at the context's instant with the latest batch and position, on every home tick. It reads
+ * the same schedule, position and instant the context was worked out from, so a near trip the schedule can judge
+ * always comes with its verdict.
  */
 export function useNearTripVerdict(context: HomeContext): TripVerdict | null {
   const db = useScheduleDb();
@@ -78,10 +84,11 @@ export function useNearTripVerdict(context: HomeContext): TripVerdict | null {
   const batch = from === null ? null : (state?.predictions.get(from) ?? null);
   const { walkMps, jogMps } = readWalkingPace();
   const repo = db.kind === 'ready' ? db.repo : null;
+  const timetable = useTripTimetable(repo, near);
   const coordinate = position.coordinate;
   const judged = useMemo(
-    () => (near === null || repo === null || coordinate === null ? null : judgeNearTrip(repo, near, { position: coordinate, pace: { walkMps, jogMps }, batch })),
-    [near, repo, coordinate, walkMps, jogMps, batch],
+    () => (near === null || timetable === null || coordinate === null ? null : judgeNearTrip(timetable, near, { position: coordinate, pace: { walkMps, jogMps }, batch })),
+    [near, timetable, coordinate, walkMps, jogMps, batch],
   );
   invariant(judged === null || near !== null, 'a verdict is about the near trip');
   invariant(context.kind !== 'nearTrip' || repo === null || coordinate === null || judged !== null, 'a near trip the schedule can judge comes with its verdict');
@@ -90,12 +97,31 @@ export function useNearTripVerdict(context: HomeContext): TripVerdict | null {
 
 type NearTrip = Extract<HomeContext, { readonly kind: 'nearTrip' }>;
 
+/**
+ * The near trip's schedule reads — its rides and their boarding departures — once per MINUTE, like the station
+ * sheet's stationTimetable: over tripMinuteWindow, which holds the verdict window of every second of the minute,
+ * so the 5 s home ticks in between judge without touching the schedule DB. Null without a near trip or a
+ * schedule, or when the schedule cannot judge the trip.
+ */
+function useTripTimetable(repo: TripVerdictSource | null, near: NearTrip | null): TripTimetable | null {
+  const from = near === null ? null : near.card.trip.fromStationKey;
+  const to = near === null ? null : near.card.trip.toStationKey;
+  const minuteS = near === null ? null : near.nowS - (near.nowS % 60);
+  invariant(minuteS === null || (Number.isSafeInteger(minuteS) && minuteS % 60 === 0), 'the trip is read on the minute');
+  const timetable = useMemo(
+    () => (repo === null || from === null || to === null || minuteS === null ? null : tripTimetable(repo, from, to, tripMinuteWindow(minuteS))),
+    [repo, from, to, minuteS],
+  );
+  invariant(timetable === null || (timetable.from === from && timetable.to === to), 'the timetable is the near trip\'s');
+  return timetable;
+}
+
 /** The near trip's verdict from the rider at the context's instant (trip-verdict.ts). */
-function judgeNearTrip(source: TripVerdictSource, near: NearTrip, rider: Pick<TripVerdictInput, 'position' | 'pace' | 'batch'>): TripVerdict | null {
+function judgeNearTrip(timetable: TripTimetable, near: NearTrip, rider: Pick<TripVerdictInput, 'position' | 'pace' | 'batch'>): TripVerdict {
   const { fromStationKey, toStationKey } = near.card.trip;
   invariant(fromStationKey !== toStationKey, 'a saved trip joins two stations');
-  const judged = tripVerdict(source, { from: fromStationKey, to: toStationKey, nowS: near.nowS, ...rider });
-  invariant(judged === null || judged.ctx.now === near.nowS, 'the trip is judged at the context\'s instant');
+  const judged = judgeTrip(timetable, { from: fromStationKey, to: toStationKey, nowS: near.nowS, ...rider });
+  invariant(judged.ctx.now === near.nowS, 'the trip is judged at the context\'s instant');
   return judged;
 }
 

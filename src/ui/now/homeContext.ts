@@ -24,9 +24,9 @@ import type { NowState } from './nowStore';
  *   station    the rider is within AT_STATION_M of a station: that station — and AUTO-PRESENT its sheet
  *              (its next trains), unless the rider moved the map in the last MAP_GESTURE_HOLD_S (someone
  *              exploring the map is never interrupted) or it was already presented on this visit
- *   nearest    otherwise the nearest station
- *   unknown    no position (or no stations yet)
- * The bar says "Where to?" for the last three; the Map tab auto-presents for `station`.
+ *   unknown    otherwise: what the rider wants now is not known (no saved trip to count down or judge, and
+ *              no station they stand at — or no position, or no stations yet)
+ * The bar says "Where to?" for the last two; the Map tab auto-presents for `station`.
  *
  * Why a countdown is only for a trip the rider is NOT near (mfix8's resolved conflict): every saved trip with a
  * ride in the next hour has a live countdown, so a countdown first for every trip would leave no near trip
@@ -52,8 +52,9 @@ export type HomeContext =
   | { readonly kind: 'nearTrip'; readonly card: TripCardModel; readonly nowS: number }
   | { readonly kind: 'noService'; readonly reopens: { readonly mode: Mode; readonly at: NextStart } | null }
   | { readonly kind: 'station'; readonly stationKey: string; readonly stationName: string; readonly distanceM: number; readonly autoPresent: boolean }
-  | { readonly kind: 'nearest'; readonly stationKey: string; readonly stationName: string; readonly distanceM: number }
   | { readonly kind: 'unknown' };
+
+const UNKNOWN: HomeContext = Object.freeze({ kind: 'unknown' });
 
 export type HomeInput = {
   readonly nowS: number;
@@ -84,13 +85,10 @@ export function homeContext(input: HomeInput): HomeContext {
     return { kind: 'noService', reopens: firstReopening(input.modes) };
   }
   const nearest = nearestStation(input.position, input.stations);
-  if (nearest === null) {
-    return { kind: 'unknown' };
+  if (nearest === null || nearest.distanceM > AT_STATION_M) {
+    return UNKNOWN;
   }
   const named = { stationKey: nearest.station.stationKey, stationName: nearest.station.name, distanceM: nearest.distanceM };
-  if (nearest.distanceM > AT_STATION_M) {
-    return { kind: 'nearest', ...named };
-  }
   const explored = input.now.lastGestureS !== null && input.nowS - input.now.lastGestureS < MAP_GESTURE_HOLD_S;
   const context: HomeContext = { kind: 'station', ...named, autoPresent: !explored && input.now.presentedKey !== named.stationKey };
   invariant(context.distanceM <= AT_STATION_M, 'a station context is about a station the rider is at');

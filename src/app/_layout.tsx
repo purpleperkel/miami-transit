@@ -5,6 +5,7 @@ import { ScheduleDbProvider } from '@/data/schedule-db-provider';
 import { UserDbProvider } from '@/data/user-db-provider';
 import { invariant } from '@/lib/invariant';
 import { LiveDataProvider } from '@/live/live-context';
+import { UserLocationProvider } from '@/ui/location/UserLocationProvider';
 import { ReminderSync } from '@/ui/trips/ReminderSync';
 
 // The map is the app: the tab shell renders full-bleed under the root stack, with no header bar.
@@ -77,6 +78,8 @@ const PLAN_OPTIONS = {
  * The root: the bundled schedule DB (M3.8) and the user DB (saved trips, M7.3) are opened once, here,
  * for every screen; the live runtime (M4.9) runs over the schedule — polling only while the app is
  * active — and the reminder sync (M7.5) keeps the phone's "leave now" reminders in step with the trips.
+ * The rider's location is owned here too (mfix6): UserLocationProvider asks once and runs the app's ONE
+ * position watch around the whole Stack, and every screen reads it — the only place it is mounted.
  */
 export default function RootLayout() {
   invariant(Stack.Screen !== undefined, 'expo-router provides the Stack navigator and its screens');
@@ -85,18 +88,20 @@ export default function RootLayout() {
       <UserDbProvider>
         <LiveDataProvider>
           <ReminderSync />
-          <Stack screenOptions={ROOT_SCREEN_OPTIONS}>
-            <Stack.Screen name="(tabs)" />
-            <Stack.Screen name="trip/[tripId]" options={TRIP_OPTIONS} />
-            <Stack.Screen name="trip/new" options={ADD_TRIP_OPTIONS} />
-            <Stack.Screen name="directions" options={DIRECTIONS_OPTIONS} />
-            <Stack.Screen name="data" options={DATA_OPTIONS} />
-            <Stack.Screen name="diagnostics" options={DIAGNOSTICS_OPTIONS} />
-            <Stack.Screen name="layers" options={LAYERS_OPTIONS} />
-            <Stack.Screen name="station/[stationKey]" options={STATION_SHEET_OPTIONS} />
-            <Stack.Screen name="vehicle/[vehicleKey]" options={VEHICLE_SHEET_OPTIONS} />
-            <Stack.Screen name="plan" options={PLAN_OPTIONS} />
-          </Stack>
+          <UserLocationProvider>
+            <Stack screenOptions={ROOT_SCREEN_OPTIONS}>
+              <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="trip/[tripId]" options={TRIP_OPTIONS} />
+              <Stack.Screen name="trip/new" options={ADD_TRIP_OPTIONS} />
+              <Stack.Screen name="directions" options={DIRECTIONS_OPTIONS} />
+              <Stack.Screen name="data" options={DATA_OPTIONS} />
+              <Stack.Screen name="diagnostics" options={DIAGNOSTICS_OPTIONS} />
+              <Stack.Screen name="layers" options={LAYERS_OPTIONS} />
+              <Stack.Screen name="station/[stationKey]" options={STATION_SHEET_OPTIONS} />
+              <Stack.Screen name="vehicle/[vehicleKey]" options={VEHICLE_SHEET_OPTIONS} />
+              <Stack.Screen name="plan" options={PLAN_OPTIONS} />
+            </Stack>
+          </UserLocationProvider>
         </LiveDataProvider>
       </UserDbProvider>
     </ScheduleDbProvider>

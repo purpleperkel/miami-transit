@@ -11,6 +11,7 @@ import type { SecretStore } from '../../../live/keys';
 import { type LiveContextValue, LiveValueProvider } from '../../../live/live-context';
 import type { QuotaStore } from '../../../live/quota';
 import { LiveRuntime, type LiveState } from '../../../live/runtime';
+import { UserLocationProvider } from '../../location/UserLocationProvider';
 import { hostsByTestID } from '../../primitives/__tests__/render-primitive';
 import { StationsScreen } from '../StationsScreen';
 import { WED_0800 } from './station-fixtures';
@@ -139,11 +140,13 @@ describe('the Stations list and the live layer (R7)', () => {
       expect(trees).toHaveLength(0);
       trees.push(
         create(
-          <ScheduleDbProvider>
-            <LiveValueProvider value={live.value()}>
-              <StationsScreen clock={() => WED_0800} />
-            </LiveValueProvider>
-          </ScheduleDbProvider>,
+          <UserLocationProvider>
+            <ScheduleDbProvider>
+              <LiveValueProvider value={live.value()}>
+                <StationsScreen clock={() => WED_0800} />
+              </LiveValueProvider>
+            </ScheduleDbProvider>
+          </UserLocationProvider>,
         ),
       );
       expect(trees).toHaveLength(1);

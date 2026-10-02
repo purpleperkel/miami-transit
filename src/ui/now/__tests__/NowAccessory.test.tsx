@@ -15,6 +15,7 @@ import type { SecretStore } from '../../../live/keys';
 import type { QuotaStore } from '../../../live/quota';
 import { LiveRuntime } from '../../../live/runtime';
 import { type HurryReading, hurryReading, stationTimetable } from '../../hurry/hurry-reading';
+import { UserLocationProvider } from '../../location/UserLocationProvider';
 import { hostsByTestID, renderPrimitive, unmountAll } from '../../primitives/__tests__/render-primitive';
 import { WED_0800 } from '../../stations/__tests__/station-fixtures';
 import { NowAccessory, NowAccessoryView } from '../NowAccessory';
@@ -138,13 +139,15 @@ function DbProbe({ onState }: { readonly onState: (state: ScheduleDbState) => vo
 async function renderAccessory(mode: DbMode, placement: Placement, live: LiveContextValue = NO_LIVE): Promise<{ text: string; label: string; tree: ReactTestRenderer }> {
   mockDbMode = mode;
   const tree = await renderPrimitive(
-    <ScheduleDbProvider>
-      <LiveValueProvider value={live}>
-        <BottomAccessoryPlacementContext.Provider value={placement}>
-          <NowAccessory clock={() => WED_0800} />
-        </BottomAccessoryPlacementContext.Provider>
-      </LiveValueProvider>
-    </ScheduleDbProvider>,
+    <UserLocationProvider>
+      <ScheduleDbProvider>
+        <LiveValueProvider value={live}>
+          <BottomAccessoryPlacementContext.Provider value={placement}>
+            <NowAccessory clock={() => WED_0800} />
+          </BottomAccessoryPlacementContext.Provider>
+        </LiveValueProvider>
+      </ScheduleDbProvider>
+    </UserLocationProvider>,
   );
   await settle();
   const button = hostsByTestID(tree.root, 'now-accessory')[0];

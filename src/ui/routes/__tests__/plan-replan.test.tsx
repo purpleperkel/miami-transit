@@ -4,6 +4,7 @@ import { act, type ReactTestRenderer } from 'react-test-renderer';
 
 import fixture from '../../../domain/routes/__fixtures__/transitous-plan.json';
 import type { LatLon } from '../../../lib/geo';
+import { UserLocationProvider } from '../../location/UserLocationProvider';
 import { hostsByTestID, renderPrimitive, unmountAll } from '../../primitives/__tests__/render-primitive';
 import { press } from '../../stations/__tests__/press';
 import { PLAN_TICK_MS, PlanScreen } from '../PlanScreen';
@@ -71,7 +72,11 @@ async function advance(ms: number): Promise<void> {
 /** The sheet, open from the rider's location, with `to` chosen from the recent places and its first answer in. */
 async function openSheetTo(to: RecentPlace): Promise<ReactTestRenderer> {
   expect(recordRecentPlace(to).ok).toBe(true);
-  const tree = await renderPrimitive(<PlanScreen fromStation={null} />);
+  const tree = await renderPrimitive(
+    <UserLocationProvider>
+      <PlanScreen fromStation={null} />
+    </UserLocationProvider>,
+  );
   await advance(0);
   await press(tree, 'plan-recent-0');
   // The polite client's 400 ms debounce, then its one request.

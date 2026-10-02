@@ -4,6 +4,7 @@ import { router } from 'expo-router';
 import { EVERY_DAY } from '../../../data/saved-trips-repo';
 import { TRIP_SETTINGS } from '../../../data/settings-repo';
 import type { TripBook, UserRepos } from '../../../data/user-db-provider';
+import { UserLocationProvider } from '../../location/UserLocationProvider';
 import { hostsByTestID, renderPrimitive, unmountAll } from '../../primitives/__tests__/render-primitive';
 import { press } from '../../stations/__tests__/press';
 import { goToConfirm, readStep, type StepParams, type WalkChoice } from '../add/add-trip';
@@ -105,7 +106,11 @@ describe("a saved trip's screen (M7.9, ruling R6)", () => {
     const push = jest.spyOn(router, 'push').mockImplementation(() => undefined);
     const trip = savedTrip('gym', 'rail:brickell', 'rail:government-ctr', { walkOverrideMin: 4 });
     const settings = { boardBufferS: TRIP_SETTINGS.boardBufferS.defaultValue, reminderLeadS: 0 };
-    const tree = await renderPrimitive(<TripDetail trip={trip} settings={settings} remove={() => true} clock={() => WED_0800} />);
+    const tree = await renderPrimitive(
+      <UserLocationProvider>
+        <TripDetail trip={trip} settings={settings} remove={() => true} clock={() => WED_0800} />
+      </UserLocationProvider>,
+    );
     expect(hostsByTestID(tree.root, 'trip-route-options')[0]?.props.accessibilityLabel).toBe('Route options');
     await press(tree, 'trip-route-options');
     expect(push.mock.calls).toEqual([[{ pathname: '/plan', params: { fromStation: 'rail:brickell' } }]]);

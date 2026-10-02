@@ -7,6 +7,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { SCHEDULE_DB_NAME, ScheduleDbProvider } from '../../../data/schedule-db-provider';
 import fixture from '../../../domain/routes/__fixtures__/transitous-plan.json';
 import { haversineMeters, type LatLon } from '../../../lib/geo';
+import { UserLocationProvider } from '../../location/UserLocationProvider';
 import { hostsByTestID } from '../../primitives/__tests__/render-primitive';
 import { press } from '../../stations/__tests__/press';
 import { PlanScreen } from '../PlanScreen';
@@ -135,9 +136,11 @@ async function settle(seconds: number): Promise<void> {
 async function mountSheet(): Promise<ReactTestRenderer> {
   expect(trees).toHaveLength(0);
   const sheet = (
-    <ScheduleDbProvider>
-      <PlanScreen fromStation={STATION} />
-    </ScheduleDbProvider>
+    <UserLocationProvider>
+      <ScheduleDbProvider>
+        <PlanScreen fromStation={STATION} />
+      </ScheduleDbProvider>
+    </UserLocationProvider>
   );
   await act(async () => void trees.push(create(sheet)));
   expect(trees).toHaveLength(1);

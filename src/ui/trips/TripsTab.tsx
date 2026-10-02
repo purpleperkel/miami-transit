@@ -28,7 +28,7 @@ import { TripsScreen } from './TripsScreen';
  * The Trips tab (plan M7.8): with trips saved, one TripCard per trip, sorted by leave-by (soonest first),
  * each counting down to the ride it should take, and "Add a trip" / "Plan a route" under them. With no
  * trip saved (or outside the user DB's provider) it is the tab's empty state, TripsScreen ("No trips yet"),
- * with its own actions — and nothing else runs: no location watch, no clock.
+ * with its own actions — and nothing else runs: it reads no position and ticks no clock.
  *
  *   TripsTab (user DB) → SavedTrips (schedule DB, position, pace, clock) → TripsView (props only, rendered in tests)
  */

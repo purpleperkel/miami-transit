@@ -88,7 +88,7 @@ export function removeStaleCopies(directory: Directory, currentName: string): st
 /** expo-sqlite's native failures (expo-sqlite 57 ios/Exceptions.swift): a damaged or foreign file, not a bug here. */
 const SQLITE_FAILURE_CODES: ReadonlySet<string> = new Set(['ERR_INTERNAL_SQLITE_ERROR', 'E_SQLITE_OPEN_DATABASE']);
 
-function isSqliteFailure(error: unknown): error is Error {
+export function isSqliteFailure(error: unknown): error is Error {
   const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
   invariant(code === undefined || error instanceof Error, 'a coded failure is an Error');
   invariant(typeof code !== 'string' || code.length > 0, 'a failure code is never empty');

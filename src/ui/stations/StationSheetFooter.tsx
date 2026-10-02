@@ -10,9 +10,11 @@ import { ActionButton } from '../primitives/ActionButton';
 import { TText } from '../primitives/TText';
 import { openPlanSheet } from '../sheets';
 import { SPACING } from '../tokens';
+import { tripWords } from '../trips/trip-copy';
+import { saveTripFrom } from '../trips/trip-routes';
 
 export type StationSheetFooterProps = {
-  /** The station the sheet is about: where "Route from here" starts. */
+  /** The station the sheet is about: where "Route from here" starts, and where a saved trip leaves from. */
   readonly stationKey: string;
   /** Where walk directions lead: the station's coordinate. */
   readonly coordinate: LatLon;
@@ -22,7 +24,8 @@ export type StationSheetFooterProps = {
  * The station sheet's actions (plan M6.4): walk directions to the station, handed to Apple Maps
  * through the one URL builder (src/domain/handoff/apple-maps.ts, M7.6) — the Maps app first, its web
  * host if the system refuses that — and "Route from here" (M10b), which opens the route options sheet
- * starting at this station. Saving a trip (m7b) joins this row.
+ * starting at this station — and "Save trip" (M7.9, ruling R4), which opens the add-trip flow with this
+ * station as the trip's origin, at its second step (where to).
  *
  * The handoff rule (M1.19): Linking.openURL resolving — with undefined, as React Native's
  * Promise<void> does — means Apple Maps opened; only a rejection (of both URLs) is a failure, and the
@@ -34,11 +37,13 @@ export function StationSheetFooter({ stationKey, coordinate }: StationSheetFoote
   const [failure, setFailure] = useState<string | null>(null);
   const onWalk = useCallback(() => walkTo(coordinate, setFailure), [coordinate]);
   const onRoute = useCallback(() => openPlanSheet({ fromStation: stationKey }), [stationKey]);
+  const onSave = useCallback(() => saveTripFrom(stationKey), [stationKey]);
   return (
     <View testID="station-sheet-footer" style={styles.footer}>
       <View style={styles.actions}>
         <ActionButton testID="station-walk-directions" symbol="figure.walk" label={copy.walkDirections} hint={copy.walkDirectionsHint} onPress={onWalk} />
         <ActionButton testID="station-route-from-here" symbol="arrow.triangle.turn.up.right.diamond" label={copy.routeFromHere} hint={copy.routeFromHereHint} onPress={onRoute} />
+        <ActionButton testID="station-save-trip" symbol="star" label={tripWords.saveTrip} hint={tripWords.saveTripHint} onPress={onSave} />
       </View>
       {failure === null ? null : (
         <TText testID="station-walk-failed" variant="footnote" accessibilityLiveRegion="polite" style={styles.failure}>

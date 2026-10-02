@@ -22,6 +22,7 @@ import {
   vehicleBlocks,
 } from '../domain/schedule/positions';
 import { assembleRides, judgeRides, type RidesOutcome } from '../domain/schedule/rides';
+import { type DirectReach, partitionReachable } from '../domain/trips/reachable';
 import { dropBeatenRides } from '../domain/trips/trip-rides';
 import { invariant } from '../lib/invariant';
 import { err, ok, type Result } from '../lib/result';
@@ -30,6 +31,7 @@ import {
   daySeconds,
   findStation,
   readCalendarBounds,
+  readDirectStationKeys,
   readMeta,
   readModeCalendar,
   readModeStartsAfter,
@@ -234,6 +236,22 @@ export class ScheduleRepo {
     invariant(kept.length > 0, 'the earliest-arriving ride is never beaten, so a ride list stays non-empty');
     invariant(kept.length <= outcome.value.rides.length, 'the filter only drops rides');
     return ok({ kind: 'rides', rides: kept });
+  }
+
+  /**
+   * The add-trip flow's destinations (M7.9): every other station, split into those one vehicle reaches
+   * from `fromKey` on some day of the bundled timetable (same trip, or one block hop — rides()' two
+   * shapes) and the rest, each excluded as `needs-transfer`. Both halves keep stations()' order.
+   */
+  directReachable(fromKey: string): Result<DirectReach<StationListing>, UnknownStation> {
+    invariant(fromKey.includes(':'), `a station is keyed mode:name, got "${fromKey}"`);
+    const from = findStation(this.db, fromKey);
+    if (from === null) {
+      return err({ kind: 'unknown-station', stationKey: fromKey });
+    }
+    const reach = partitionReachable(fromKey, this.stations(), readDirectStationKeys(this.db, from));
+    invariant(reach.direct.length + reach.excluded.length === this.stations().length - 1, 'every other station is direct or excluded');
+    return ok(reach);
   }
 
   /**

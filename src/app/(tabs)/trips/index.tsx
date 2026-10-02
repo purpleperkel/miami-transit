@@ -1,12 +1,12 @@
 import { isValidElement } from 'react';
 
 import { invariant } from '@/lib/invariant';
-import { TripsScreen } from '@/ui/trips/TripsScreen';
+import { TripsTab } from '@/ui/trips/TripsTab';
 
-/** The Trips tab (M5.5): saved trips with their leave-by countdown (M7); for now, its empty state. */
+/** The Trips tab (M5.5, M7.8): saved trips with their leave-by countdown, or the empty state (TripsScreen) before any is saved. */
 export default function TripsRoute() {
-  invariant(typeof TripsScreen === 'function', 'the Trips screen component exists');
-  const screen = <TripsScreen />;
-  invariant(isValidElement(screen) && screen.type === TripsScreen, 'the route renders the Trips screen');
+  invariant(typeof TripsTab === 'function', 'the Trips tab component exists');
+  const screen = <TripsTab />;
+  invariant(isValidElement(screen) && screen.type === TripsTab, 'the route renders the Trips tab');
   return screen;
 }

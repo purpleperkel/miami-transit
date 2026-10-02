@@ -7,6 +7,7 @@ import { StatusPill } from '@/ui/map/StatusPill';
 import { TransitMap } from '@/ui/map/TransitMap';
 import { useLiveMap } from '@/ui/map/use-live-map';
 import { MIN_HIT_AREA_PT } from '@/ui/map/vehicleVisual';
+import { useAutoPresent } from '@/ui/now/useAutoPresent';
 import { SPACING } from '@/ui/tokens';
 
 // Downtown Miami: Government Center sits roughly at the centre of the rail + Mover network.
@@ -22,7 +23,7 @@ const DOWNTOWN_MIAMI: Region = {
  * with the floating chrome over it: the status pill (top left) and, drawn by TransitMap with the map's
  * own interactions, the control stack (top right: layers, legend, locate-me) and the tap caption.
  * TransitMap draws react-native-maps' MapView; use-live-map.ts wires in the schedule DB, the live
- * runtime and the layers.
+ * runtime and the layers. At a station, the Map tab presents its sheet once (M7.7, useAutoPresent.ts).
  */
 export default function MapScreen() {
   // MKMapView throws on an invalid region, so the initial region's contract is checked first.
@@ -35,6 +36,7 @@ export default function MapScreen() {
     'the initial region spans a visible area',
   );
   const { map, status, reduceMotion } = useLiveMap(DOWNTOWN_MIAMI);
+  useAutoPresent();
   const insets = useSafeAreaInsets();
   const chromeTop = insets.top + SPACING.xs;
   return (

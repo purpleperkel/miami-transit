@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { type RefObject, useCallback, useMemo, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import MapView, { type Region } from 'react-native-maps';
 
@@ -6,7 +6,9 @@ import type { StationListing } from '@/data/schedule-queries';
 import type { LiveLineId } from '@/domain/live/types';
 import { invariant } from '@/lib/invariant';
 
+import { wallClockNowS } from '../clock';
 import type { ColorScheme } from '../colors';
+import { NOW_STORE } from '../now/nowStore';
 import { SPACING } from '../tokens';
 import { drawsLine, drawsStation, drawsVehicle, type MapEmphasis } from './emphasis';
 import { useFollowCamera } from './follow';
@@ -90,7 +92,7 @@ export function TransitMap(props: TransitMapProps) {
   const taps = useMapTaps({ segments, bucket, onStationPress: props.onStationPress, onVehiclePress: props.onVehiclePress, onMapPress: props.onMapPress, location, locate, mapRef });
   // Follow mode: the camera glides to the followed vehicle each frame; the rider's own gesture — a pan, a
   // double-tap zoom, or locate-me, which moves the camera elsewhere — ends it.
-  const { onUserGesture } = useFollowCamera(mapRef, vehicles);
+  const onUserGesture = useMapGesture(mapRef, vehicles);
   const { onLocate: locateMe } = taps;
   const onLocate = useCallback(() => {
     onUserGesture();
@@ -126,6 +128,21 @@ export function TransitMap(props: TransitMapProps) {
       />
     </>
   );
+}
+
+/**
+ * The rider's own gesture on the map: it ends follow mode (follow.ts), and tells the Now store the rider is
+ * exploring the map, so no sheet is auto-presented over it for a while (M7.7, src/ui/now/homeContext.ts).
+ */
+function useMapGesture(mapRef: RefObject<MapView | null>, vehicles: readonly VehicleFrame[]): () => void {
+  const { onUserGesture: endFollow } = useFollowCamera(mapRef, vehicles);
+  const onGesture = useCallback(() => {
+    endFollow();
+    NOW_STORE.noteMapGesture(wallClockNowS());
+  }, [endFollow]);
+  invariant(typeof endFollow === 'function', 'a gesture can end follow mode');
+  invariant(typeof onGesture === 'function', 'the map reports its gestures');
+  return onGesture;
 }
 
 type MapChromeProps = {

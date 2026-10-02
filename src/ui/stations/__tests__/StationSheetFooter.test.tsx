@@ -1,7 +1,9 @@
+import { router } from 'expo-router';
 import { Linking } from 'react-native';
 
 import { hostsByTestID, renderPrimitive, unmountAll } from '../../primitives/__tests__/render-primitive';
 import { StationSheetFooter } from '../StationSheetFooter';
+import { appRoutes } from '../../__tests__/app-tree';
 import { press } from './press';
 
 /**
@@ -69,5 +71,18 @@ describe('StationSheetFooter: walk directions (M6.4)', () => {
     expect(hostsByTestID(tree.root, 'station-walk-failed')).toHaveLength(1);
     await press(tree, 'station-walk-directions');
     expect(hostsByTestID(tree.root, 'station-walk-failed')).toHaveLength(0);
+  });
+});
+
+describe('StationSheetFooter: save trip (M7.9, ruling R4)', () => {
+  it('save trip starts a trip from this station', async () => {
+    const push = jest.spyOn(router, 'push').mockImplementation(() => undefined);
+    const tree = await renderPrimitive(<StationSheetFooter stationKey="rail:government-ctr" coordinate={GOVERNMENT_CENTER} />);
+    expect(hostsByTestID(tree.root, 'station-save-trip')[0]?.props.accessibilityLabel).toBe('Save trip');
+    await press(tree, 'station-save-trip');
+    // The add-trip flow opens at its second step (where to), with this station as the origin — a route the app really has.
+    expect(push.mock.calls).toEqual([[{ pathname: '/trip/new/to', params: { from: 'rail:government-ctr' } }]]);
+    const flow = appRoutes().children.find((child) => child.route === 'trip/new');
+    expect(flow?.children.map((child) => child.route)).toContain('to');
   });
 });

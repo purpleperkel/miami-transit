@@ -257,6 +257,39 @@ const MODE_CALENDAR_SQL = `
   GROUP BY sm.mode, a.date
   ORDER BY sm.mode, a.date`;
 
+/**
+ * Every station a rider reaches from station A without changing vehicles, on ANY day of the bundled
+ * timetable (M7.9, the add-trip flow's destinations): a later stop of a stop pattern that boards at A
+ * (A not its last stop), or any stop of the pattern its vehicle runs next (`trip.next_trip_idx`, one
+ * block hop) — the same two ride shapes RIDE_CANDIDATES_SQL joins, read per pattern rather than per
+ * trip boarding, so no service day or window is involved. A itself is never a destination.
+ */
+const DIRECT_STATIONS_SQL = `
+  WITH origin AS (
+    SELECT ps.pattern_idx, ps.seq
+    FROM stop AS s
+    JOIN pattern_stop AS ps ON ps.stop_idx = s.stop_idx
+    JOIN pattern AS p ON p.pattern_idx = ps.pattern_idx
+    WHERE s.station_idx = :from_station_idx AND ps.seq < p.stop_count - 1
+  ),
+  hop AS (
+    SELECT DISTINCT n.pattern_idx
+    FROM trip AS t
+    JOIN trip AS n ON n.trip_idx = t.next_trip_idx
+    WHERE t.pattern_idx IN (SELECT pattern_idx FROM origin)
+  ),
+  reach AS (
+    SELECT ps.stop_idx FROM origin AS o JOIN pattern_stop AS ps ON ps.pattern_idx = o.pattern_idx AND ps.seq > o.seq
+    UNION
+    SELECT ps.stop_idx FROM hop AS h JOIN pattern_stop AS ps ON ps.pattern_idx = h.pattern_idx
+  )
+  SELECT DISTINCT x.station_key
+  FROM reach AS r
+  JOIN stop AS s ON s.stop_idx = r.stop_idx
+  JOIN station AS x ON x.station_idx = s.station_idx
+  WHERE x.station_idx <> :from_station_idx
+  ORDER BY x.station_key`;
+
 /** line.mode as the schema stores it (scripts/gtfs/schema.ts MODE_CODES: rail 0, mover 1). */
 const MODES_BY_CODE: ReadonlyMap<number, Mode> = new Map<number, Mode>([
   [0, 'rail'],
@@ -537,6 +570,14 @@ export function readModeCalendar(db: SqlExecutor): ModeCalendar {
     'each mode lists its service days once, in date order',
   );
   return calendar;
+}
+
+/** The keys of every station reached from `from` without changing vehicles, on any day of the timetable (M7.9). */
+export function readDirectStationKeys(db: SqlExecutor, from: StationRef): ReadonlySet<string> {
+  invariant(Number.isSafeInteger(from.stationIdx) && from.stationIdx >= 0, `a station is indexed, got ${from.stationIdx}`);
+  const keys = new Set(db.all(DIRECT_STATIONS_SQL, { from_station_idx: from.stationIdx }).map((row) => text(row, 'station_key')));
+  invariant(!keys.has(from.stationKey), 'a station is never its own destination');
+  return keys;
 }
 
 /** The row's line.mode as a Mode. */

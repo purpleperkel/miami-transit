@@ -8,11 +8,14 @@ import { ActionButton } from '../primitives/ActionButton';
 import { EmptyState } from '../primitives/EmptyState';
 import { openPlanSheet } from '../sheets';
 import { SPACING } from '../tokens';
+import { tripWords } from './trip-copy';
+import { startAddTrip } from './trip-routes';
 
 /**
  * The Trips tab (plan M5.5). Saved trips with their "Leave in N min" countdown arrive with M7; until
  * then the tab shows its real empty state, and stays useful (ruling R6): "Plan a route" opens the route
- * options sheet (M10b). The title is the tab's native large-title header (trips/_layout.tsx); the
+ * options sheet (M10b), and "Add a trip" starts the add-trip flow (M7.9). Once a trip is saved, TripsTab
+ * shows the trips instead. The title is the tab's native large-title header (trips/_layout.tsx); the
  * ScrollView is the screen's first scroll view, which iOS insets under it.
  */
 export function TripsScreen() {
@@ -24,6 +27,7 @@ export function TripsScreen() {
       <EmptyState testID="trips-empty" title="No trips yet" message="Trips you save appear here, counting down to when you need to leave." />
       <View style={styles.action}>
         <ActionButton testID="trips-plan-route" symbol="arrow.triangle.turn.up.right.diamond" label={copy.planRoute} hint={copy.planRouteHint} onPress={onPlan} />
+        <ActionButton testID="trips-add" symbol="plus" label={tripWords.addTrip} hint={tripWords.addTripHint} onPress={startAddTrip} />
       </View>
     </ScrollView>
   );
@@ -32,5 +36,5 @@ export function TripsScreen() {
 const styles = StyleSheet.create({
   screen: { backgroundColor: PlatformColor('systemBackground') },
   content: { padding: SPACING.md },
-  action: { alignItems: 'center' },
+  action: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: SPACING.xs },
 });

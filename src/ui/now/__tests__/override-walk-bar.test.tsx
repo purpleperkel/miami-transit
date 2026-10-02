@@ -89,3 +89,18 @@ describe('the Now bar walks the trip\'s own minutes (mfix11)', () => {
     expect(shown.lines).toEqual(['Bayfront Park', `${right} · 7 min walk`]);
   });
 });
+
+describe('only a saved trip within reach asks for a street walk (mfix11 review)', () => {
+  it('a saved trip whose origin is beyond 2 km of the rider asks transitous for no walk', async () => {
+    location.rider.at = { latitude: 25.7950, longitude: -80.1922 }; // about 2.9 km north of Fifth Street
+    const far = fixtureWalks();
+    await renderScene(fifthToBayfront(), { fetchWalk: far.fetchWalk });
+    expect(far.asked).toEqual([]);
+    await unmountAll();
+    location.rider.at = THIRD_STREET; // 342 m from Fifth Street: its platforms are asked for
+    const near = fixtureWalks();
+    await renderScene(fifthToBayfront(), { fetchWalk: near.fetchWalk });
+    expect(near.asked.length).toBeGreaterThan(0);
+  });
+});
+

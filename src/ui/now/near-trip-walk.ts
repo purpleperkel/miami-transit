@@ -12,8 +12,9 @@ import type { HomeContext } from './homeContext';
  * mfix9 (Jamie, 2026-10-02 09:12: the bar said "chill" for Fifth Street; Google's walk put him a minute late): the Now
  * bar's walk to its near trip's ORIGIN. Every platform of that station is registered with the app's
  * RoutedWalkProvider (useWalkTo), so the bar's verdict (useNearTripVerdict) walks the street-routed distance to the
- * boarding platform when Transitous gave one, and m7c's straight-line estimate otherwise. Without a near trip the bar
- * asks for no walk at all, nor for a near trip with its own walk minutes (mfix11: it walks those, to no platform). The
+ * boarding platform when Transitous gave one, and m7c's straight-line estimate otherwise. This hook asks for no walk
+ * without a near trip, nor for one with its own walk minutes (mfix11: it walks those, to no platform); the home
+ * context's cards register their own origins within 2 km (use-saved-trips-walk.ts), batched into the same request. The
  * two accessory placements iOS mounts register the same stops: one request between them.
  */
 

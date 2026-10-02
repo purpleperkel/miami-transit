@@ -13,7 +13,7 @@ import { formatClockFromServiceSec } from '../format';
 import { boardingPlatforms, savedTripWalk, type SavedTripWalk } from './trip-walk';
 
 /**
- * Plan M7.8: the Trips tab's cards, as data. For each saved trip: the walk to its boarding station, the
+ * Plan M7.8: the Trips tab's cards, as data. For each saved trip: the walk to the platform its rides board at, the
  * ride it counts down to (M7.1 nextLeave over the schedule's trip rides — loop-arounds a direct ride
  * beats already dropped, m3a's input) and that ride's leave-by; or why there is no ride to count to.
  * The cards come sorted by leave-by, soonest first; cards with nothing to count to follow, in saved order.

@@ -1,4 +1,4 @@
-import { NOW_UNDER_MS, formatClockFromServiceSec, formatDistance, formatMinutes } from '../format';
+import { NOW_UNDER_MS, formatClockFromServiceSec, formatDistance, formatMinutes, formatShortClockFromServiceSec } from '../format';
 
 /** M6.1 format: minutes to a departure and service-day clock times, by arithmetic alone. */
 
@@ -43,6 +43,18 @@ describe('formatClockFromServiceSec', () => {
   it('a non-finite service time is a broken contract', () => {
     expect(() => formatClockFromServiceSec(Number.NaN)).toThrow('finite');
     expect(() => formatClockFromServiceSec(Number.NEGATIVE_INFINITY)).toThrow('finite');
+  });
+});
+
+describe('formatShortClockFromServiceSec (M7c copy)', () => {
+  it('reads the same clock without AM or PM', () => {
+    expect([formatShortClockFromServiceSec(97200), formatShortClockFromServiceSec(45900), formatShortClockFromServiceSec(0)]).toEqual(['3:00', '12:45', '12:00']);
+    expect(formatShortClockFromServiceSec(14 * 3600 + 14 * 60)).toBe('2:14');
+  });
+
+  it('wraps past 24:00 and refuses a non-finite time', () => {
+    expect([formatShortClockFromServiceSec(24 * 3600 + 14 * 60), formatShortClockFromServiceSec(-300)]).toEqual(['12:14', '11:55']);
+    expect(() => formatShortClockFromServiceSec(Number.NaN)).toThrow('finite');
   });
 });
 

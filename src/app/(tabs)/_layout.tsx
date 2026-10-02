@@ -2,12 +2,12 @@ import { NativeTabs } from 'expo-router/unstable-native-tabs';
 import { isValidElement } from 'react';
 
 import { invariant } from '@/lib/invariant';
-import { DataVersionAccessory } from '@/ui/diagnostics/DataVersionAccessory';
+import { NowAccessory } from '@/ui/now/NowAccessory';
 
 /**
  * The tab shell (M1.18, M5.5): native iOS tabs (Liquid Glass on iOS 26+) — Map, Trips, Stations —
- * plus the bottom accessory, which says the live status and when the schedule runs out, and opens
- * Data & Settings. SDK 55–57 import NativeTabs from `expo-router/unstable-native-tabs`.
+ * plus the bottom accessory: the Now strip (ruling R2, M7c.3), hurry or chill for the nearest station,
+ * which keeps Data & Settings one tap away. SDK 55–57 import NativeTabs from `expo-router/unstable-native-tabs`.
  *
  * A Trigger names its route relative to this layout. trips/ and stations/ each have a _layout of
  * their own (a native header Stack, R3a: NativeTabs draws no header), so each tab is named by its
@@ -18,7 +18,7 @@ export default function TabsLayout() {
   const tabs = (
     <NativeTabs>
       <NativeTabs.BottomAccessory>
-        <DataVersionAccessory />
+        <NowAccessory />
       </NativeTabs.BottomAccessory>
       <NativeTabs.Trigger name="index">
         <NativeTabs.Trigger.Label>Map</NativeTabs.Trigger.Label>

@@ -7,6 +7,7 @@ import {
   windowFrom,
 } from '../domain/gtfs/service-day';
 import { assembleDepartures, type Departure, firstPerDirection, type ServiceDayVisits } from '../domain/schedule/departures';
+import type { Platform } from '../domain/hurry/platform';
 import { LINE_IDS, type LineId } from '../domain/lines/line-catalog';
 import { type ModeCalendar, type ModeStatuses, modeStatuses, STARTING_SOON_S } from '../domain/schedule/mode-status';
 import { type NextStop, nextStops } from '../domain/schedule/next-stops';
@@ -34,6 +35,7 @@ import {
   readModeStartsAfter,
   readModeTripsAround,
   readNextDepartures,
+  readPlatforms,
   readRideCandidates,
   readServiceDays,
   readShapePaths,
@@ -147,6 +149,8 @@ export class ScheduleRepo {
   private lineMap: ReadonlyMap<string, readonly LineId[]> | null = null;
   /** Each mode's first trip start on every service day (~1,260 rows), read on first use and kept. */
   private modeDays: ModeCalendar | null = null;
+  /** Every platform with its directions (89 stops on the 2026 feed), read on first use and kept. */
+  private platformList: readonly Platform[] | null = null;
 
   private constructor(db: SqlExecutor, meta: ScheduleMeta, bounds: ServiceCalendarBounds) {
     invariant(meta.schemaVersion === SCHEDULE_SCHEMA_VERSION, 'the repo reads only the schema it was written for');
@@ -301,6 +305,15 @@ export class ScheduleRepo {
     invariant(destinations.size > 0, 'the schedule DB has trips');
     invariant(this.destinations === destinations, 'the destinations are read once, then kept');
     return destinations;
+  }
+
+  /** Every platform (stop) with its station, coordinate and directions (hurry-or-chill's walk target, M7c.3). */
+  platforms(): readonly Platform[] {
+    const platforms = this.platformList ?? Object.freeze(readPlatforms(this.db));
+    this.platformList = platforms;
+    invariant(platforms.length > 0, 'the schedule DB has platforms');
+    invariant(this.platformList === platforms, 'the platforms are read once, then kept');
+    return platforms;
   }
 
   /** station key -> every line stopping there, in line order (the line strips, M6.5). */

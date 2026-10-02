@@ -7,7 +7,7 @@ import type { StationListing } from '@/data/schedule-queries';
 import { REAL_STOPS } from '@/domain/network/__fixtures__/real-stops';
 import { buildStations } from '@/domain/network/stations';
 
-import { DataVersionAccessory } from '../diagnostics/DataVersionAccessory';
+import { NowAccessory } from '../now/NowAccessory';
 import { EmptyState } from '../primitives/EmptyState';
 import { renderPrimitive, unmountAll } from '../primitives/__tests__/render-primitive';
 import { stationList, type StationList } from '../stations/station-list';
@@ -75,7 +75,7 @@ describe('the tab shell (M5.5)', () => {
     const accessories = elements.filter((element) => element.type === NativeTabs.BottomAccessory);
     expect(accessories).toHaveLength(1);
     const inside = elementsOf(accessories[0] as NonNullable<(typeof accessories)[0]>);
-    expect(inside.some((element) => element.type === DataVersionAccessory)).toBe(true);
+    expect(inside.some((element) => element.type === NowAccessory)).toBe(true);
   });
 });
 

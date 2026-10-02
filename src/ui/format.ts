@@ -35,12 +35,33 @@ export function formatMinutes(deltaMs: number): string {
  */
 export function formatClockFromServiceSec(serviceSec: number): string {
   invariant(Number.isFinite(serviceSec), `a service time is a finite number of seconds, got ${serviceSec}`);
+  const { hour24, minute } = clockOf(serviceSec);
+  const text = `${formatShortClockFromServiceSec(serviceSec)} ${hour24 < 12 ? 'AM' : 'PM'}`;
+  invariant(text.endsWith(hour24 < 12 ? ' AM' : ' PM') && minute < 60, `${serviceSec} s reads as a 12-hour clock`);
+  return text;
+}
+
+/**
+ * The same clock without AM/PM, as hurry-or-chill's copy names a train ("makes the 2:14"): 97200 → "3:00",
+ * 45900 → "12:45". Where it is said, the next hour or two is meant, so the half of the day goes without saying.
+ */
+export function formatShortClockFromServiceSec(serviceSec: number): string {
+  invariant(Number.isFinite(serviceSec), `a service time is a finite number of seconds, got ${serviceSec}`);
+  const { hour24, minute } = clockOf(serviceSec);
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  const text = `${hour12}:${String(minute).padStart(2, '0')}`;
+  invariant(/^(1[0-2]|[1-9]):[0-5]\d$/.test(text), `"${text}" reads as a short clock`);
+  return text;
+}
+
+/** A service-day second's hour (0–23) and minute on the 24-hour clock, wrapping every 24 h. */
+function clockOf(serviceSec: number): { readonly hour24: number; readonly minute: number } {
+  invariant(Number.isFinite(serviceSec), `a service time is a finite number of seconds, got ${serviceSec}`);
   const secondOfDay = ((Math.floor(serviceSec) % DAY_S) + DAY_S) % DAY_S;
   const hour24 = Math.floor(secondOfDay / HOUR_S);
   const minute = Math.floor((secondOfDay % HOUR_S) / 60);
-  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
   invariant(hour24 >= 0 && hour24 < 24 && minute >= 0 && minute < 60, `${serviceSec} s lands on a clock time`);
-  return `${hour12}:${String(minute).padStart(2, '0')} ${hour24 < 12 ? 'AM' : 'PM'}`;
+  return { hour24, minute };
 }
 
 const METRES_PER_KM = 1000;

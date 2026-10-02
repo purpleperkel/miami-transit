@@ -1,4 +1,5 @@
 import type { ServiceCalendarBounds, ServiceDay, TimeWindow } from '../domain/gtfs/service-day';
+import type { Platform } from '../domain/hurry/platform';
 import { LINE_IDS, type LineId } from '../domain/lines/line-catalog';
 import type { LineTrack } from '../domain/live/types';
 import type { Mode } from '../domain/network/stations';
@@ -145,6 +146,19 @@ const STOP_STATIONS_SQL = `
   SELECT s.stop_id, st.station_key
   FROM stop AS s JOIN station AS st ON st.station_idx = s.station_idx
   ORDER BY st.station_key, s.stop_id`;
+
+/**
+ * Every stop with its station, coordinates and each direction whose trains stop there (any pattern,
+ * terminating or not): the platforms hurry-or-chill walks the rider to (M7c.3). Mover stop 813 at
+ * Government Center lists both directions.
+ */
+const PLATFORMS_SQL = `
+  SELECT DISTINCT s.stop_id, st.station_key, s.lat, s.lon, p.direction_id
+  FROM stop AS s
+  JOIN station AS st ON st.station_idx = s.station_idx
+  JOIN pattern_stop AS ps ON ps.stop_idx = s.stop_idx
+  JOIN pattern AS p ON p.pattern_idx = ps.pattern_idx
+  ORDER BY st.station_key, s.stop_id, p.direction_id`;
 
 /** Each line's track points (line_shape: rail = its longest direction-0 shape, Mover = all its shapes), in order. */
 const LINE_TRACKS_SQL = `
@@ -410,6 +424,23 @@ export function readStopStations(db: SqlExecutor): { readonly stationOfStop: Rea
   invariant(stationOfStop.size === rows.length && rows.length > 0, 'stop ids are unique, and the DB has stops');
   invariant([...stopsOfStation.values()].every((stops) => stops.length > 0), 'every station listed has a stop');
   return { stationOfStop, stopsOfStation };
+}
+
+/** Every platform a train stops at, in station then stop order, each with its directions in order. */
+export function readPlatforms(db: SqlExecutor): Platform[] {
+  const byStop = new Map<string, { stationKey: string; stopId: string; directionIds: number[]; latitude: number; longitude: number }>();
+  for (const row of db.all(PLATFORMS_SQL)) {
+    const stopId = text(row, 'stop_id');
+    const coordinate = { latitude: real(row, 'lat'), longitude: real(row, 'lon') };
+    invariant(isLatLon(coordinate), `stop ${stopId} sits on a real coordinate`);
+    const platform = byStop.get(stopId) ?? { stationKey: text(row, 'station_key'), stopId, directionIds: [], ...coordinate };
+    platform.directionIds.push(int(row, 'direction_id'));
+    byStop.set(stopId, platform);
+  }
+  const platforms = [...byStop.values()];
+  invariant(platforms.length > 0, 'the schedule DB has platforms');
+  invariant(platforms.every((p) => p.directionIds.length > 0 && new Set(p.directionIds).size === p.directionIds.length), 'each platform lists each of its directions once');
+  return platforms;
 }
 
 /** One track per (line, shape) in line_shape, each its shape's points in order. */

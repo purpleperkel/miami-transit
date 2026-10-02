@@ -1,0 +1,72 @@
+{
+  "_provenance": "Captured 2026-10-02T09:24:52-04:00 from https://api.transitous.org/api/v1/one-to-many (MOTIS v2.11.3; Transitous, https://transitous.org/sources) with the app's User-Agent. Street routing over OpenStreetMap data, (c) OpenStreetMap contributors, ODbL. Only per-target numbers are kept: no geometry. The origin is a public county GTFS stop (Metromover Third Street, stop 815), never a rider's position (PUBLIC-REPO DATA RULE, miami-transit plan section 3). 'duration' is MOTIS's routing COST in seconds (it includes preference penalties), not a walking time; the app walks 'distance' at the rider's pace.",
+  "request": {
+    "one": {
+      "stopId": "815",
+      "name": "Third Street",
+      "lat": 25.772024,
+      "lon": -80.193508
+    },
+    "many": [
+      {
+        "stopId": "806",
+        "name": "Riverwalk",
+        "lat": 25.771051,
+        "lon": -80.192558
+      },
+      {
+        "stopId": "805",
+        "name": "Fifth Street",
+        "lat": 25.769165,
+        "lon": -80.192248
+      },
+      {
+        "stopId": "804",
+        "name": "Brickell City Centre",
+        "lat": 25.766888,
+        "lon": -80.192121
+      },
+      {
+        "stopId": "807",
+        "name": "Knight Center",
+        "lat": 25.771865,
+        "lon": -80.191377
+      },
+      {
+        "stopId": "808",
+        "name": "Bayfront Park",
+        "lat": 25.773099,
+        "lon": -80.187323
+      }
+    ],
+    "params": {
+      "mode": "WALK",
+      "max": 3600,
+      "maxMatchingDistance": 250,
+      "arriveBy": false,
+      "withDistance": true
+    }
+  },
+  "response": [
+    {
+      "duration": 519.0,
+      "distance": 292.7103862762451
+    },
+    {
+      "duration": 867.0,
+      "distance": 710.639274597168
+    },
+    {
+      "duration": 919.0,
+      "distance": 768.7921524047852
+    },
+    {
+      "duration": 566.0,
+      "distance": 349.5406665802002
+    },
+    {
+      "duration": 904.0,
+      "distance": 749.0491008758545
+    }
+  ]
+}

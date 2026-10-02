@@ -1,0 +1,6 @@
+{
+  "url": "https://api.transitous.org/api/v5/plan?fromPlace=25.7745,-80.1953&toPlace=25.7584,-80.1937&time=2026-10-02T18:00:00.000Z&arriveBy=false",
+  "userAgent": "MiamiTransit/1.0.0 (+https://github.com/purpleperkel/miami-transit)",
+  "capturedAt": "2026-10-02T05:00:51.660Z",
+  "status": 200
+}

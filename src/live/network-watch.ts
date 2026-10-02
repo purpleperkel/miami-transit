@@ -21,8 +21,9 @@ import { detach } from './detach';
  * background, so the phone can change networks without a listener event reaching the app. `refresh()`
  * therefore discards the reading and asks getNetworkStateAsync afresh; the watch is `pending` until
  * that answer, or a listener event, is in. The runtime HOLDS its poller meanwhile (no tick, no provider
- * switch, the published gate as it was) for at most RESUME_READING_TIMEOUT_MS, so no poll runs on the
- * old reading, nor on none for the instant before the answer lands. Only the answer to the LATEST ask
+ * switch, the published gate as it was) until the first heartbeat after the answer is in, or for at
+ * most RESUME_READING_TIMEOUT_MS counted in heartbeats, so no poll runs on the old reading, nor on
+ * none for the instant before the answer lands. Only the answer to the LATEST ask
  * counts, and only while no listener event has come since that ask: an answer to an ask made before
  * the latest refresh, or one a listener event has overtaken, is dropped. getNetworkStateAsync is thus
  * asked once on mount (the first resume) and once per return to the foreground.

@@ -7,6 +7,7 @@ import {
   finishPoll,
   type PollOutcome,
   releasePoll,
+  restartTask,
   resumeAll,
   type SchedulerState,
   startPoll,
@@ -137,5 +138,24 @@ describe('poll scheduler (mfix10): a poll that counts for nothing', () => {
     const dropped = syncTasks(state, [], T0 + 1);
     expect(releasePoll(dropped, 'vehicles', T0 + 2)).toBe(dropped);
     expect(() => releasePoll(createScheduler([SWIFTLY], T0), 'vehicles', T0 + 2)).toThrow(InvariantError);
+  });
+});
+
+describe('poll scheduler (mfix10): a task that starts over', () => {
+  it('restartTask makes an idle task due now, as a new task would be: no failures, its interval its cadence, no previous start', () => {
+    const failedTwice = poll(poll(createScheduler([SWIFTLY], T0), 'vehicles', T0, 'failed', 0), 'vehicles', T0 + 30, 'failed', 0);
+    expect(failedTwice.get('vehicles')).toMatchObject({ failures: 2, dueAt: T0 + 60, lastStartedAt: T0 + 30 });
+    const restarted = restartTask(failedTwice, 'vehicles', T0 + 35);
+    expect(restarted.get('vehicles')).toEqual({ id: 'vehicles', cadenceS: 30, dueAt: T0 + 35, inFlight: false, failures: 0, intervalS: 30, lastStartedAt: null });
+    expect(failedTwice.get('vehicles')?.failures).toBe(2); // the state it was given is untouched
+  });
+
+  it('restartTask leaves a task in flight, or dropped, as it is, and refuses an instant before the task\'s last start', () => {
+    const inFlight = startPoll(createScheduler([SWIFTLY], T0), 'vehicles', T0 + 10);
+    expect(restartTask(inFlight, 'vehicles', T0 + 11)).toBe(inFlight);
+    const dropped = syncTasks(inFlight, [], T0 + 11);
+    expect(restartTask(dropped, 'vehicles', T0 + 12)).toBe(dropped);
+    const idle = finishPoll(inFlight, 'vehicles', 'ok', T0 + 11);
+    expect(() => restartTask(idle, 'vehicles', T0 + 5)).toThrow(InvariantError);
   });
 });

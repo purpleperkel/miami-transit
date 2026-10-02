@@ -1,7 +1,7 @@
 import { type ChainResolution, type ChainState, initialChainState, recordPoll, resolveChain, type Standings } from '../domain/live/chain';
 import { PROVIDER_CONFIG } from '../domain/live/constants';
-import { dueTasks, finishPoll, type PollOutcome, type PollTask, releasePoll, resumeAll, type SchedulerState, startPoll, syncTasks } from '../domain/live/scheduler';
-import type { Capability, ChainProviderId, LiveBatch, LiveError, LivePrediction, LiveProvider, LiveVehicle, ProviderId } from '../domain/live/types';
+import { dueTasks, finishPoll, type PollOutcome, type PollTask, releasePoll, restartTask, resumeAll, type SchedulerState, startPoll, syncTasks } from '../domain/live/scheduler';
+import { type Capability, type ChainProviderId, type LiveBatch, type LiveError, type LivePrediction, type LiveProvider, type LiveVehicle, type ProviderId, ReusedRejection } from '../domain/live/types';
 import { invariant } from '../lib/invariant';
 import { ok, type Result } from '../lib/result';
 import { detach } from './detach';
@@ -20,20 +20,25 @@ import { detach } from './detach';
  *    (m4a scheduler.ts; a 429 doubles the interval).
  *  - Every finished poll is recorded in the chain (3 failures in a row → failing / failover) and
  *    published as a new immutable snapshot through `onChange`.
- *  - mfix10 (fix round 2): a poll COUNTS only when its provider still stands keyed when it ends and
- *    its failure, if any, is its own. A poll that does not count leaves no trace: no lastError (so no
- *    'offline' flash), nothing in the chain, and its task is released with its failures and interval
- *    as they were (scheduler.ts releasePoll). That is a Swiftly gated off Wi-Fi meanwhile (the poll
- *    started while it was allowed, and leaving Wi-Fi may have cut the download), a key removed
- *    meanwhile, or a failure `reused` from a download another poll started (Swiftly's 30 s share:
- *    one cut download is one failure, recorded by the poll that started it). A batch it brought back
- *    is still shown: fresh data the phone has already fetched.
+ *  - mfix10 (fix rounds 2 and 3): how an ended poll counts (settle). A poll whose provider no longer
+ *    stands keyed when it ends — a Swiftly gated off Wi-Fi meanwhile (the poll started while it was
+ *    allowed, and leaving Wi-Fi may have cut the download) or a key removed meanwhile — leaves no
+ *    trace: no lastError (so no 'offline' flash), nothing in the chain, and its task is released with
+ *    its failures and interval as they were (scheduler.ts releasePoll). A poll whose provider's key
+ *    CHANGED meanwhile leaves no trace either, and its task starts over, due at once. Any other poll
+ *    ends its task (a failure backs off, R-b), and is recorded in the chain only if its result is its
+ *    own: a failure or a bug `reused` from a download another poll started (Swiftly's 30 s share) is
+ *    recorded by that poll alone, so one failed download is one failure however many stations read
+ *    it, while every station's task still backs off. A batch a poll brought back is always shown:
+ *    fresh data the phone has already fetched.
  *  - HOLD (mfix10 fix round 2): the runtime holds the poller while it waits for a fresh network
  *    reading on resume. A held poller is not ticked, and a poll that ends meanwhile is settled when
  *    `resume()` lifts the hold, on the standings then — so nothing moves until the reading is in.
  *  - When a capability's serving provider CHANGES (failover, a re-probe of the primary after 300 s,
  *    a better provider's key pasted), each idle task of it is due at once: the new provider owes
- *    nothing to the old one's backoff or cadence, so a failover never waits out a dead provider.
+ *    nothing to the old one's backoff or cadence, so a failover never waits out a dead provider. The
+ *    same holds when the serving provider's KEY changes (credentialsChanged): a new key is a new
+ *    request, tried at the next heartbeat.
  *
  * A failed poll keeps the previous batch: stale data ages visibly (its fetchedAt) instead of
  * vanishing. A poll that fails by a bug still ends (as a failure, so its task backs off rather than
@@ -43,7 +48,8 @@ import { detach } from './detach';
  *
  * TIME: the scheduler and the chain need an instant that never runs backwards, so the wall clock is
  * read through a MonotonicClock: a backwards step (a clock correction) is absorbed, a forward step
- * just makes everything due.
+ * just makes everything due. (Swiftly's 30 s floor runs on its own millisecond clock, which ignores
+ * wall-clock corrections: providers/swiftly.ts.)
  */
 
 export type CapabilityStatus = {
@@ -89,10 +95,20 @@ export const EMPTY_SNAPSHOT: LiveSnapshot = Object.freeze({
 /** A poll's Result: on success, the step that shows its batch (the vehicles, or its station's predictions). */
 type Polled = Result<() => void, LiveError>;
 
-/** A poll that has ended: its task, what it polled from whom, and its Result (null: it broke by a bug). */
-type EndedPoll = { readonly id: string; readonly capability: Capability; readonly provider: ProviderId; readonly polled: Polled | null };
+/**
+ * A poll that has ended: its task, what it polled from whom under which credentials era, its Result
+ * (null: it broke by a bug), and whether that failure or bug was `reused` from another poll's download.
+ */
+type EndedPoll = {
+  readonly id: string;
+  readonly capability: Capability;
+  readonly provider: ProviderId;
+  readonly era: number;
+  readonly polled: Polled | null;
+  readonly reused: boolean;
+};
 
-/** Seconds from a wall clock that never run backwards: a backwards step is absorbed into an offset. */
+/** Instants from a source (in its unit: seconds or milliseconds) that never run backwards: a backwards step is absorbed into an offset. */
 export class MonotonicClock {
   private offset = 0;
   private last = Number.NEGATIVE_INFINITY;
@@ -126,6 +142,8 @@ export class LivePoller {
   private readonly clock: MonotonicClock;
   private readonly abort = new AbortController();
   private disposed = false;
+  /** Each provider's credentials era, bumped by credentialsChanged: a poll started in an earlier era counts for nothing. */
+  private readonly eras: Record<ProviderId, number> = { swiftly: 0, transitland: 0 };
   /** Held by the runtime until a resume's network reading is in: not ticked, and ended polls wait in `ended`. */
   private held = false;
   private readonly ended: EndedPoll[] = [];
@@ -209,8 +227,10 @@ export class LivePoller {
 
   /**
    * A provider's key (or Swiftly's agency key) changed: its failure record is forgotten in both
-   * chains, and every idle task is due again (never sooner than one cadence after its last start),
-   * so a corrected key is tried at the next heartbeat instead of after a backoff or a 300 s bench.
+   * chains, a new credentials era begins (a poll still in flight under the old one counts for nothing
+   * when it ends, and its task then starts over), and each idle task the provider served starts over,
+   * due at once (scheduler.ts restartTask). So a corrected key is tried at the next heartbeat, instead
+   * of after a backoff, a cadence or a 300 s bench: a new key is a new request.
    */
   credentialsChanged(provider: ProviderId): void {
     invariant(!this.disposed, 'a disposed poller has no credentials');
@@ -219,7 +239,11 @@ export class LivePoller {
       vehicles: Object.freeze({ ...this.chain.vehicles, [provider]: clean.vehicles[provider] }),
       predictions: Object.freeze({ ...this.chain.predictions, [provider]: clean.predictions[provider] }),
     });
-    this.scheduler = resumeAll(this.scheduler, this.clock.now());
+    this.eras[provider] += 1;
+    const nowS = this.clock.now();
+    for (const [id, servedBy] of this.servedBy) {
+      this.scheduler = servedBy === provider ? restartTask(this.scheduler, id, nowS) : this.scheduler;
+    }
     invariant(this.chain.vehicles[provider].consecutive === 0 && this.chain.predictions[provider].consecutive === 0, `${provider} starts clean`);
   }
 
@@ -271,11 +295,16 @@ export class LivePoller {
   private async poll(id: string, capability: Capability, provider: ProviderId): Promise<void> {
     invariant(this.scheduler.get(id)?.inFlight === true, `task ${id} was started`);
     invariant(capability === 'vehicles' || id.startsWith(STATION_TASK_PREFIX), 'a predictions task names its station');
+    const era = this.eras[provider];
     let polled: Polled | null = null;
+    let reusedBug = false;
     try {
       polled = capability === 'vehicles' ? await this.pollVehicles(provider) : await this.pollStation(provider, id.slice(STATION_TASK_PREFIX.length));
+    } catch (error) {
+      reusedBug = error instanceof ReusedRejection;
+      throw error; // a bug, reused or not: detach.ts hands it to onBug
     } finally {
-      this.end({ id, capability, provider, polled });
+      this.end({ id, capability, provider, era, polled, reused: polled === null ? reusedBug : !polled.ok && polled.error.reused === true });
     }
   }
 
@@ -320,29 +349,48 @@ export class LivePoller {
   }
 
   /**
-   * Records an ended poll in the scheduler and the chain, then publishes. It COUNTS only when its
-   * provider stands keyed now (not gated) and its failure, if any, is its own (not `reused`); a poll
-   * that does not count leaves no trace: no lastError, nothing in the chain, its task released with
-   * its failures and interval unchanged. A batch it brought back is shown either way.
+   * Settles an ended poll in the scheduler and the chain, then publishes. A batch it brought back is
+   * shown however it counts.
+   *  - Its provider's key CHANGED since it started (a new era): it leaves no trace, and its task
+   *    starts over, due at once — the new key owes nothing to the old key's answer.
+   *  - Its provider no longer stands keyed (gated off Wi-Fi, or its key removed): it leaves no trace —
+   *    no lastError, nothing in the chain, its task released with its failures and interval as they were.
+   *  - Otherwise it is recorded (record()).
    */
-  private settle({ id, capability, provider, polled }: EndedPoll): void {
+  private settle(ended: EndedPoll): void {
     const nowS = this.clock.now();
     const standings = this.deps.standings();
-    const outcome = polled === null ? 'failed' : outcomeOf(polled);
-    const counts = standings[provider].hasKey && (polled === null || polled.ok || polled.error.reused !== true);
+    const { id, provider, polled } = ended;
+    invariant(ended.era <= this.eras[provider], 'a poll ends in the credentials era it started in, or a later one');
     if (polled?.ok === true) {
       polled.value();
     }
-    if (counts && polled !== null) {
-      this.lastError[capability] = polled.ok ? null : polled.error; // a bug leaves the last provider error as it was
+    if (ended.era !== this.eras[provider]) {
+      this.scheduler = restartTask(releasePoll(this.scheduler, id, nowS), id, nowS);
+    } else if (!standings[provider].hasKey) {
+      this.scheduler = releasePoll(this.scheduler, id, nowS);
+    } else {
+      this.record(ended, nowS);
     }
-    if (counts) {
-      this.chain = recordPoll(this.chain, capability, provider, outcome === 'ok' ? 'ok' : 'failed', nowS);
-    }
-    this.scheduler = counts ? finishPoll(this.scheduler, id, outcome, nowS) : releasePoll(this.scheduler, id, nowS);
     invariant(this.scheduler.get(id)?.inFlight !== true, `task ${id} is no longer in flight`);
-    invariant(!counts || outcome !== 'ok' || this.chain[capability][provider].consecutive === 0, 'a recorded success clears the provider\'s failures');
     this.publishStatus(this.resolve(nowS, standings), true);
+  }
+
+  /**
+   * A poll that counts (mfix10 fix round 3, R3): its task ENDS, so a failure backs it off on R-b's
+   * schedule whether it started the download or reused it; but only its OWN result goes into the
+   * chain (failover, bench) and lastError — a failure or bug `reused` from a download another poll
+   * started was recorded by that poll.
+   */
+  private record({ id, capability, provider, polled, reused }: EndedPoll, nowS: number): void {
+    const outcome = polled === null ? 'failed' : outcomeOf(polled);
+    invariant(!reused || outcome !== 'ok', 'only a failure or a bug is handed out reused');
+    this.scheduler = finishPoll(this.scheduler, id, outcome, nowS);
+    if (!reused) {
+      this.chain = recordPoll(this.chain, capability, provider, outcome === 'ok' ? 'ok' : 'failed', nowS);
+      this.lastError[capability] = polled === null ? this.lastError[capability] : polled.ok ? null : polled.error; // a bug leaves the last provider error as it was
+    }
+    invariant(reused || outcome !== 'ok' || this.chain[capability][provider].consecutive === 0, 'a recorded success clears the provider\'s failures');
   }
 
   private publishStatus(resolutions: Readonly<Record<Capability, ChainResolution>>, always: boolean): void {

@@ -13,7 +13,7 @@ import { type NetworkSource, NetworkWatch } from './network-watch';
 import { LivePoller, type LiveSnapshot } from './poller';
 import type { ProviderDeps } from './providers/batches';
 import { NONE_PROVIDER } from './providers/none';
-import { createSwiftlyProvider } from './providers/swiftly';
+import { createSwiftlyProvider, type SwiftlyLiveProvider } from './providers/swiftly';
 import { createTransitlandProvider } from './providers/transitland';
 import { callsThisMonth, type QuotaStore, recordCall } from './quota';
 import { KvQuotaStore } from './quota-store';
@@ -36,14 +36,19 @@ import { readSwiftlyWifiOnly } from './swiftly-wifi';
  * and `swiftlyGated` says why it is not serving. A request already in flight when the gate closes may
  * finish, and it leaves no trace (poller.ts settle).
  *
- * HOLD ON RESUME (arbiter, mfix10 fix round 2). iOS suspends the app's JavaScript in the background,
- * so the phone may have changed networks with no listener event reaching the app. On every resume
- * (the mount while active included) the runtime asks the network afresh and HOLDS the poller: no
- * resume tick, no provider switch, the published gate and status as they were. The hold lasts until
- * the fresh answer (or a listener event) is in, or until RESUME_READING_TIMEOUT_MS passes; then the
- * poller resumes on that reading — at the first heartbeat that finds it in, so a fetch never starts
- * at the very instant the reading lands, and the hold never ends while the app is in the background
- * (the heartbeat runs only while it is active). A timeout means no reading: not Wi-Fi.
+ * HOLD ON RESUME (arbiter, mfix10 fix rounds 2 and 3). iOS suspends the app's JavaScript in the
+ * background, so the phone may have changed networks with no listener event reaching the app. On every
+ * resume (the mount while active included) the runtime asks the network afresh and HOLDS the poller:
+ * no resume tick, no provider switch, the published gate and status as they were. The hold lifts at
+ * the FIRST HEARTBEAT AFTER the fresh answer (or a listener event) is in — never at the instant it
+ * lands — and the poller resumes on that reading; so the mount, whose answer lands at once, polls at
+ * +1 s. The timeout counts heartbeats: the RESUME_HOLD_BEATS-th heartbeat after the resume
+ * (RESUME_READING_TIMEOUT_MS / HEARTBEAT_MS, 3) lifts the hold with no reading, so off Wi-Fi. The hold
+ * never ends while the app is in the background: the heartbeat runs only while it is active.
+ *
+ * SWIFTLY'S 30 s FLOOR (providers/swiftly.ts) runs on `monotonicMs` (performance.now() by default),
+ * not on the wall clock: a wall-clock correction neither shortens nor stretches it. A changed Swiftly
+ * KEY clears it (a new key is a new request); a changed agency key is a new endpoint.
  *
  * LIFECYCLE: constructing a runtime does nothing observable. `start()` makes a fresh poller, loads
  * the keys and begins publishing; `stop()` aborts the poller's requests and publishing stops. A
@@ -51,10 +56,10 @@ import { readSwiftlyWifiOnly } from './swiftly-wifi';
  * the watched stations, the byte counter, and the quota (persisted).
  */
 
-/** How long a resume holds the poller for the network's fresh answer (arbiter judgment constant, mfix10 fix round 2). */
+/** How long a resume holds the poller for the network's fresh answer, counted in heartbeats (arbiter judgment constant, mfix10 fix round 2). */
 export const RESUME_READING_TIMEOUT_MS = 3_000;
 
-/** The heartbeats a resume holds the poller at most: RESUME_READING_TIMEOUT_MS of them. */
+/** The heartbeats a resume holds the poller at most: RESUME_READING_TIMEOUT_MS of them; the last one lifts the hold. */
 const RESUME_HOLD_BEATS = Math.ceil(RESUME_READING_TIMEOUT_MS / HEARTBEAT_MS);
 
 /** A resume waiting for the network's fresh answer: the heartbeats it has counted, and the Swiftly gate as it stood. */
@@ -90,6 +95,8 @@ export type RuntimeOptions = {
   readonly keychain?: SecretStore;
   readonly quotaStore?: QuotaStore;
   readonly nowS?: () => number;
+  /** A millisecond clock that never runs backwards, for Swiftly's 30 s floor (providers/swiftly.ts): performance.now() by default. */
+  readonly monotonicMs?: () => number;
   /** The phone's network for the Swiftly gate (live-context.tsx passes expo-network); without one there is never a reading, so never Wi-Fi. */
   readonly networkSource?: NetworkSource;
   /** The rider's "Use Swiftly only on Wi-Fi", read afresh every time the chain asks (swiftly-wifi.ts's kv item by default). */
@@ -116,6 +123,8 @@ export class LiveRuntime {
   private hold: ResumeHold | null = null;
   private readonly counter = new ByteCounter();
   private readonly providers: Readonly<Record<ChainProviderId, LiveProvider>>;
+  /** Swiftly's provider as such: a change of Swiftly's key clears its remembered downloads (its 30 s floor). */
+  private readonly swiftly: SwiftlyLiveProvider;
   private readonly keychain: SecretStore;
   private readonly quota: QuotaStore;
   private readonly nowS: () => number;
@@ -134,9 +143,10 @@ export class LiveRuntime {
       keys: () => this.keys,
       network: options.network,
       recordCall: (provider: ProviderId) => this.meter(provider),
-      nowS: this.nowS,
+      monotonicMs: options.monotonicMs ?? (() => performance.now()),
     };
-    this.providers = Object.freeze({ swiftly: createSwiftlyProvider(deps), transitland: createTransitlandProvider(deps), none: NONE_PROVIDER });
+    this.swiftly = createSwiftlyProvider(deps);
+    this.providers = Object.freeze({ swiftly: this.swiftly, transitland: createTransitlandProvider(deps), none: NONE_PROVIDER });
     invariant(PROVIDER_IDS.every((id) => this.providers[id].id === id), 'each provider is in its own slot');
     invariant(this.poller === null, 'a new runtime is stopped');
   }
@@ -182,8 +192,9 @@ export class LiveRuntime {
   /**
    * The 1 s heartbeat (use-live-polling.ts, while the app is active). Unheld, the poller ticks and the
    * chain reads the Swiftly gate afresh. Held, the heartbeat only counts toward the hold's end: the
-   * first one that finds the network's fresh answer in, or that comes RESUME_READING_TIMEOUT_MS after
-   * the resume, lifts the hold and resumes the poller on the reading then (none after a timeout).
+   * first one after the network's fresh answer is in, or the RESUME_HOLD_BEATS-th since the resume (the
+   * timeout counts heartbeats), lifts the hold and resumes the poller on the reading then (none after a
+   * timeout).
    */
   tick(): void {
     const poller = this.poller;
@@ -275,11 +286,21 @@ export class LiveRuntime {
     return saved;
   }
 
+  /**
+   * Puts `next` in effect. A changed Swiftly KEY clears Swiftly's remembered downloads first (a new
+   * key is a new request, so its 30 s floor does not hold it back); a changed agency key does not
+   * (it is a new endpoint, and going back to the old one within 30 s must not repeat its request).
+   * Each provider whose credentials changed starts clean in the poller, its tasks due at once.
+   */
   private applyKeys(next: LiveKeys): void {
-    const swiftlyChanged = next.swiftly !== this.keys.swiftly || next.swiftlyAgency !== this.keys.swiftlyAgency;
+    const swiftlyKeyChanged = next.swiftly !== this.keys.swiftly;
+    const swiftlyChanged = swiftlyKeyChanged || next.swiftlyAgency !== this.keys.swiftlyAgency;
     const changed = PROVIDER_IDS.filter((id) => (id === 'swiftly' ? swiftlyChanged : next[id] !== this.keys[id]));
     this.keys = Object.freeze({ ...next });
     this.keysError = null;
+    if (swiftlyKeyChanged) {
+      this.swiftly.keyChanged(this.keys.swiftly);
+    }
     for (const provider of changed) {
       this.poller?.credentialsChanged(provider);
     }
@@ -352,7 +373,7 @@ export class LiveRuntime {
     const nowS = this.nowS();
     const gated = this.swiftlyGated();
     const standings = { swiftly: this.standing('swiftly', nowS, gated), transitland: this.standing('transitland', nowS, false) };
-    invariant(PROVIDER_IDS.every((id) => Number.isSafeInteger(standings[id].callsThisMonth) && standings[id].callsThisMonth >= 0), 'call counts are whole and never negative');
+    invariant(!gated || !standings.swiftly.hasKey, 'a gated Swiftly is never offered to the chain, so no Swiftly request starts while it is gated');
     return standings;
   }
 

@@ -17,9 +17,12 @@ import { BACKOFF_CAP_S, BACKOFF_FIRST_S } from './constants';
  *  - After the app was in the background, every task is due on resume — but, in the same spirit as
  *    R-b, never sooner than one cadence after its previous poll started (a 10 s trip to another app
  *    does not buy Swiftly an early poll).
- *  - A poll that counts for nothing (mfix10: its provider was held back by the Wi-Fi gate when it
- *    ended, or its failure was reused from a download another poll started) is RELEASED, not
- *    finished: the task is idle again one interval on, its failures and interval as they were.
+ *  - A poll that counts for nothing (mfix10: its provider no longer stood keyed when it ended — held
+ *    back by the Wi-Fi gate, or its key removed) is RELEASED, not finished: the task is idle again one
+ *    interval on, its failures and interval as they were.
+ *  - A task can START OVER (mfix10 fix round 3, R4: its provider's key changed, so its next poll is a
+ *    new request that owes nothing to the old key's backoff or cadence): it is due at once, with no
+ *    failures and no previous start, as a new task would be.
  */
 
 export type PollOutcome = 'ok' | 'failed' | 'rate-limited';
@@ -132,6 +135,21 @@ export function releasePoll(state: SchedulerState, id: string, nowS: number): Sc
   }
   invariant(task.inFlight && task.lastStartedAt !== null && nowS >= task.lastStartedAt, `task ${id} was in flight since before ${nowS}`);
   return new Map(state).set(id, { ...task, inFlight: false, dueAt: nowS + task.intervalS });
+}
+
+/**
+ * An idle task starts over at `nowS`, as a new task would (its provider's key changed): due now, no
+ * failures, its interval its cadence, no previous start. A task in flight is left as it is (it starts
+ * over when its poll ends), and a task dropped meanwhile stays dropped.
+ */
+export function restartTask(state: SchedulerState, id: string, nowS: number): SchedulerState {
+  invariant(Number.isFinite(nowS), 'a task starts over at an instant');
+  const task = state.get(id);
+  if (task === undefined || task.inFlight) {
+    return state;
+  }
+  invariant(task.lastStartedAt === null || nowS >= task.lastStartedAt, `task ${id} starts over no earlier than its last poll started`);
+  return new Map(state).set(id, { ...task, dueAt: nowS, failures: 0, intervalS: task.cadenceS, lastStartedAt: null });
 }
 
 /** Back from the background at `nowS`: every idle task is due now, or one cadence after its last poll started if that is later. */

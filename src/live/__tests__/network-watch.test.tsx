@@ -37,6 +37,8 @@ jest.mock('expo-sqlite', () => jest.requireActual('../../data/__tests__/schedule
 
 const STATION = 'mover:government-center';
 const T0_MS = Date.UTC(2026, 9, 1, 12);
+/** The four feeds the app reads: either provider's vehicles, Swiftly's trip updates, Transitland's departures. */
+const KNOWN_FEED = /(\/vehicle_positions\.pb|\/gtfs-rt-vehicle-positions|\/gtfs-rt-trip-updates)$|\/departures\?/;
 
 type Provider = 'swiftly' | 'transitland';
 type Listener = { readonly listener: (state: NetworkState) => void; readonly remove: jest.Mock };
@@ -170,7 +172,7 @@ function providerOf(url: string): Provider {
 function firstTo(from: number, capability: RegExp): Provider | null {
   expect(from).toBeLessThanOrEqual(mockHttp.requests.length);
   const after = mockHttp.requests.slice(from);
-  expect(after.every((request, i) => i === 0 || (after[i - 1]?.atS ?? request.atS) <= request.atS)).toBe(true); // in time order: the fake clock never runs backwards
+  expect(after.every((request) => KNOWN_FEED.test(request.url))).toBe(true); // a known feed, so no request escapes the capability patterns unseen
   const first = after.find((request) => capability.test(request.url));
   return first === undefined ? null : providerOf(first.url);
 }

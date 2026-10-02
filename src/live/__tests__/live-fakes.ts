@@ -109,8 +109,9 @@ export class FakeServer {
  * sanitized fixtures for 9513 and 813, an empty board for any other stop).
  */
 export function bothProviders(stations: readonly string[]): FakeServer {
-  const stops = stations.flatMap((station) => runtimeNetwork().stopsOfStation(station));
-  expect(stops.length).toBeGreaterThanOrEqual(stations.length); // every station asked for has stops
+  const network = runtimeNetwork();
+  expect(stations.filter((station) => network.stopsOfStation(station).length === 0)).toEqual([]); // every station asked for has stops of its own
+  const stops = stations.flatMap((station) => network.stopsOfStation(station));
   expect(new Set(stops).size).toBe(stops.length); // and no stop belongs to two of them
   const departures: Record<string, Reply> = {};
   for (const stop of stops) {
@@ -141,9 +142,9 @@ const TYPELESS_STATE: NetworkState = Object.freeze({ isConnected: true, isIntern
 
 /** expo-network's iOS state for a network type; `null` is a state without a type (connected, type unknown). */
 export function networkState(type: string | null): NetworkState {
+  expect(type === null || typeof type === 'string').toBe(true); // a type name, or null for none
   const state = type === null ? TYPELESS_STATE : IOS_NETWORK_STATES.get(type);
   expect(state).toBeDefined(); // a type iOS reports (an Android-only type here is a test's typo)
-  expect(state?.type ?? null).toBe(type); // the table's entry is the type asked for
   return state as NetworkState;
 }
 

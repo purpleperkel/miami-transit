@@ -13,6 +13,7 @@ import { NONE_PROVIDER } from '../providers/none';
 const T0 = 1_790_872_200;
 const NETWORK_DOWN: LiveError = { kind: 'network', message: 'offline' };
 const RATE_LIMITED: LiveError = { kind: 'http', status: 429, message: 'HTTP 429' };
+const UNAUTHORIZED: LiveError = { kind: 'http', status: 401, message: 'HTTP 401' };
 
 /** ok, a provider error, or 'reject' — a broken provider that rejects, which the LiveProvider contract forbids. */
 type Answer = 'ok' | 'reject' | LiveError;
@@ -302,7 +303,7 @@ describe('LivePoller (M4.9): lifecycle', () => {
     h.transitland.next = 'ok';
     h.poller.credentialsChanged('transitland');
     await h.step(240);
-    expect(callTimes(h.transitland)).toEqual([0, 60, 120, 180, 240]);
+    expect(callTimes(h.transitland)).toEqual([0, 60, 120, 180, 181]); // at the next heartbeat (mfix10 R4): a new key is a new request
     expect(h.latest.status.vehicles).toEqual({ provider: 'transitland', failing: false, consecutiveFailures: 0, lastError: null });
   });
 });
@@ -327,16 +328,32 @@ describe('LivePoller (mfix10): polls that count for nothing', () => {
     expect(h.snapshots.filter((snapshot) => snapshot.status.vehicles.lastError !== null || snapshot.status.vehicles.consecutiveFailures > 0)).toEqual([]);
   });
 
-  it('a failure reused from another poll\'s download is recorded nowhere: no failure count, no backoff, no lastError', async () => {
+  it('a failure reused from another poll\'s download is not counted in the chain and leaves no lastError, but its task backs off', async () => {
     const h = new Harness();
     h.keys.swiftly = true;
     h.swiftly.next = REUSED_NETWORK_DOWN;
     await h.step(150);
-    expect(callTimes(h.swiftly)).toEqual([0, 30, 60, 90, 120, 150]); // never backed off, never benched
+    expect(callTimes(h.swiftly)).toEqual([0, 30, 60, 120]); // R-b's 30, 30, 60 s (mfix10 R3: every failed poll backs off) — and never benched
     expect(h.latest.status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null });
     h.swiftly.next = NETWORK_DOWN; // its own failure counts
-    await h.step(180);
+    await h.step(240);
     expect(h.latest.status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 1, lastError: NETWORK_DOWN });
+  });
+});
+
+describe('LivePoller (mfix10): a key change while a poll is in flight', () => {
+  it('the old key\'s answer leaves no trace, and the new key is tried at the next heartbeat', async () => {
+    const h = new Harness();
+    h.keys.swiftly = true;
+    [h.swiftly.next, h.swiftly.hold] = [UNAUTHORIZED, true];
+    await h.step(0); // Swiftly's poll starts under the old key, and hangs
+    h.poller.credentialsChanged('swiftly'); // a new key is pasted meanwhile
+    h.swiftly.release(); // the old key's request answers 401
+    await settle();
+    expect(h.latest.status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null });
+    [h.swiftly.next, h.swiftly.hold] = ['ok', false];
+    await h.step(1);
+    expect(callTimes(h.swiftly)).toEqual([0, 1]);
   });
 });
 

@@ -14,20 +14,11 @@ const kv = jest.requireMock<KvStoreFake>('expo-sqlite/kv-store');
 
 beforeEach(() => kv.map.clear());
 
-/** An in-memory kv store; with `refuses`, every write fails as a full disk would. */
-function memoryStore(refuses = false): SyncKeyValue & { readonly map: Map<string, string> } {
-  const map = new Map<string, string>();
-  const store = { map, getItemSync: (key: string) => map.get(key) ?? null, setItemSync: (key: string, value: string) => void map.set(key, value) };
-  expect(store.getItemSync(SWIFTLY_WIFI_ONLY_ITEM)).toBeNull(); // a fresh store holds no setting: the default-read premise
-  expect(SWIFTLY_WIFI_ONLY_ITEM.startsWith('settings.')).toBe(true); // the namespace Data & Settings' tests read settings under
-  return refuses ? { ...store, setItemSync: () => { throw new Error('disk full'); } } : store;
-}
-
 describe('the Wi-Fi only setting (mfix10): its default', () => {
   it('the wi-fi only setting is on when its item is empty or unreadable', () => {
     expect(DEFAULT_SWIFTLY_WIFI_ONLY).toBe(true);
     expect(readSwiftlyWifiOnly()).toBe(true);
-    expect(readSwiftlyWifiOnly(memoryStore())).toBe(true);
+    expect(readSwiftlyWifiOnly({ getItemSync: () => null, setItemSync: () => undefined })).toBe(true); // a store given in place of kv-store, holding nothing
     for (const junk of ['', 'garbage', '{"wifiOnly":', 'yes please', '[]', '2', '0', 'False', ' false', 'null']) {
       kv.map.set(SWIFTLY_WIFI_ONLY_ITEM, junk);
       expect([junk, readSwiftlyWifiOnly()]).toEqual([junk, true]);
@@ -43,15 +34,19 @@ describe('the Wi-Fi only setting (mfix10): saving it', () => {
       expect(readSwiftlyWifiOnly()).toBe(value);
     }
     expect(SWIFTLY_WIFI_ONLY_ITEM).toBe('settings.swiftly-wifi-only');
-    const store = memoryStore();
-    expect(saveSwiftlyWifiOnly(false, store)).toEqual({ ok: true, value: false });
-    expect([...store.map]).toEqual([[SWIFTLY_WIFI_ONLY_ITEM, 'false']]);
+    const map = new Map<string, string>(); // a store given in place of kv-store
+    expect(saveSwiftlyWifiOnly(false, { getItemSync: (key) => map.get(key) ?? null, setItemSync: (key, value) => void map.set(key, value) })).toEqual({ ok: true, value: false });
+    expect([...map]).toEqual([[SWIFTLY_WIFI_ONLY_ITEM, 'false']]);
   });
 
   it('a kv store that refuses the write keeps the setting as it was and says why', () => {
-    const store = memoryStore(true);
+    const store: SyncKeyValue = {
+      getItemSync: () => null,
+      setItemSync: () => {
+        throw new Error('disk full');
+      },
+    };
     expect(saveSwiftlyWifiOnly(false, store)).toEqual({ ok: false, error: { kind: 'storage', message: 'could not save the Wi-Fi only setting: disk full' } });
     expect(readSwiftlyWifiOnly(store)).toBe(true);
-    expect(store.map.size).toBe(0);
   });
 });

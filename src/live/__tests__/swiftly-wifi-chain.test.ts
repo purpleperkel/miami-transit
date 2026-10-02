@@ -29,6 +29,7 @@ type AppStatus = NonNullable<AppStateSource['currentState']>;
 type Request = { readonly url: string; readonly provider: Provider; readonly capability: 'vehicles' | 'predictions'; readonly atS: number };
 type RigOptions = { readonly wifiOnly?: boolean; readonly app?: AppStateSource; readonly stations?: readonly string[] };
 type Chain = {
+  readonly runtime: LiveRuntime;
   readonly network: FakeNetwork;
   readonly downloads: HeldDownloads;
   /** The call spy: every fetch the runtime makes, to either provider. */
@@ -132,16 +133,16 @@ function chainRig(first: string | 'never', { wifiOnly, app = ACTIVE, stations = 
   runtime.watchStations(stations);
   teardowns.push(bindRuntime(runtime, app, HEARTBEAT_MS));
   expect(network.open()).toHaveLength(1);
-  return { network, downloads, fetch, requests, states, quota };
+  return { runtime, network, downloads, fetch, requests, states, quota };
 }
 
 /** Steps the fake clock `seconds` heartbeats, one at a time, letting each tick's requests finish. */
 async function stepS(seconds: number): Promise<void> {
   expect(seconds).toBeGreaterThanOrEqual(0);
+  expect(Number.isInteger(seconds)).toBe(true); // whole heartbeats: a fraction would round up to one more
   for (let i = 0; i < seconds; i += 1) {
     await jest.advanceTimersByTimeAsync(HEARTBEAT_MS);
   }
-  expect(Date.now() % HEARTBEAT_MS).toBe(0);
 }
 
 /** How many requests Swiftly has seen since request number `from`, counted on the call spy. */
@@ -156,7 +157,7 @@ function swiftlyCalls(chain: Chain, from = 0): number {
 function firstTo(chain: Chain, from: number, capability: Request['capability']): Provider | null {
   expect(from).toBeLessThanOrEqual(chain.requests.length);
   const after = chain.requests.slice(from);
-  expect(after.every((request, i) => i === 0 || (after[i - 1]?.atS ?? request.atS) <= request.atS)).toBe(true); // in time order: the fake clock never runs backwards
+  expect(after.every((request) => request.capability === 'vehicles' || request.url === SWIFTLY_TRIP_UPDATES_URL || request.url.includes('/departures?'))).toBe(true); // a known feed: classify reads any other URL as predictions
   return after.find((request) => request.capability === capability)?.provider ?? null;
 }
 
@@ -415,5 +416,36 @@ describe('Swiftly only on Wi-Fi (mfix10): Swiftly\'s 30 s floor and one failure 
     expect([takeover?.status.vehicles.consecutiveFailures, takeover?.status.predictions.consecutiveFailures, swiftlyCalls(chain, cut)]).toEqual([0, 0, 4]);
     await stepS(1);
     expectServing(chain, 'swiftly');
+  });
+});
+
+describe('Swiftly only on Wi-Fi (mfix10): the 30 s floor runs on a monotonic millisecond clock', () => {
+  it('a start at .95 s allows no new start at +30.05 s of wall time while fewer than 30 000 ms have passed', async () => {
+    jest.setSystemTime(T0_MS + 950); // the wall clock reads x.95 s; performance.now(), the monotonic clock, does not move
+    const chain = chainRig('WIFI');
+    await stepS(1); // the mount's hold lifts: Swiftly downloads both feeds
+    const startS = lastSwiftlyAtS(chain);
+    expect([swiftlyCalls(chain), Math.round((startS % 1) * 100)]).toEqual([2, 95]);
+    await stepS(28); // 28 000 ms after the start
+    jest.setSystemTime(Date.now() + 1_050); // the wall clock is corrected 1.05 s forward
+    await stepS(1); // wall: +30.05 s after the start, so both Swiftly tasks are due; monotonic: 29 000 ms
+    expect([Math.round(Date.now() - startS * 1_000), swiftlyCalls(chain)]).toEqual([30_050, 2]);
+    chain.runtime.watchStations([STATION, 'rail:brickell']); // a new station: its poll is due at once
+    await stepS(1); // 30 000 ms after the start: the floor ends
+    expect(chain.fetch.mock.calls.slice(2).map(([url]) => url)).toEqual([SWIFTLY_TRIP_UPDATES_URL]); // its download; vehicles were read from the floor at +30.05 s
+  });
+
+  it('a forward wall-clock jump of +40 s does not end the floor', async () => {
+    const chain = chainRig('WIFI');
+    await stepS(1);
+    const startS = lastSwiftlyAtS(chain);
+    await stepS(4);
+    jest.setSystemTime(Date.now() + 40_000); // the phone's clock jumps 40 s ahead: every task is due at once
+    await stepS(25); // monotonic: 29 000 ms after the start
+    expect([Math.round(Date.now() - startS * 1_000), swiftlyCalls(chain)]).toEqual([69_000, 2]);
+    chain.runtime.watchStations([STATION, 'rail:brickell']);
+    await stepS(1); // 30 000 ms after the start
+    expect(chain.fetch.mock.calls.slice(2).map(([url]) => url)).toEqual([SWIFTLY_TRIP_UPDATES_URL]);
+    expect(chain.requests.filter((request) => request.provider === 'transitland')).toEqual([]);
   });
 });

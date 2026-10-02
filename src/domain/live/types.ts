@@ -1,4 +1,5 @@
 import type { LatLon } from '../../lib/geo';
+import { invariant } from '../../lib/invariant';
 import type { Result } from '../../lib/result';
 import type { LineId } from '../lines/line-catalog';
 import type { Mode } from '../network/stations';
@@ -121,7 +122,8 @@ export type LiveErrorKind = (typeof LIVE_ERROR_KINDS)[number];
 /**
  * How a fetch failed. `reused` (mfix10) marks a failure a provider hands out AGAIN, from a download
  * another poll started (Swiftly shares each download for its 30 s cache term, providers/swiftly.ts):
- * the poll that started the download records the failure; the polls that reuse it record nothing.
+ * the poll that started the download records the failure in the chain once; every poll that gets
+ * it, reused or not, still backs off (poller.ts).
  */
 export type LiveError = (
   | { readonly kind: 'no-key'; readonly message: string }
@@ -130,6 +132,23 @@ export type LiveError = (
   | { readonly kind: 'http'; readonly status: number; readonly message: string }
   | { readonly kind: 'decode'; readonly message: string }
 ) & { readonly reused?: true };
+
+/**
+ * mfix10 fix round 3 (R5): a shared download that REJECTED — a bug, such as a mapper's broken
+ * invariant — as a fetch that did not start it gets it. It reads as the bug itself (the same name
+ * and message, the original kept as `original`), so the poll that started the download records the
+ * bug in the chain once, and a poll that gets this one records nothing there but still backs off.
+ */
+export class ReusedRejection extends Error {
+  readonly reused = true;
+
+  constructor(readonly original: unknown) {
+    super(original instanceof Error ? original.message : String(original));
+    this.name = original instanceof Error ? original.name : 'Error';
+    invariant(original instanceof Error, 'a download rejects only by a bug, and src/live throws a bug as an Error');
+    invariant(!(original instanceof ReusedRejection), 'a rejection is marked reused once, by the provider that shares the download');
+  }
+}
 
 export type LiveResult<T> = Result<LiveBatch<T>, LiveError>;
 

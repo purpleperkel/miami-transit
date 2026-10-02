@@ -27,12 +27,14 @@ const NOW = 1_790_872_260;
 const HTML = new Uint8Array([0x3c, 0x68, 0x74, 0x6d, 0x6c, 0x3e]); // "<html>": a captive portal, not protobuf
 const EMPTY_9512 = { stops: [{ stop_id: '9512', departures: [] }] };
 
-type Deps = ProviderDeps & { readonly calls: ProviderId[]; readonly clock: { now: number } };
+/** The phone's two clocks: the wall clock in epoch seconds (`now`), and the monotonic one in milliseconds (`ms`, performance.now()'s). */
+type Clocks = { now: number; ms: number };
+type Deps = ProviderDeps & { readonly calls: ProviderId[]; readonly clock: Clocks };
 
-/** Provider deps over `server`: quota calls are recorded, the clock is `deps.clock.now`. */
+/** Provider deps over `server`: quota calls are recorded, the wall clock is `deps.clock.now`, the monotonic one `deps.clock.ms`. */
 function providerDeps(server: FakeServer, keys: LiveKeys = FAKE_KEYS): Deps {
   const calls: ProviderId[] = [];
-  const clock = { now: NOW };
+  const clock: Clocks = { now: NOW, ms: 5_000 };
   const counter = new ByteCounter();
   const deps: Deps = {
     calls,
@@ -41,11 +43,19 @@ function providerDeps(server: FakeServer, keys: LiveKeys = FAKE_KEYS): Deps {
     keys: () => keys,
     network: runtimeNetwork(),
     recordCall: (provider: ProviderId) => void calls.push(provider),
-    nowS: () => clock.now,
+    monotonicMs: () => clock.ms,
   };
   expect(deps.calls).toEqual([]);
   expect(deps.network.stopsOfStation('rail:government-ctr')).toEqual(['9512', '9513']);
   return deps;
+}
+
+/** `seconds` pass on both clocks, as they do on a phone whose clock is not being corrected. */
+function advance(clock: Clocks, seconds: number): void {
+  expect(seconds).toBeGreaterThan(0); // time moves forward
+  expect(Number.isSafeInteger(clock.now + seconds)).toBe(true); // the wall clock reads whole seconds, as the runtime's wallClockS does
+  clock.now += seconds;
+  clock.ms += seconds * 1_000;
 }
 
 /** (trip, stop) of each prediction, in order. */
@@ -141,7 +151,7 @@ describe('Swiftly provider (M4.9)', () => {
     const deps = providerDeps(server);
     const provider = createSwiftlyProvider(deps);
     const rail = await provider.fetchPredictions('rail:government-ctr', signal());
-    deps.clock.now += 29;
+    advance(deps.clock, 29);
     const mover = await provider.fetchPredictions('mover:government-center', signal());
     // fixture-rail-0845's 9513 update is NO_DATA, which the M4.2 mapper drops (from-gtfsrt.test.ts).
     expect(rail.ok && rows(rail.value.items)).toEqual([['fixture-rail-0822', '9513'], ['fixture-rail-0830', null]]);
@@ -155,7 +165,7 @@ describe('Swiftly provider (M4.9)', () => {
     const deps = providerDeps(server);
     const provider = createSwiftlyProvider(deps);
     await provider.fetchPredictions('rail:brickell', signal());
-    deps.clock.now += 30;
+    advance(deps.clock, 30);
     const later = await provider.fetchPredictions('rail:brickell', signal());
     expect(later.ok && later.value.fetchedAt).toBe(NOW + 30);
     expect(server.urls()).toEqual([SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_TRIP_UPDATES_URL]);
@@ -177,11 +187,11 @@ describe('Swiftly provider (mfix10): the 30 s floor at the source', () => {
     const deps = providerDeps(server);
     const provider = createSwiftlyProvider(deps);
     const first = await provider.fetchVehicles(signal());
-    deps.clock.now += 29;
+    advance(deps.clock, 29);
     const reread = await provider.fetchVehicles(signal());
     expect([server.urls(), deps.calls]).toEqual([[SWIFTLY_VEHICLES_URL], ['swiftly']]);
     expect(reread.ok && first.ok && reread.value).toBe(first.ok && first.value); // the same batch, not a new download
-    deps.clock.now += 1;
+    advance(deps.clock, 1);
     await provider.fetchVehicles(signal());
     expect([server.urls(), deps.calls]).toEqual([[SWIFTLY_VEHICLES_URL, SWIFTLY_VEHICLES_URL], ['swiftly', 'swiftly']]);
   });
@@ -191,14 +201,17 @@ describe('Swiftly provider (mfix10): the 30 s floor at the source', () => {
     const deps = providerDeps(server);
     const provider = createSwiftlyProvider(deps);
     const own = await provider.fetchVehicles(signal());
-    deps.clock.now += 5;
+    advance(deps.clock, 5);
     const reused = await provider.fetchVehicles(signal());
     expect(own).toEqual({ ok: false, error: { kind: 'http', status: 503, message: 'api.goswift.ly answered HTTP 503' } });
     expect(reused).toEqual({ ok: false, error: { kind: 'http', status: 503, message: 'api.goswift.ly answered HTTP 503', reused: true } });
     expect(server.urls()).toHaveLength(1);
   });
 
-  it('a new agency key is a new endpoint, so it downloads at once', async () => {
+});
+
+describe('Swiftly provider (mfix10): the floor per endpoint, per key, on a monotonic clock', () => {
+  it('a new agency key is a new endpoint, so it downloads at once; back on the first agency within 30 s, nothing is re-requested', async () => {
     const MDT = 'https://api.goswift.ly/real-time/mdt-test/gtfs-rt-vehicle-positions';
     const server = new FakeServer({ [SWIFTLY_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES }, [MDT]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES } });
     let keys: LiveKeys = FAKE_KEYS;
@@ -206,20 +219,52 @@ describe('Swiftly provider (mfix10): the 30 s floor at the source', () => {
     const provider = createSwiftlyProvider(deps);
     await provider.fetchVehicles(signal());
     keys = { ...FAKE_KEYS, swiftlyAgency: 'mdt-test' };
+    advance(deps.clock, 5);
     await provider.fetchVehicles(signal());
+    keys = FAKE_KEYS;
+    advance(deps.clock, 24);
+    await provider.fetchVehicles(signal()); // 29 s after miami's download: inside its floor
     expect(server.urls()).toEqual([SWIFTLY_VEHICLES_URL, MDT]);
     expect(deps.calls).toEqual(['swiftly', 'swiftly']); // each download metered once
+    advance(deps.clock, 1);
+    await provider.fetchVehicles(signal());
+    expect(server.urls()).toEqual([SWIFTLY_VEHICLES_URL, MDT, SWIFTLY_VEHICLES_URL]);
   });
 
-  it('the floor is measured on a clock that never runs backwards: a wall-clock step back neither stretches nor shortens it', async () => {
+  it('a key change forgets every download, so the new key downloads at once; told of no change, the provider refuses', async () => {
+    const server = new FakeServer({ [SWIFTLY_VEHICLES_URL]: { status: 401, body: new Uint8Array(0) }, [SWIFTLY_TRIP_UPDATES_URL]: { status: 401, body: new Uint8Array(0) } });
+    let keys: LiveKeys = FAKE_KEYS;
+    const deps: Deps = { ...providerDeps(server), keys: () => keys };
+    const provider = createSwiftlyProvider(deps);
+    await provider.fetchVehicles(signal());
+    await provider.fetchPredictions('rail:brickell', signal());
+    expect(() => provider.keyChanged(FAKE_KEYS.swiftly)).toThrow('downloads are forgotten only for a new key');
+    keys = { ...FAKE_KEYS, swiftly: 'fake-swiftly-key-b' };
+    expect(() => provider.keyChanged(FAKE_KEYS.swiftly)).toThrow('the provider is told of the key in effect now');
+    provider.keyChanged(keys.swiftly);
+    advance(deps.clock, 1);
+    await provider.fetchVehicles(signal());
+    await provider.fetchPredictions('rail:brickell', signal());
+    expect(server.requests.map((r) => [r.url, r.headers.Authorization])).toEqual([
+      [SWIFTLY_VEHICLES_URL, 'fake-swiftly-key'],
+      [SWIFTLY_TRIP_UPDATES_URL, 'fake-swiftly-key'],
+      [SWIFTLY_VEHICLES_URL, 'fake-swiftly-key-b'],
+      [SWIFTLY_TRIP_UPDATES_URL, 'fake-swiftly-key-b'],
+    ]);
+  });
+
+  it('the floor\'s clock never runs backwards: a monotonic source that steps back is absorbed, so the floor neither stretches nor shortens', async () => {
     const server = new FakeServer({ [SWIFTLY_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES } });
     const deps = providerDeps(server);
     const provider = createSwiftlyProvider(deps);
     await provider.fetchVehicles(signal());
-    deps.clock.now -= 3_600; // the phone's clock is corrected an hour back
+    deps.clock.ms -= 3_600_000; // a source that steps an hour back (performance.now() never does; a fallback to Date.now() could)
     await provider.fetchVehicles(signal());
     expect(server.urls()).toHaveLength(1);
-    deps.clock.now += 30;
+    deps.clock.ms += 29_999;
+    await provider.fetchVehicles(signal());
+    expect(server.urls()).toHaveLength(1);
+    deps.clock.ms += 1;
     await provider.fetchVehicles(signal());
     expect(server.urls()).toHaveLength(2);
   });

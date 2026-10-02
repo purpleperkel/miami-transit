@@ -45,7 +45,8 @@ function rig(items: Readonly<Record<string, string>> = { 'live.key.transitland':
   const settings = new Map<string, string>();
   const network = new FakeNetwork('WIFI');
   const wifi = { networkSource: network, swiftlyWifiOnly: () => readSwiftlyWifiOnly({ getItemSync: (key) => settings.get(key) ?? null, setItemSync: (key, value) => void settings.set(key, value) }) };
-  const options = { network: runtimeNetwork(), onChange: (state: LiveState) => void states.push(state), fetch: server.fetch, keychain: secretStore, quotaStore, nowS: () => clock.now, ...wifi };
+  const clocks = { nowS: () => clock.now, monotonicMs: () => clock.now * 1_000 }; // the manual clock is never corrected, so it serves as both
+  const options = { network: runtimeNetwork(), onChange: (state: LiveState) => void states.push(state), fetch: server.fetch, keychain: secretStore, quotaStore, ...clocks, ...wifi };
   const runtime = new LiveRuntime(options);
   expect(runtime.isStarted()).toBe(false);
   expect(states).toEqual([]);
@@ -158,5 +159,53 @@ describe('LiveRuntime (M4.9): keys and lifecycle', () => {
     await resumed({ runtime, server });
     expect(server.urls()).toContain(TL_VEHICLES_URL);
     expect(latest(states).vehicles?.provider).toBe('transitland');
+  });
+});
+
+/** Ticks the runtime once a second through OCT_1 + `untilS` (the heartbeat), letting each tick's requests finish. */
+async function tickThrough({ runtime, clock }: Pick<Rig, 'runtime' | 'clock'>, untilS: number): Promise<void> {
+  expect(OCT_1 + untilS).toBeGreaterThan(clock.now); // the heartbeat only moves forward
+  expect(runtime.isStarted()).toBe(true); // only a started runtime has a heartbeat
+  while (clock.now < OCT_1 + untilS) {
+    clock.now += 1;
+    runtime.tick();
+    await settle();
+  }
+}
+
+describe('LiveRuntime (mfix10): Swiftly\'s 30 s floor, per endpoint and per key', () => {
+  const MDT_VEHICLES_URL = 'https://api.goswift.ly/real-time/mdt-test/gtfs-rt-vehicle-positions';
+
+  it('agency a, then b, then a again within 30 s does not re-request a', async () => {
+    const r = rig({ 'live.key.swiftly': 'fake-swiftly-runtime-key', 'live.key.transitland': TL_KEY });
+    r.server.on(SWIFTLY_VEHICLES_URL, { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES });
+    r.server.on(MDT_VEHICLES_URL, { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES });
+    r.runtime.start();
+    await settle();
+    await resumed(r); // agency A (miami) downloads at 0 s
+    expect(await r.runtime.saveSwiftlyAgency('mdt-test')).toEqual({ ok: true, value: 'mdt-test' });
+    await tickThrough(r, 5); // agency B: a new endpoint, downloaded at once
+    expect(await r.runtime.saveSwiftlyAgency('miami')).toEqual({ ok: true, value: 'miami' });
+    await tickThrough(r, 29); // back on A inside its floor: A's download is read again, not repeated
+    expect(r.server.urls()).toEqual([SWIFTLY_VEHICLES_URL, MDT_VEHICLES_URL]);
+    expect(latest(r.states).status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null });
+    await tickThrough(r, 40);
+    expect(r.server.urls()).toEqual([SWIFTLY_VEHICLES_URL, MDT_VEHICLES_URL, SWIFTLY_VEHICLES_URL]); // A again, one cadence after it was read
+  });
+
+  it('a 401 with key a, then key b pasted: the first request with b starts at the next heartbeat', async () => {
+    const r = rig({ 'live.key.swiftly': 'fake-swiftly-key-a', 'live.key.transitland': TL_KEY });
+    r.server.on(SWIFTLY_VEHICLES_URL, { status: 401, body: new Uint8Array(0) });
+    r.runtime.start();
+    await settle();
+    await resumed(r); // key A: 401
+    expect(latest(r.states).status.vehicles).toMatchObject({ provider: 'swiftly', consecutiveFailures: 1, lastError: { kind: 'http', status: 401 } });
+    await tickThrough(r, 5);
+    r.server.on(SWIFTLY_VEHICLES_URL, { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES });
+    expect(await r.runtime.saveKey('swiftly', 'fake-swiftly-key-b')).toEqual({ ok: true, value: 'fake-swiftly-key-b' });
+    expect(r.server.requests).toHaveLength(1); // pasting sends nothing by itself
+    await tickThrough(r, 6); // the next heartbeat
+    expect(r.server.requests.map((request) => request.headers.Authorization)).toEqual(['fake-swiftly-key-a', 'fake-swiftly-key-b']);
+    expect(latest(r.states).status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null });
   });
 });

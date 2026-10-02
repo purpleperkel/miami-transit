@@ -51,10 +51,13 @@ SDK 57; never trust memory for Expo APIs).
   `// test-time mock of native module` expo-network mock whose `addNetworkStateListener` returns a subscription with
   `remove()`: jest-expo's automock returns a Promise instead, and the watch refuses it with an invariant. On every
   resume (the mount while active included) the runtime asks `getNetworkStateAsync` and HOLDS its poller: no tick, no
-  provider switch, the published gate as it was, until a heartbeat finds the answer in (or `RESUME_READING_TIMEOUT_MS`,
-  3 s, passes: no reading, so off Wi-Fi). A test that calls `runtime.resume()` by hand must tick once after the answer
-  lands before anything polls. Swiftly never starts a request to an endpoint within 30 s of its last start there
-  (providers/swiftly.ts), whatever the scheduler asks. KNOWN UPSTREAM LIMIT (expo-network 57.0.2,
+  provider switch, the published gate as it was. The hold lifts at the first heartbeat after the answer is in (never the
+  instant it lands), so the mount polls at +1 s; the timeout counts heartbeats (`RESUME_READING_TIMEOUT_MS` / `HEARTBEAT_MS`,
+  3 of them; then no reading, so off Wi-Fi). A test that calls `runtime.resume()` by hand must tick once after the answer
+  lands before anything polls. Swiftly never starts a request to an endpoint (its URL) within 30 000 ms of its last
+  start there, whatever the scheduler asks (providers/swiftly.ts); the floor runs on `performance.now()`, which jest's
+  fake timers move with the clock and `jest.setSystemTime` does not. A new Swiftly key clears it; a new agency is a new
+  endpoint. KNOWN UPSTREAM LIMIT (expo-network 57.0.2,
   ios/NetworkModule.swift): its one NWPathMonitor is cancelled when the last listener goes and cannot restart, so after
   a runtime stop and start in one app session listener events stop until relaunch; resume asks still run.
 - `babel.config.js` exists because jest-expo 57.0.5's `jest-expo/ios` preset needs Expo's babel preset

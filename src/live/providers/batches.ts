@@ -26,8 +26,11 @@ export type ProviderDeps = {
   readonly network: RuntimeNetwork;
   /** Records one REST call against the provider's monthly quota (quota.ts). */
   readonly recordCall: (provider: ProviderId) => void;
-  /** The clock, in epoch seconds. */
-  readonly nowS: () => number;
+  /**
+   * A clock in milliseconds that never runs backwards and ignores wall-clock corrections: the
+   * runtime's is performance.now(). Swiftly's 30 s floor is measured on it (providers/swiftly.ts).
+   */
+  readonly monotonicMs: () => number;
 };
 
 /** A vehicle-positions body as a batch of in-scope vehicles. */

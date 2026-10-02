@@ -21,8 +21,20 @@ import { invariant } from '../../../src/lib/invariant';
 /** Expo's public env prefix, assembled so no tracked file spells it out next to a KEY name. */
 export const PUBLIC_PREFIX = ['EXPO', 'PUBLIC', ''].join('_');
 
-/** A public-prefixed name with KEY in it — the card's pattern, extended to the whole identifier for reporting. */
-export const PUBLIC_KEY_NAME = new RegExp(`${PUBLIC_PREFIX}\\w*KEY\\w*`, 'g');
+/** A whole variable name that is public-prefixed with KEY in it, at any length — which variables' VALUES are secrets. */
+const PUBLIC_KEY_VARIABLE = new RegExp(`^${PUBLIC_PREFIX}\\w*KEY\\w*$`);
+
+/** The most name characters after the prefix that a public key NAME found in bytes may have (env-var sized). */
+export const PUBLIC_NAME_MAX = 50;
+
+/**
+ * A public key NAME in bundle or source bytes: a standalone token — no identifier character
+ * ([A-Za-z0-9_]) right before it or right after it — of at most PUBLIC_NAME_MAX name characters after
+ * the prefix, KEY among them. Hermes packs its string table back to back, so without the bounds a
+ * real runtime string (`<prefix>USE_RN_FETCH`) glued to the uppercase strings after it reads as one
+ * 300-character "name" whenever KEY turns up somewhere in that run (2026-10-02 false positive).
+ */
+export const PUBLIC_KEY_TOKEN = new RegExp(`(?<!\\w)${PUBLIC_PREFIX}(?=\\w{0,${PUBLIC_NAME_MAX}}(?!\\w))\\w*KEY\\w*`, 'g');
 
 /** The private key variables (Mac .env, probe scripts only). */
 export const KEY_NAMES: readonly string[] = ['TRANSITLAND_API_KEY', 'SWIFTLY_API_KEY'];
@@ -59,7 +71,7 @@ export function resolveSecrets(env: EnvSource, dotenv: EnvSource): Secret[] {
 /** A private key variable, or a public-prefixed one with KEY in its name. */
 export function isSecretName(name: string): boolean {
   invariant(typeof name === 'string', 'a variable name is text');
-  const isPublicKey = new RegExp(`^${PUBLIC_KEY_NAME.source}$`).test(name);
+  const isPublicKey = PUBLIC_KEY_VARIABLE.test(name);
   invariant(!isPublicKey || name.startsWith(PUBLIC_PREFIX), 'a public key name carries the public prefix');
   return KEY_NAMES.includes(name) || isPublicKey;
 }

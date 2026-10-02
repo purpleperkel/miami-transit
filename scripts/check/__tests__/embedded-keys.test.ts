@@ -105,6 +105,49 @@ describe('embedded-keys: the byte scan', () => {
   });
 });
 
+describe('embedded-keys: a public key name counts only as a standalone, env-var-sized token', () => {
+  const secrets = [{ name: 'TRANSITLAND_API_KEY', value: FAKE }];
+  /** Hermes packs its string table back to back: Expo's real runtime string glued to the uppercase strings after it (2026-10-02 export). */
+  const glued = `${PUBLIC_PREFIX}USE_RN_FETCH` + 'HEADERS_RECEIVED' + 'DEFAULT_JOG_MPS' + 'MONKEY_ISLAND' + 'NOT_DETERMINED';
+  const standalone = `${PUBLIC_PREFIX}FOO_KEY`;
+
+  test('(a) KEY inside a long glued string-table run is not a leak — one-byte or UTF-16', () => {
+    const run = Buffer.concat([HERMES_HEAD, Buffer.from(`\x01${glued}\x02`)]);
+    const wide = Buffer.concat([HERMES_HEAD, Buffer.from(`\x01${glued}\x02`, 'utf16le')]);
+    assert.ok(glued.includes('KEY') && glued.length - PUBLIC_PREFIX.length > 50, 'the run hides KEY and is longer than any env-var name');
+    assert.deepEqual(scanBytes(run, 'glued.hbc', secrets), []);
+    assert.deepEqual(scanBytes(wide, 'glued16.hbc', secrets), []);
+  });
+
+  test('(b) a short standalone public key name in bytecode is a leak — one-byte and UTF-16', () => {
+    const binary = Buffer.concat([HERMES_HEAD, Buffer.from(`\x00${standalone}\x00`)]);
+    const wide = Buffer.concat([HERMES_HEAD, Buffer.from(`\x00${standalone}\x00`, 'utf16le')]);
+    assert.deepEqual(scanBytes(binary, 'b.hbc', secrets), [{ name: standalone, file: 'b.hbc', how: 'public-name' }]);
+    assert.deepEqual(scanBytes(wide, 'w.hbc', secrets), [{ name: standalone, file: 'w.hbc', how: 'public-name' }]);
+  });
+
+  test('(c) a process.env reference to a public key name is a leak', () => {
+    const source = Buffer.from(`k=process.env.${standalone};`);
+    assert.deepEqual(scanBytes(source, 'c.js', secrets), [{ name: standalone, file: 'c.js', how: 'public-name' }]);
+    assert.deepEqual(scanBytes(Buffer.concat([HERMES_HEAD, source]), 'c.hbc', secrets).map((leak) => leak.how), ['public-name']);
+  });
+
+  test('the bounds are exact: 50 name chars is a name, 51 or glued behind an identifier is not; values are untouched', () => {
+    const fifty = `${PUBLIC_PREFIX}${'A'.repeat(46)}_KEY`;
+    const fiftyOne = `${PUBLIC_PREFIX}${'A'.repeat(47)}_KEY`;
+    assert.deepEqual(scanBytes(Buffer.from(`\x00${fifty}\x00`), 'f.hbc', []).map((leak) => leak.name), [fifty]);
+    assert.deepEqual(scanBytes(Buffer.from(`\x00${fiftyOne}\x00`), 'g.hbc', []), []);
+    assert.deepEqual(scanBytes(Buffer.from(`\x00MRClient${standalone}\x00`), 'h.hbc', []), []);
+    assert.deepEqual(scanBytes(Buffer.from(`\x01${glued}${FAKE}\x02`), 'v.hbc', secrets), [{ name: 'TRANSITLAND_API_KEY', file: 'v.hbc', how: 'value' }]);
+  });
+
+  test('the length bound narrows only the bundle NAME scan — any public *KEY* name still marks its value a secret', () => {
+    assert.equal(isSecretName(`${PUBLIC_PREFIX}${'A'.repeat(60)}_KEY`), true);
+    assert.equal(isSecretName(glued), true, 'a full-name match, whatever its length');
+    assert.equal(isSecretName(`x${standalone}`), false, 'the prefix must start the name');
+  });
+});
+
 describe('embedded-keys: --tree reads the git index', () => {
   const repo = join(WORK, 'repo');
   mkdirSync(join(repo, 'scripts', 'check'), { recursive: true });

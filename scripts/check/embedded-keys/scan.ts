@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 import { invariant } from '../../../src/lib/invariant';
 import { err, ok, type Result } from '../../../src/lib/result';
-import { PUBLIC_KEY_NAME, type Secret } from './secrets';
+import { PUBLIC_KEY_TOKEN, PUBLIC_NAME_MAX, PUBLIC_PREFIX, type Secret } from './secrets';
 
 /**
  * The byte scan (plan M4.10). The exported bundle is Hermes BYTECODE
@@ -12,9 +12,12 @@ import { PUBLIC_KEY_NAME, type Secret } from './secrets';
  * as plain bytes and any other string as UTF-16, so each secret value is searched for in both
  * encodings, and public key names in a one-byte and both UTF-16 alignments of the text.
  *
- * Hermes also packs its string table without separators, so a reported public name may run on into
- * the next string (e.g. `<prefix>USE_RN_FETCHMRClient` in the 2026-10-01 export). That can only add
- * characters to a real hit; any hit fails the guard loudly.
+ * Hermes also packs its string table without separators, so a public-prefixed string runs straight
+ * into its neighbours: the 2026-10-02 export glued Expo's own `<prefix>USE_RN_FETCH` to ~300 characters
+ * of following uppercase strings, one of which contained KEY. A public key NAME therefore counts only
+ * as a standalone, env-var-sized token (secrets.ts PUBLIC_KEY_TOKEN); the cost is that a key name
+ * glued between identifier characters is not reported as a name. The VALUE scan has no such rule: a
+ * secret value is a leak wherever its bytes are, and a defined public variable is inlined as its value.
  */
 
 /** One leak: which variable, where, and how it showed up. */
@@ -38,8 +41,9 @@ export function scanBytes(bytes: Uint8Array, file: string, secrets: readonly Sec
 function publicKeyNames(buffer: Buffer): string[] {
   invariant(Buffer.isBuffer(buffer), 'names are read from bytes');
   const views = [buffer.toString('latin1'), buffer.toString('utf16le'), buffer.subarray(1).toString('utf16le')];
-  const names = new Set(views.flatMap((text) => text.match(PUBLIC_KEY_NAME) ?? []));
-  invariant([...names].every((name) => name.includes('KEY')), 'every reported public name has KEY in it');
+  const names = new Set(views.flatMap((text) => text.match(PUBLIC_KEY_TOKEN) ?? []));
+  const maxLength = PUBLIC_PREFIX.length + PUBLIC_NAME_MAX;
+  invariant([...names].every((name) => name.includes('KEY') && name.length <= maxLength), 'every reported public name is an env-var-sized KEY name');
   return [...names].sort();
 }
 

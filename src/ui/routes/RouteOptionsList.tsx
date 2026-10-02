@@ -5,7 +5,7 @@ import type { HurryVerdict } from '@/domain/hurry/verdict';
 import { invariant } from '@/lib/invariant';
 
 import { copy } from '../copy';
-import { type HurryCopyContext, hurryInline, hurrySentence } from '../hurry/copy';
+import { type HurryCopyContext, hurryShort, hurrySentence } from '../hurry/copy';
 import { type Freshness, FreshnessIndicator } from '../primitives/FreshnessIndicator';
 import { LineBadge } from '../primitives/LineBadge';
 import { TText } from '../primitives/TText';
@@ -18,7 +18,7 @@ import { linkingOpenURL, useOpenLink } from './use-open-link';
  * Plan M10b.1: the route options, scannable at a glance (Jamie: "easily get route options … and know
  * 'is it worth it to hurry/jog'"). One row per option, earliest arrival first:
  *
- *   2:01 → 2:21                                   Chill · 2 min      ← the first leg's hurry chip
+ *   2:01 → 2:21                             Chill · 1 min spare      ← the first leg's hurry chip
  *   20 min   No transfers   13 min walk
  *   [Brickell] [Orange]   ((·)) Live                                ← line badges, Live when overlaid
  *
@@ -145,9 +145,9 @@ export function LegBadgeView({ badge, testID }: { readonly badge: LegBadge; read
   );
 }
 
-/** The first leg's hurry or chill, in the Now strip's inline words ("Chill · 2 min"); VoiceOver reads the full sentence. */
+/** The first leg's hurry or chill in the short, labelled copy ("Chill · 1 min spare", mfix8); VoiceOver reads the full sentence. */
 function HurryChip({ verdict, ctx, testID }: { readonly verdict: HurryVerdict; readonly ctx: HurryCopyContext; readonly testID: string }) {
-  const text = hurryInline(verdict, ctx);
+  const text = hurryShort(verdict, ctx);
   const sentence = hurrySentence(verdict, ctx);
   invariant(text.length > 0 && sentence.length > text.length, 'the chip says the verdict, VoiceOver the sentence');
   invariant(testID.endsWith('-hurry'), 'the chip is the row\'s hurry chip');

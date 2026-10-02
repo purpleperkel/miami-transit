@@ -28,7 +28,7 @@ import { actionableVerdict, type HurryCopyContext } from './copy';
  *   hurryReading      per direction: the nearest platform serving it (walkMeters), the timetable with the
  *                     live predictions merged in (m4a's merge, as the sheet's DirectionGroup does), the
  *                     boardable departures (board.ts) and the verdict (verdict.ts); or why there is none
- *   soonestBoard      the one the Now strip shows: the direction whose recommended train leaves first
+ *   soonestBoard      the direction whose recommended train leaves first (the Now strip's pick until mfix8)
  *
  * Live data is stale past its provider's fresh limit (providerConfig(provider).freshS, mfix3's relative
  * rule): its departures carry `stale`, so the verdict's confidence is low and the badge says how old.
@@ -171,7 +171,7 @@ function directionBoard(timetable: Timetable, directionId: number, position: Lat
 }
 
 /** The live predictions are older than their provider's fresh limit (mfix3's relative rule). */
-function liveIsStale(batch: LiveBatch<LivePrediction> | null, nowS: number): boolean {
+export function liveIsStale(batch: LiveBatch<LivePrediction> | null, nowS: number): boolean {
   invariant(Number.isFinite(nowS), 'staleness is judged at an instant');
   const stale = batch !== null && nowS - batch.fetchedAt > providerConfig(batch.provider).freshS;
   invariant(!stale || batch !== null, 'only a batch can be stale');
@@ -188,8 +188,10 @@ export function clockFor(bases: readonly number[]): (epoch: number) => string {
 }
 
 /**
- * The board the Now strip shows: the direction whose recommended train leaves first (a CHILL or JOG
- * train, a NOT_WORTH_IT verdict's next train, a MISSED verdict's nested one); a tie keeps direction order.
+ * The station's board whose recommended train leaves first, in EITHER direction (a CHILL or JOG train, a
+ * NOT_WORTH_IT verdict's next train, a MISSED verdict's nested one); a tie keeps direction order. It was the
+ * Now strip's verdict until mfix8, when the bar began judging a saved trip's own rides instead (trip-verdict.ts):
+ * a station's soonest train is often going the wrong way for the rider.
  */
 export function soonestBoard(boards: readonly HurryBoard[]): HurryBoard {
   invariant(boards.length > 0, 'a station reading has at least one board');

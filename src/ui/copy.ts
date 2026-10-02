@@ -177,6 +177,15 @@ export const copy = Object.freeze({
   recentNotSaved: 'Not saved to recent places',
   /** mfix5 (arbiter ruling 2026-10-02): a late leg's delay overruns a transfer's slack; the next ride does not wait. */
   tightTransfer: (line: string) => `Tight transfer · may miss ${line}`,
+  /** mfix8: an itinerary of one Metrorail or Metromover ride saves as a trip; any other says why it cannot. */
+  saveThisTrip: 'Save this trip',
+  saveThisTripHint: 'Saves this ride to Trips, with its leave-by countdown',
+  savedInTrips: 'Saved in Trips',
+  saveNeedsOneRide: (rides: number) => `Saved trips are one ride; this route has ${rides}.`,
+  saveNeedsStations: 'Saved trips are Metrorail and Metromover rides between two stations.',
+  /** mfix8: the Now bar with no saved trip near and none counting down: no verdict; a tap opens route options. */
+  barWhereTo: 'Where to?',
+  barWhereToLabel: 'Where to? Opens route options.',
   /** A web page (an attribution's source) would not open. */
   pageFailed: 'The page did not open',
 });

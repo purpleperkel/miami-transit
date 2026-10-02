@@ -176,7 +176,7 @@ describe('the Route from here sheet and its hurry chips (mfix5)', () => {
     // 400 m away (520 m with m7c's 1.3 detour) at 2:00:03, with 327 s until the 2:06 Mover less 30 s to
     // board: a walk (385 s) misses it, a jog (193 s) makes it with 134 s to spare.
     expect(jest.mocked(Location.watchPositionAsync)).toHaveBeenCalledTimes(1);
-    expect(firstChip(tree)).toEqual({ text: 'Jog · 2 min', sentence: 'Jog to make the 2:06 train with 2 minutes to spare, going by scheduled times.' });
+    expect(firstChip(tree)).toEqual({ text: 'Jog · 2 min spare', sentence: 'Jog to make the 2:06 train with 2 minutes to spare, going by scheduled times.' });
   });
 
   it('Route from here hurry chip walks from the plan start without a user position', async () => {
@@ -184,6 +184,6 @@ describe('the Route from here sheet and its hurry chips (mfix5)', () => {
     const tree = await routeFromHere();
     // No fix: the chip walks from the station itself, where the 2:06 Mover leaves — 327 s to spare, Chill.
     expect(jest.mocked(Location.watchPositionAsync)).not.toHaveBeenCalled();
-    expect(firstChip(tree)).toEqual({ text: 'Chill · 5 min', sentence: 'Chill, a walk makes the 2:06 train with 5 minutes to spare, going by scheduled times.' });
+    expect(firstChip(tree)).toEqual({ text: 'Chill · 5 min spare', sentence: 'Chill, a walk makes the 2:06 train with 5 minutes to spare, going by scheduled times.' });
   });
 });

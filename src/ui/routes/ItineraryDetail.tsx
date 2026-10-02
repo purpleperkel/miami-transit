@@ -1,9 +1,14 @@
+import { randomUUID } from 'expo-crypto';
+import { useState } from 'react';
 import { PlatformColor, StyleSheet, View } from 'react-native';
 
+import type { SavedTrip } from '@/data/saved-trips-repo';
+import { type TripBook, useUserDb } from '@/data/user-db-provider';
 import type { OpenUrl } from '@/domain/handoff/apple-maps';
 import type { Leg } from '@/domain/routes/transitous';
 import { invariant } from '@/lib/invariant';
 
+import { wallClockNowS } from '../clock';
 import { copy } from '../copy';
 import { formatDistance } from '../format';
 import { ActionButton } from '../primitives/ActionButton';
@@ -11,7 +16,7 @@ import { type Freshness, FreshnessIndicator } from '../primitives/FreshnessIndic
 import { TText } from '../primitives/TText';
 import { RADIUS, SPACING } from '../tokens';
 import { legTarget, openDirections, walkDirectionsUrl } from './leg-actions';
-import { durationText, legBadge, legEnds, modeWord, optionFacts, type PlaceNames, type RouteClock, type RouteNetwork, type RouteOption } from './route-options';
+import { durationText, legBadge, legEnds, modeWord, optionFacts, type PlaceNames, type RouteClock, type RouteNetwork, type RouteOption, type TripToSave, tripToSave } from './route-options';
 import { ConnectionRisk, LegBadgeView } from './RouteOptionsList';
 import { linkingOpenURL, useOpenLink } from './use-open-link';
 
@@ -26,6 +31,12 @@ import { linkingOpenURL, useOpenLink } from './use-open-link';
  *
  * A walk-only option (mfix7, Transitous's direct answer) is one walk leg: "Walk 8 min · no train needed"
  * over it, and its "Directions" hand the whole trip to Apple Maps walking directions (dirflg=w).
+ *
+ * mfix8 (Jamie: "I don't see how to save a route"): an option of ONE Metrorail or Metromover ride offers "Save
+ * this trip", which saves m7b's trip — the ride's boarding and alighting stations, the walk from wherever the
+ * phone is — through the user DB (so the Trips tab and the Now bar have it at once), then says it is saved.
+ * Any other option says in one line why it cannot be a saved trip (a walk-only option says nothing). The
+ * user DB comes from UserDbProvider (the root layout's); outside one there is nothing to save to.
  */
 
 const LIVE: Freshness = Object.freeze({ kind: 'live' });
@@ -57,11 +68,57 @@ export function ItineraryDetail({ option, network, names, clock, openURL = linki
         {facts.walkOnly ?? [facts.duration, facts.transfers, facts.walk].join(' · ')}
       </TText>
       {option.connectionAtRisk === null ? null : <ConnectionRisk testID="itinerary-risk" text={option.connectionAtRisk} />}
+      <SaveTrip save={tripToSave(option.itinerary, network)} names={names} />
       {legs.map((_, j) => (
         <LegView key={`leg-${j}`} option={option} index={j} network={network} names={names} clock={clock} openURL={openURL} />
       ))}
     </View>
   );
+}
+
+/** "Save this trip" for a one-ride option, "Saved in Trips" once it is a saved trip, or one line of why it cannot be. */
+function SaveTrip({ save, names }: { readonly save: TripToSave; readonly names: PlaceNames }) {
+  const user = useUserDb();
+  const [problem, setProblem] = useState<string | null>(null);
+  invariant(save.kind !== 'rides' || save.rides > 1, 'only two or more rides are too many');
+  if (save.kind !== 'ride') {
+    const why = save.kind === 'rides' ? copy.saveNeedsOneRide(save.rides) : save.kind === 'not-stations' ? copy.saveNeedsStations : null;
+    return why === null ? null : <TText testID="itinerary-save-trip-why" variant="footnote" tone="secondary" numberOfLines={1}>{why}</TText>;
+  }
+  if (user.kind !== 'ready') {
+    return null;
+  }
+  invariant(save.from !== save.to, 'a saved trip joins two stations');
+  if (user.trips.some((trip) => trip.fromStationKey === save.from && trip.toStationKey === save.to)) {
+    return (
+      <TText testID="itinerary-save-trip-saved" variant="subhead" tone="secondary">
+        {copy.savedInTrips}
+      </TText>
+    );
+  }
+  return (
+    <View style={styles.save}>
+      <ActionButton testID="itinerary-save-trip" symbol="star" label={copy.saveThisTrip} hint={copy.saveThisTripHint} onPress={() => setProblem(saveRide(user.book, save, names))} />
+      {problem === null ? null : (
+        <TText testID="itinerary-save-trip-problem" variant="footnote" accessibilityLiveRegion="polite" style={styles.failure}>
+          {problem}
+        </TText>
+      )}
+    </View>
+  );
+}
+
+/**
+ * Writes the ride as m7b's saved trip — named as the add-trip flow names one ("Government Center → Financial
+ * District"), walked from wherever the phone is, no reminders — and returns why the user DB refused it, or null.
+ */
+function saveRide(book: TripBook, ride: Extract<TripToSave, { readonly kind: 'ride' }>, names: PlaceNames): string | null {
+  const name = `${names.stations.get(ride.from) ?? ride.from} → ${names.stations.get(ride.to) ?? ride.to}`;
+  const trip: SavedTrip = { id: randomUUID(), name, fromStationKey: ride.from, toStationKey: ride.to, start: null, walkOverrideMin: null, reminder: null, createdEpoch: wallClockNowS() };
+  invariant(trip.fromStationKey !== trip.toStationKey && trip.name.length > 0, 'a saved ride is named and joins two stations');
+  const outcome = book.save(trip);
+  invariant(outcome.ok || outcome.error.message.length > 0, 'a refused trip says why');
+  return outcome.ok ? null : outcome.error.message;
 }
 
 type LegViewProps = Omit<ItineraryDetailProps, 'onBack' | 'openURL'> & { readonly index: number; readonly openURL: OpenUrl };
@@ -131,4 +188,5 @@ const styles = StyleSheet.create({
   line: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs },
   headsign: { flexShrink: 1 },
   failure: { color: PlatformColor('systemRed') },
+  save: { gap: SPACING.xxs },
 });

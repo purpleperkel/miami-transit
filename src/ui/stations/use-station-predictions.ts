@@ -9,7 +9,7 @@ import type { LiveRuntime } from '@/live/runtime';
  * The OPEN station sheet's live predictions (REALTIME COST RULE, R7): while a sheet is mounted its
  * station is watched — the runtime polls one predictions call per station per refresh (Transitland's
  * free key: 10,000 calls a month) — and the watch ends when the sheet closes. The other watchers follow
- * the same rule: hurry or chill (one station near the rider, useHurryVerdict.ts) and the route options
+ * the same rule: hurry or chill (the Now bar: its near saved trip's origin only, useHurryVerdict.ts) and the route options
  * sheet (at most MAX_WATCHED_STATIONS boarding stations while it is open, src/ui/routes/use-route-plan.ts).
  * The Stations list watches nothing, so it costs no calls at all.
  *

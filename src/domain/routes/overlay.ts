@@ -30,8 +30,12 @@ import type { ConnectionRisk, Itinerary, Leg } from './transitous';
  * live, and the input is never mutated. A trip shared by two itineraries is updated in both.
  *
  * firstLegVerdict asks m7c's engine (hurryVerdict) whether to hurry for the first transit leg: the walk is
- * the straight line from the rider to that leg's boarding stop, the departure is the leg's (live or
- * scheduled) boarding time — and only that one, so with no following train a jog that makes it is JOG.
+ * the straight line from the rider to that leg's boarding stop (the engine's 1.3 detour on top), the
+ * departure is the leg's (live or scheduled) boarding time — and only that one, so with no following train a
+ * jog that makes it is JOG. mfix8 (arbiter ruling): a caller whose rider is still where the itinerary starts
+ * may opt in to the ROUTED walk instead — the metres Transitous routed for the walk legs before the first
+ * ride, with no detour, since they already follow the streets. Opted in without a routed distance (no walk
+ * leg before the ride, or one without distanceM), the straight line stands.
  */
 
 /** Transitous's trip id prefix: the service day, the trip's first departure, the feed. */
@@ -140,19 +144,38 @@ function shifted(leg: Leg, byS: number): Leg {
   return moved;
 }
 
-/** m7c's hurry-or-chill verdict for an itinerary's first transit leg, or null for a walk-only itinerary. */
-export function firstLegVerdict(itinerary: Itinerary, position: LatLon, now: number, pace: FirstLegPace = {}): HurryVerdict | null {
+/**
+ * m7c's hurry-or-chill verdict for an itinerary's first transit leg, or null for a walk-only itinerary. The
+ * walk is the straight line from `position` to the boarding stop; with `routedWalk` (mfix8, opt-in) it is the
+ * routed walk legs before the ride, when Transitous gave their distances.
+ */
+export function firstLegVerdict(itinerary: Itinerary, position: LatLon, now: number, pace: FirstLegPace = {}, routedWalk = false): HurryVerdict | null {
   invariant(isLatLon(position), `the rider's position is a valid coordinate: ${position.latitude},${position.longitude}`);
   invariant(Number.isFinite(now), 'the verdict is taken at an instant');
-  const leg = itinerary.legs.find((candidate) => candidate.tripId !== null);
+  const first = itinerary.legs.findIndex((candidate) => candidate.tripId !== null);
+  const leg = itinerary.legs[first];
   if (leg === undefined) {
     return null;
   }
   const stop: LatLon = { latitude: leg.from.latitude, longitude: leg.from.longitude };
+  const routed = routedWalk ? routedWalkMeters(itinerary.legs.slice(0, first)) : null;
+  const walk = routed === null ? { walkMeters: haversineMeters(position, stop) } : { walkMeters: routed, detour: 1 };
   const departure: HurryDeparture = { epoch: leg.from.epoch, live: leg.live, lineId: leg.routeShortName, headsign: leg.headsign };
-  const verdict = hurryVerdict({ ...pace, now, walkMeters: haversineMeters(position, stop), departures: [departure] });
+  const verdict = hurryVerdict({ ...pace, now, ...walk, departures: [departure] });
   invariant(verdict.departure === null || verdict.departure.epoch === leg.from.epoch, 'the verdict is about the boarding departure of the first leg');
   return verdict;
+}
+
+/** The routed metres of the walk legs before the first ride; null with no walk leg, or one Transitous gave no distance. */
+function routedWalkMeters(beforeRide: readonly Leg[]): number | null {
+  invariant(beforeRide.every((leg) => leg.tripId === null), 'nothing before the first ride rides a trip');
+  const walks = beforeRide.filter((leg) => leg.mode === 'WALK');
+  let meters: number | null = walks.length === 0 ? null : 0;
+  for (const leg of walks) {
+    meters = meters === null || leg.distanceM === null ? null : meters + leg.distanceM;
+  }
+  invariant(meters === null || (Number.isFinite(meters) && meters >= 0), 'a routed walk is a non-negative distance');
+  return meters;
 }
 
 /** The usable predictions — realtime, not canceled, with an epoch, a trip and a stop — by trip and stop. */

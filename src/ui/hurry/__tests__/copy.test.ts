@@ -1,5 +1,5 @@
 import { type HurryVerdict, hurryVerdict } from '../../../domain/hurry/verdict';
-import { actionableVerdict, type HurryCopyContext, hurryCopy, hurryInline, hurryParts, hurrySentence, INLINE_MAX_CHARS } from '../copy';
+import { actionableVerdict, type HurryCopyContext, hurryCopy, hurryInline, hurryParts, hurrySentence, hurryShort, INLINE_MAX_CHARS } from '../copy';
 
 /**
  * Plan M7c.2 / M7c.3: the verdict's words, byte-exact (U+00B7 middle dots), on verdicts made by the real
@@ -71,10 +71,13 @@ describe('the hurry copy (M7c.2)', () => {
   });
 });
 
-describe('the Now strip inline copy (M7c.3, ruling R1)', () => {
-  it('inline JOG reads Jog 1 min', () => {
-    expect(hurryInline(verdict([300, 1200]), CTX)).toBe('Jog · 1 min');
-    expect(hurryInline(verdict([600]), CTX)).toBe('Chill · 3 min');
+describe('the Now strip inline copy (M7c.3, ruling R1; mfix8)', () => {
+  it('inline JOG reads Jog', () => {
+    // mfix8: inline there is no room to say what a number counts, so there is no number; the short copy
+    // (the route chip, the regular bar) keeps it, labelled.
+    expect(hurryInline(verdict([300, 1200]), CTX)).toBe('Jog');
+    expect(hurryInline(verdict([600]), CTX)).toBe('Chill');
+    expect(hurryShort(verdict([300, 1200]), CTX)).toBe('Jog · 1 min spare');
   });
 
   it('inline text is at most 14 characters', () => {
@@ -82,8 +85,8 @@ describe('the Now strip inline copy (M7c.3, ruling R1)', () => {
     const wide: HurryCopyContext = { now: 0, clock: () => '12:59' };
     const inline = Object.fromEntries(Object.entries(everyVerdict()).map(([name, v]) => [name, hurryInline(v, wide)]));
     expect(Object.values(inline).filter((text) => [...text].length > INLINE_MAX_CHARS || text.trim().length === 0)).toEqual([]);
-    // The two-hour wait shortens to hours; a missed train names what to do about the next one.
-    expect([inline.twoHourChill, inline.missed, inline.allMissed, inline.noService]).toEqual(['Chill · 1 h', 'Chill · 12:59', 'Missed', 'No more trains']);
+    // mfix8: no bare numbers inline; a missed train names the next one that can be made.
+    expect([inline.twoHourChill, inline.missed, inline.allMissed, inline.noService]).toEqual(['Chill', 'Next 12:59', 'Missed', 'No more trains']);
   });
 });
 

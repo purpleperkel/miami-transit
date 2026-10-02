@@ -2,7 +2,9 @@ import { router } from 'expo-router';
 import { act } from 'react-test-renderer';
 
 import type { StationListing } from '../../../data/schedule-queries';
+import type { Platform } from '../../../domain/hurry/platform';
 import { INLINE_MAX_CHARS } from '../../hurry/copy';
+import { tripVerdict } from '../../hurry/trip-verdict';
 import { hostsByTestID, renderPrimitive, unmountAll } from '../../primitives/__tests__/render-primitive';
 import { closeTripDbs, realScheduleRepo, savedTrip, WED_0130, WED_0800 } from '../../trips/__tests__/trip-db';
 import type { CountdownState } from '../../trips/countdown';
@@ -26,21 +28,24 @@ afterEach(async () => {
 afterAll(() => closeTripDbs());
 
 const METRES_PER_DEGREE_LAT = 111_320;
+/** A few hundred metres from Brickell's Metrorail platforms. */
+const BESIDE_BRICKELL = { latitude: 25.7605, longitude: -80.1945 };
 
-/** The real stations, and one rail station to stand near: Dadeland North (no other station within 1 km). */
-function stationsAndDadelandNorth(): { readonly stations: readonly StationListing[]; readonly station: StationListing } {
-  const stations = realScheduleRepo().stations();
+/** The real stations and platforms, and one rail station to stand near: Dadeland North (no other station within 1 km). */
+function stationsAndDadelandNorth(): { readonly stations: readonly StationListing[]; readonly platforms: readonly Platform[]; readonly station: StationListing } {
+  const repo = realScheduleRepo();
+  const stations = repo.stations();
   const station = stations.find((s) => s.stationKey === 'rail:dadeland-north');
   expect(station).toBeDefined();
   expect(stations.length).toBeGreaterThan(40);
-  return { stations, station: station as StationListing };
+  return { stations, platforms: repo.platforms(), station: station as StationListing };
 }
 
 /** The home context at `nowS` for a rider `metresNorth` of the station, with the store's marks and no trips. */
 function contextNear(metresNorth: number, nowS: number, store: NowStore): HomeContext {
-  const { stations, station } = stationsAndDadelandNorth();
+  const { stations, platforms, station } = stationsAndDadelandNorth();
   const position = { latitude: station.coordinate.latitude + metresNorth / METRES_PER_DEGREE_LAT, longitude: station.coordinate.longitude };
-  const input: HomeInput = { nowS, position, stations, modes: { rail: { kind: 'running' }, mover: { kind: 'running' } }, cards: [], now: store.read() };
+  const input: HomeInput = { nowS, position, stations, platforms, modes: { rail: { kind: 'running' }, mover: { kind: 'running' } }, cards: [], now: store.read() };
   expect(input.stations).toBe(stations);
   expect(Number.isFinite(position.latitude)).toBe(true);
   return homeContext(input);
@@ -72,11 +77,13 @@ describe('the home context: the dead of night (M7.7)', () => {
     const status = repo.modeStatusAt(WED_0130);
     expect(status.kind).toBe('mode-status');
     const modes = status.kind === 'mode-status' ? { rail: status.rail, mover: status.mover } : null;
-    const context = homeContext({ nowS: WED_0130, position: null, stations: repo.stations(), modes, cards: [], now: new NowStore().read() });
+    const context = homeContext({ nowS: WED_0130, position: null, stations: repo.stations(), platforms: repo.platforms(), modes, cards: [], now: new NowStore().read() });
     expect(context.kind).toBe('noService');
-    const said = nowStripText(context, { kind: 'locating' }, 'regular');
-    expect(said.text).toMatch(/^No trains now · (Metrorail|Metromover) opens \d{1,2}:\d{2} AM$/);
+    // mfix8: one line each, so the reopening fits the regular bar's 38-character budget.
+    const said = nowStripText(context, null, 'regular');
+    expect(said.lines).toEqual(['No trains now', expect.stringMatching(/^(Metrorail|Metromover) opens \d{1,2}:\d{2} AM$/)]);
     expect(said.label).not.toMatch(/transfer/i);
+    expect(nowStripText(context, null, 'inline').lines).toEqual(['No trains now']);
   });
 });
 
@@ -90,14 +97,18 @@ function everyInline(): string[] {
 }
 
 describe('the Now strip inline (ruling R1)', () => {
-  it('inline text fits 14 characters: every trip countdown, no service, and the hurry fallback', () => {
+  it('inline text fits 14 characters: every trip countdown, a near trip, no service, and where to', () => {
     const repo = realScheduleRepo();
     const cards = tripCards(repo, [savedTrip('gym', 'rail:brickell', 'rail:government-ctr', { name: 'Brickell to Government Center, every morning', walkOverrideMin: 4 })], { nowS: WED_0800, walkMps: 1.35, bufferS: 120, position: null });
     const trip = activeTrip(cards, WED_0800);
     expect(trip).not.toBeNull();
-    const contexts: HomeContext[] = [{ kind: 'noService', reopens: null }, { kind: 'unknown' }, { kind: 'trip', trip: trip!, nowS: WED_0800 }];
-    const said = [...everyInline(), ...contexts.map((context) => nowStripText(context, { kind: 'no-location', note: 'Location is off' }, 'inline').text)];
+    // mfix8: a near trip shows its verdict word; with no trip near, the bar asks where to.
+    const near = tripVerdict(repo, { from: 'rail:brickell', to: 'rail:government-ctr', position: BESIDE_BRICKELL, nowS: WED_0800, pace: { walkMps: 1.35, jogMps: 2.7 }, batch: null });
+    expect(near).not.toBeNull();
+    const contexts: [HomeContext, typeof near][] = [[{ kind: 'noService', reopens: null }, null], [{ kind: 'unknown' }, null], [{ kind: 'trip', trip: trip!, nowS: WED_0800 }, null], [{ kind: 'nearTrip', card: cards[0]!, nowS: WED_0800 }, near]];
+    const said = [...everyInline(), ...contexts.flatMap(([context, verdict]) => nowStripText(context, verdict, 'inline').lines)];
     expect(said.filter((text) => [...text].length > INLINE_MAX_CHARS)).toEqual([]);
+    expect(said).toContain('Where to?');
     expect(INLINE_MAX_CHARS).toBe(14);
   });
 });
@@ -109,9 +120,11 @@ describe('the Now strip with a live trip (M7.7)', () => {
     const cards = tripCards(repo, [savedTrip('gym', 'rail:brickell', 'rail:government-ctr', { name: 'Gym', walkOverrideMin: 4 })], { nowS: WED_0800, walkMps: 1.35, bufferS: 120, position: null });
     const trip = activeTrip(cards, WED_0800);
     expect(trip).not.toBeNull();
+    // mfix8: the destination first, whole (never the free-text trip name), then the countdown.
     const said = tripText(trip!, WED_0800, 'regular');
-    expect(said.text).toMatch(/^(Leave in \d+ min|Leave now) · Gym$/);
-    const tree = await renderPrimitive(<NowAccessoryView placement="regular" said={said} stationKey={null} tripId="gym" />);
+    expect(said.lines).toEqual(['Government Center', expect.stringMatching(/^(Leave in \d+ min|Leave now)$/)]);
+    expect(said.label).toContain('Trip to Government Center from Brickell.');
+    const tree = await renderPrimitive(<NowAccessoryView placement="regular" said={said} target={{ kind: 'trip', tripId: 'gym' }} />);
     await act(async () => hostsByTestID(tree.root, 'now-accessory')[0]?.props.onClick());
     expect(push.mock.calls).toEqual([[{ pathname: '/trip/[tripId]', params: { tripId: 'gym' } }]]);
   });

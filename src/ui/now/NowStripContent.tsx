@@ -16,17 +16,24 @@ export type NowStripContentProps = {
 const EMPHASIS_COLOR: Readonly<Record<NonNullable<NowStripContentProps['emphasis']>, string>> = { none: 'label', soon: 'systemOrange', now: 'systemGreen' };
 
 /**
- * The Now strip's content (M7.7): one line of tabular text — the home context as now-strip.ts words it —
- * in either placement iOS gives the accessory (regular above the tab bar, inline beside the minimized
- * one, where it is at most 14 characters). One Text, so VoiceOver reads the strip's label, not its parts.
+ * The Now bar's content (M7.7; mfix8): the home context as now-strip.ts words it, ONE Text per line, each a
+ * single line of tabular 15 pt text (the size the regular bar's character budget was measured at). Above the
+ * tab bar a second line puts what the bar is about first, in semibold (a saved trip's destination), and the
+ * status under it; the status — the last line — takes the countdown's colour. Inline (beside the minimized
+ * tab bar) it is one line of at most 14 characters. VoiceOver reads the strip's label, not its lines.
  */
 export function NowStripContent({ placement, said, emphasis = 'none' }: NowStripContentProps) {
-  invariant(said.text.length > 0, 'the strip always says something');
-  invariant(placement === 'regular' || placement === 'inline', 'the strip renders in a known placement');
+  invariant(said.lines.length > 0, 'the strip always says something');
+  invariant(placement === 'regular' || said.lines.length === 1, 'inline, the strip is one line');
+  const last = said.lines.length - 1;
   return (
-    <Text numberOfLines={1} style={[styles.text, { color: PlatformColor(EMPHASIS_COLOR[emphasis]) }]}>
-      {said.text}
-    </Text>
+    <>
+      {said.lines.map((line, i) => (
+        <Text key={`line-${i}`} numberOfLines={1} style={[styles.text, i < last ? styles.headline : null, { color: PlatformColor(i === last ? EMPHASIS_COLOR[emphasis] : 'label') }]}>
+          {line}
+        </Text>
+      ))}
+    </>
   );
 }
 
@@ -39,4 +46,5 @@ export function stripEmphasis(context: HomeContext, state: 'clock' | 'normal' | 
 
 const styles = StyleSheet.create({
   text: { fontSize: 15, fontVariant: ['tabular-nums'] },
+  headline: { fontWeight: '600' },
 });

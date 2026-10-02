@@ -2,12 +2,18 @@ import type { HurryDeparture, HurryVerdict } from '../../domain/hurry/verdict';
 import { invariant } from '../../lib/invariant';
 
 /**
- * Plan M7c.2 / M7c.3: what a hurry-or-chill verdict SAYS, in three lengths:
+ * Plan M7c.2 / M7c.3: what a hurry-or-chill verdict SAYS, in four lengths:
  *
- *   hurryCopy      the card and the full accessory  "Jog · makes the 2:14 with 1 min spare"
- *   hurryInline    the Now strip's inline accessory "Jog · 1 min" — at most INLINE_MAX_CHARS, always
+ *   hurryCopy      the station sheet's card         "Jog · makes the 2:14 with 1 min spare"
+ *   hurryShort     the route chip and the Now bar   "Jog · 1 min spare" (mfix8)
+ *   hurryInline    the Now bar beside the minimized tab bar: the verdict word alone, "Jog" — at most
+ *                  INLINE_MAX_CHARS, always (mfix8)
  *   hurrySentence  VoiceOver: one full sentence that also says "live" or "scheduled", because the card's
  *                  accessibilityLabel replaces its Live / Scheduled badge
+ *
+ * mfix8 (Jamie, 2026-10-02: "it seems to say chill when the walk is 11 min and train leaves in 2"): EVERY
+ * number on screen says what it counts — "3 min spare", "next in 3 min", "next 2:26" — so a spare time is never
+ * read as the train's departure. Where there is no room for the label (inline) there is no number either.
  *
  * Minutes round DOWN (a rider is never promised time there is not); the engine's numbers stay unrounded.
  * The clock is injected (`ctx.clock` names a train "2:14"), so this module does no time-zone math: the app
@@ -80,32 +86,51 @@ export function hurryCopy(verdict: HurryVerdict, ctx: HurryCopyContext): string 
 }
 
 /**
- * The Now strip's inline text (M7c.3, ruling R1: at most INLINE_MAX_CHARS characters): the richest
- * candidate that fits, e.g. "Jog · 1 min", else the bare verdict word. A MISSED verdict shows what to do
- * about the train that can still be made ("Chill · 2:26").
+ * The short copy (mfix8): the route options' hurry chip and the Now bar's status line. Every number is
+ * labelled — "Chill · 3 min spare", "Jog · 1 min spare", "Not worth it · next in 3 min", "Missed · next 2:26",
+ * "Missed · nothing soon", "No more trains tonight" — never a bare "Chill · 2 min".
  */
-export function hurryInline(verdict: HurryVerdict, ctx: HurryCopyContext): string {
-  const candidates = inlineCandidates(verdict, ctx);
-  const text = candidates.find((candidate) => [...candidate].length <= INLINE_MAX_CHARS);
-  invariant(text !== undefined, `some inline text for ${verdict.kind} fits ${INLINE_MAX_CHARS} characters`);
-  invariant(text.trim().length > 0, 'the inline text says something');
+export function hurryShort(verdict: HurryVerdict, ctx: HurryCopyContext): string {
+  invariant(Number.isFinite(ctx.now) && typeof ctx.clock === 'function', 'short copy is read at an instant, with a clock');
+  let text: string;
+  switch (verdict.kind) {
+    case 'CHILL':
+    case 'JOG':
+      text = `${inlineWord(verdict)}${DOT}${minutesText(spareOf(verdict))} spare`;
+      break;
+    case 'NOT_WORTH_IT':
+      text = `Not worth it${DOT}next in ${minutesText(nextOf(verdict).epoch - ctx.now)}`;
+      break;
+    case 'MISSED':
+      text = verdict.nested === null ? `Missed${DOT}nothing soon` : `Missed${DOT}next ${ctx.clock(departureOf(verdict.nested).epoch)}`;
+      break;
+    case 'NO_SERVICE':
+      text = 'No more trains tonight';
+      break;
+  }
+  invariant(text.startsWith(hurryParts(verdict, ctx).headline), 'the short copy leads with the verdict');
+  invariant(!/\d$/.test(text) || /\d:\d\d$/.test(text), `"${text}" ends in a label or a clock time, never a bare number`);
   return text;
 }
 
-/** Inline texts for a verdict, richest first; the last one always fits. */
-function inlineCandidates(verdict: HurryVerdict, ctx: HurryCopyContext): readonly string[] {
+/**
+ * The Now bar's inline text (ruling R1: at most INLINE_MAX_CHARS characters, beside the minimized tab
+ * bar): the verdict word alone — "Chill", "Jog", "Not worth it" — with no room for a number's label, so no
+ * number (mfix8). A MISSED verdict names the train that can still be made ("Next 2:26"), else "Missed".
+ */
+export function hurryInline(verdict: HurryVerdict, ctx: HurryCopyContext): string {
   invariant(Number.isFinite(ctx.now), 'inline copy is read at an instant');
-  let candidates: readonly string[];
+  let text: string;
   if (verdict.kind === 'MISSED') {
-    const nested = verdict.nested;
-    candidates = nested === null ? ['Missed'] : [`${inlineWord(nested)}${DOT}${ctx.clock(departureOf(nested).epoch)}`, inlineWord(nested)];
-  } else if (verdict.kind === 'CHILL' || verdict.kind === 'JOG') {
-    candidates = [`${inlineWord(verdict)}${DOT}${shortMinutes(spareOf(verdict))}`, inlineWord(verdict)];
+    text = verdict.nested === null ? 'Missed' : `Next ${ctx.clock(departureOf(verdict.nested).epoch)}`;
+  } else if (verdict.kind === 'NO_SERVICE') {
+    text = 'No more trains';
   } else {
-    candidates = verdict.kind === 'NOT_WORTH_IT' ? ['Not worth it'] : ['No more trains', 'No trains'];
+    text = inlineWord(verdict);
   }
-  invariant([...(candidates[candidates.length - 1] ?? '')].length <= INLINE_MAX_CHARS, 'the last candidate always fits');
-  return candidates;
+  invariant([...text].length <= INLINE_MAX_CHARS, `inline text "${text}" fits ${INLINE_MAX_CHARS} characters`);
+  invariant(text.trim().length > 0, 'the inline text says something');
+  return text;
 }
 
 /**
@@ -162,7 +187,7 @@ function nestedWord(nested: HurryVerdict): string {
   return word;
 }
 
-/** The verdict word as the inline text starts it. */
+/** The verdict word, as the inline and short copy say it. */
 function inlineWord(verdict: HurryVerdict): string {
   invariant(verdict.kind !== 'MISSED' && verdict.kind !== 'NO_SERVICE', `${verdict.kind} has no inline verdict word`);
   const word = verdict.kind === 'CHILL' ? 'Chill' : verdict.kind === 'JOG' ? 'Jog' : 'Not worth it';
@@ -176,15 +201,6 @@ function minutesText(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const text = minutes < 1 ? 'under 1 min' : `${minutes} min`;
   invariant(text.endsWith(' min'), 'minutes read "<n> min"');
-  return text;
-}
-
-/** The inline length of a span: "<1 min", "3 min" up to "59 min", then whole hours ("1 h"). */
-function shortMinutes(seconds: number): string {
-  invariant(Number.isFinite(seconds) && seconds >= 0, `a span of time is a non-negative number of seconds, got ${seconds}`);
-  const minutes = Math.floor(seconds / 60);
-  const text = minutes < 1 ? '<1 min' : minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h`;
-  invariant(/^(<1 min|\d+ (min|h))$/.test(text), `"${text}" is a short span`);
   return text;
 }
 

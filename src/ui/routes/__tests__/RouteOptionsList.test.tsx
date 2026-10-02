@@ -60,14 +60,15 @@ describe('the route options list (M10b.1)', () => {
 
 describe('the first leg and live times on a route option (M10b.1)', () => {
   it('route option shows the first leg hurry chip', async () => {
-    // 171 m from the Government Center Mover, which leaves at 2:06: a walk there takes 2 min 45 s, so
-    // there are 2 min 45 s to spare after the 30 s to board — m7c's CHILL, "Chill · 2 min" inline.
+    // The rider is at the plan's start, so the chip walks Transitous's routed 324 m to the Government Center
+    // Mover (mfix8; no detour factor): 240 s at 1.35 m/s, which leaves at 2:06 — 1 min 30 s to spare after the
+    // 30 s to board, m7c's CHILL, "Chill · 1 min spare" in the labelled short copy.
     const options = routeOptions(fixtureItineraries(), FIXTURE_NETWORK, AT_ASK);
     expect(options[0]?.verdict?.kind).toBe('CHILL');
-    expect(Math.round(options[0]?.verdict?.spareS ?? -1)).toBe(165);
+    expect(Math.round(options[0]?.verdict?.spareS ?? -1)).toBe(90);
     const tree = await renderList(options);
-    expect(textOf(tree, 'route-option-0-hurry-text')).toBe('Chill · 2 min');
-    expect(hostsByTestID(tree.root, 'route-option-0-hurry')[0]?.props.accessibilityLabel).toBe('Chill, a walk makes the 2:06 train with 2 minutes to spare, going by scheduled times.');
+    expect(textOf(tree, 'route-option-0-hurry-text')).toBe('Chill · 1 min spare');
+    expect(hostsByTestID(tree.root, 'route-option-0-hurry')[0]?.props.accessibilityLabel).toBe('Chill, a walk makes the 2:06 train with 1 minute to spare, going by scheduled times.');
     expect(hostsByTestID(tree.root, /^route-option-\d+-hurry$/)).toHaveLength(6);
   });
 

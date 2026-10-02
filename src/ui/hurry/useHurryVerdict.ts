@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import type { ScheduleRepo } from '@/data/schedule-repo';
 import { useScheduleDb } from '@/data/schedule-db-provider';
-import { nearestPlatform } from '@/domain/hurry/platform';
-import type { LatLon } from '@/lib/geo';
 import { invariant } from '@/lib/invariant';
 import { useLive } from '@/live/live-context';
 import type { LiveState } from '@/live/runtime';
@@ -11,27 +8,32 @@ import type { LiveState } from '@/live/runtime';
 import { useNowS, wallClockNowS } from '../clock';
 import { useUserPosition } from '../map/use-user-location';
 import { readWalkingPace } from '../settings/walking-pace';
+import type { HomeContext } from '../now/homeContext';
 import { watchStation } from '../stations/use-station-predictions';
-import { HURRY_RANGE_M, type HurryReading, hurryReading, stationTimetable } from './hurry-reading';
+import { type HurryReading, hurryReading, stationTimetable } from './hurry-reading';
+import { type TripVerdict, tripVerdict, type TripVerdictInput, type TripVerdictSource } from './trip-verdict';
 
 /**
  * Plan M7c.3: hurry-or-chill, live. Composes the real pieces —
  *   the schedule DB (its platforms and departures), the rider's position (useUserPosition, the app's ONE
  *   location watch, through expo-location), the station's live predictions (the live runtime, m4b),
  *   Jamie's walk and jog paces (m8b's readWalkingPace, Data & Settings) and the clock —
- * into a HurryReading (hurry-reading.ts), recomputed on every 15 s tick and every new fix or batch.
+ * into a verdict, recomputed on every tick and every new fix or batch. Two readers:
  *
- * Targets: `station` — the open station sheet's station; `nearest` — the Now strip's: the station of the
- * nearest platform. REALTIME COST RULE: the hook watches ONE station's predictions, and for `nearest`
- * only while that station is within HURRY_RANGE_M (a rider across town costs no calls). Watches are
- * counted per station (use-station-predictions.ts), so a sheet and the strip on the same station poll once.
+ *   useStationHurryVerdict  the station sheet: its station's HurryReading (hurry-reading.ts), one verdict per
+ *                           direction, recomputed every HURRY_TICK_MS
+ *   useNearTripVerdict      the Now bar (mfix8): the saved trip the rider is near (homeContext.ts 'nearTrip'),
+ *                           judged over that trip's own rides (trip-verdict.ts) at the home context's instant
+ *
+ * REALTIME COST RULE: each reader watches ONE station's predictions — the sheet its station, the bar its near
+ * trip's origin, and the bar nothing at all without a near trip. Watches are counted per station
+ * (use-station-predictions.ts), so a sheet and the bar on the same station poll once.
  *
  * mfix7 (Jamie's 07:10 recording: the Brickell City Centre sheet opened on "Missed · next 7:18 · not worth
- * it", Scheduled, and flipped ~1 s later to the live "Not worth it · next in 7 min"): the STATION SHEET reads
- * useStationHurryVerdict, which holds a verdict back as 'checking' while a live provider serves predictions
- * and the station's first batch has not arrived — for at most LIVE_CHECK_TIMEOUT_MS from when the sheet
- * started watching. The batch brings the live verdict; the timeout, no key or a failing provider the
- * timetable's. The Now strip ('nearest') is unchanged: it has no room for a note.
+ * it", Scheduled, and flipped ~1 s later to the live "Not worth it · next in 7 min"): the STATION SHEET holds a
+ * verdict back as 'checking' while a live provider serves predictions and the station's first batch has not
+ * arrived — for at most LIVE_CHECK_TIMEOUT_MS from when the sheet started watching. The batch brings the live
+ * verdict; the timeout, no key or a failing provider the timetable's.
  */
 
 export const HURRY_TICK_MS = 15_000;
@@ -39,52 +41,67 @@ export const HURRY_TICK_MS = 15_000;
 /** How long the station sheet waits for its station's first live predictions before it shows the timetable's verdict. */
 export const LIVE_CHECK_TIMEOUT_MS = 3_000;
 
-export type HurryTarget = { readonly kind: 'nearest' } | { readonly kind: 'station'; readonly stationKey: string };
-
 /** The station sheet's reading: a HurryReading, or 'checking' while its first live predictions are on their way. */
 export type SheetReading = HurryReading | { readonly kind: 'checking'; readonly stationKey: string };
 
-/** The station a reading is about, and the one whose live predictions are watched (null: none). */
-type Chosen = { readonly stationKey: string | null; readonly watch: string | null };
-const NONE: Chosen = Object.freeze({ stationKey: null, watch: null });
-
-export function useHurryVerdict(target: HurryTarget, clock: () => number = wallClockNowS): HurryReading {
+/** `stationKey`'s hurry or chill, live, watching that station's predictions (the station sheet's, before its live check). */
+function useHurryVerdict(stationKey: string, clock: () => number = wallClockNowS): HurryReading {
+  invariant(stationKey.includes(':'), `a station is keyed mode:name, got "${stationKey}"`);
   const db = useScheduleDb();
   const position = useUserPosition();
   const { state, runtime } = useLive();
   const nowS = useNowS(HURRY_TICK_MS, clock);
   const minuteS = nowS - (nowS % 60);
   const repo = db.kind === 'ready' ? db.repo : null;
-  const targetKey = target.kind === 'station' ? target.stationKey : null;
-  const chosen = useMemo(() => chooseStation(repo, position.coordinate, targetKey), [repo, position.coordinate, targetKey]);
-  useEffect(() => (runtime === null || chosen.watch === null ? undefined : watchStation(runtime, chosen.watch)), [runtime, chosen.watch]);
-  const timetable = useMemo(() => (repo === null || chosen.stationKey === null ? null : stationTimetable(repo, chosen.stationKey, minuteS)), [repo, chosen.stationKey, minuteS]);
-  const batch = chosen.stationKey === null ? null : (state?.predictions.get(chosen.stationKey) ?? null);
+  useEffect(() => (runtime === null ? undefined : watchStation(runtime, stationKey)), [runtime, stationKey]);
+  const timetable = useMemo(() => (repo === null ? null : stationTimetable(repo, stationKey, minuteS)), [repo, stationKey, minuteS]);
+  const batch = state?.predictions.get(stationKey) ?? null;
   const { walkMps, jogMps } = readWalkingPace();
   const reading = useMemo(() => hurryReading({ db, position, timetable, batch, nowS, pace: { walkMps, jogMps } }), [db, position, timetable, batch, nowS, walkMps, jogMps]);
-  invariant(target.kind === 'nearest' || chosen.stationKey === target.stationKey, 'a station sheet reads its own station');
-  invariant(reading.kind !== 'boards' || reading.stationKey === chosen.stationKey, 'the reading is about the chosen station');
+  invariant(reading.kind !== 'boards' || reading.stationKey === stationKey, 'the reading is about the station asked for');
   return reading;
 }
 
-/** The target's station: the one asked for, or the station of the nearest platform once there is a fix. */
-function chooseStation(repo: ScheduleRepo | null, coordinate: LatLon | null, targetKey: string | null): Chosen {
-  invariant(targetKey === null || targetKey.includes(':'), `a station is keyed mode:name, got "${targetKey}"`);
-  if (targetKey !== null) {
-    return { stationKey: targetKey, watch: targetKey };
-  }
-  const nearest = repo === null || coordinate === null ? null : nearestPlatform(coordinate, repo.platforms(), null);
-  if (nearest === null) {
-    return NONE;
-  }
-  const stationKey = nearest.platform.stationKey;
-  invariant(stationKey.includes(':'), 'the nearest platform belongs to a station');
-  return { stationKey, watch: nearest.walkMeters <= HURRY_RANGE_M ? stationKey : null };
+/**
+ * The Now bar's verdict (mfix8): hurry or chill for the near saved trip the home context chose, over that
+ * trip's own rides, walked from the rider — live, with its ORIGIN's predictions watched while it is the trip
+ * judged. Null whenever the context is not 'nearTrip'. It reads the same schedule, position and instant the
+ * context was worked out from, so a near trip the schedule can judge always comes with its verdict.
+ */
+export function useNearTripVerdict(context: HomeContext): TripVerdict | null {
+  const db = useScheduleDb();
+  const position = useUserPosition();
+  const { state, runtime } = useLive();
+  const near = context.kind === 'nearTrip' ? context : null;
+  const from = near === null ? null : near.card.trip.fromStationKey;
+  useEffect(() => (runtime === null || from === null ? undefined : watchStation(runtime, from)), [runtime, from]);
+  const batch = from === null ? null : (state?.predictions.get(from) ?? null);
+  const { walkMps, jogMps } = readWalkingPace();
+  const repo = db.kind === 'ready' ? db.repo : null;
+  const coordinate = position.coordinate;
+  const judged = useMemo(
+    () => (near === null || repo === null || coordinate === null ? null : judgeNearTrip(repo, near, { position: coordinate, pace: { walkMps, jogMps }, batch })),
+    [near, repo, coordinate, walkMps, jogMps, batch],
+  );
+  invariant(judged === null || near !== null, 'a verdict is about the near trip');
+  invariant(context.kind !== 'nearTrip' || repo === null || coordinate === null || judged !== null, 'a near trip the schedule can judge comes with its verdict');
+  return judged;
+}
+
+type NearTrip = Extract<HomeContext, { readonly kind: 'nearTrip' }>;
+
+/** The near trip's verdict from the rider at the context's instant (trip-verdict.ts). */
+function judgeNearTrip(source: TripVerdictSource, near: NearTrip, rider: Pick<TripVerdictInput, 'position' | 'pace' | 'batch'>): TripVerdict | null {
+  const { fromStationKey, toStationKey } = near.card.trip;
+  invariant(fromStationKey !== toStationKey, 'a saved trip joins two stations');
+  const judged = tripVerdict(source, { from: fromStationKey, to: toStationKey, nowS: near.nowS, ...rider });
+  invariant(judged === null || judged.ctx.now === near.nowS, 'the trip is judged at the context\'s instant');
+  return judged;
 }
 
 /** The station sheet's hurry or chill: its station's reading, held back as 'checking' while its first live batch is awaited. */
 export function useStationHurryVerdict(stationKey: string, clock: () => number = wallClockNowS): SheetReading {
-  const reading = useHurryVerdict({ kind: 'station', stationKey }, clock);
+  const reading = useHurryVerdict(stationKey, clock);
   const checking = useLiveCheck(stationKey);
   const sheet: SheetReading = checking && reading.kind === 'boards' ? { kind: 'checking', stationKey } : reading;
   invariant(sheet.kind !== 'checking' || reading.kind === 'boards', 'only a verdict is held back; every other reading shows as it is');
@@ -97,7 +114,7 @@ export function useStationHurryVerdict(stationKey: string, clock: () => number =
  * no batch for the station has arrived since the sheet started watching it, and LIVE_CHECK_TIMEOUT_MS has not
  * passed. The runtime keeps a station's batch only while it is watched, so the sheet's own watch keeps the
  * first batch for as long as the sheet is open, and a batch present at once came from a watch that is still
- * running (the Now strip's on the same station) and is used straight away.
+ * running (the Now bar's, on its near trip's origin) and is used straight away.
  */
 function useLiveCheck(stationKey: string): boolean {
   const { state } = useLive();

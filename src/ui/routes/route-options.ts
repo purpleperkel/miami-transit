@@ -4,7 +4,7 @@ import { type LineId, lineById } from '../../domain/lines/line-catalog';
 import type { LiveBatch, LiveNetwork, LivePrediction } from '../../domain/live/types';
 import { type FirstLegPace, firstLegVerdict, gtfsStopId, gtfsTripId } from '../../domain/routes/overlay';
 import { isWalkOnly, type Itinerary, type Leg, type LegPlace } from '../../domain/routes/transitous';
-import { isLatLon, type LatLon } from '../../lib/geo';
+import { haversineMeters, isLatLon, type LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
 import { copy } from '../copy';
 import { formatMinutes } from '../format';
@@ -14,13 +14,19 @@ import { clockFor } from '../hurry/hurry-reading';
  * Plan M10b.1, the route options sheet's pure half: Transitous's itineraries (m10a, already corrected by
  * the live overlay) as the rows a rider scans at a glance —
  *
- *   2:01 → 2:21     20 min · No transfers · 13 min walk     [Brickell] [Live]     Chill · 2 min
+ *   2:01 → 2:21     20 min · No transfers · 13 min walk     [Brickell] [Live]     Chill · 1 min spare
  *
  * sorted by ARRIVAL (the question is "when do I get there?"), each with its line badges, a Live badge when
  * any leg runs on a live prediction, and hurry or chill for the FIRST transit leg — m7c's engine through
  * m10a's firstLegVerdict, walking to the boarding stop at Jamie's paces from the plan's start — or, for
  * "Route from here", from the rider when located (mfix5; OptionContext.position). A late leg that may
  * cost a connection says so on its row: "Tight transfer · may miss 26".
+ *
+ * The chip's walk (mfix8, Jamie: "it seems to say chill when the walk is 11 min and train leaves in 2"):
+ * while the rider is still within CHIP_ROUTED_START_M of where the itinerary starts, the walk is the one
+ * Transitous ROUTED along the streets to the boarding stop (its walk legs' metres, no detour factor).
+ * Otherwise — the rider has moved on, so the routed legs no longer start where they are — or when no walk leg
+ * with a distance comes before the first ride, it is the straight line from the rider (× m7c's 1.3 detour).
  *
  * A leg's line comes from the bundled schedule: Transitous's trip id carries the county's GTFS trip_id,
  * and the schedule knows each trip's line by its stop pattern (m3a), so the Orange train and the Brickell
@@ -81,6 +87,12 @@ export type OptionFacts = {
 /** At most this many boarding stations are watched for live predictions while the sheet is open (REALTIME COST RULE). */
 export const MAX_WATCHED_STATIONS = 3;
 
+/**
+ * The hurry chip walks Transitous's routed legs only while the rider is within this many metres of where
+ * the itinerary starts (arbiter ruling, mfix8: a phone's fix jitters ~10-20 m when standing still).
+ */
+export const CHIP_ROUTED_START_M = 50;
+
 const MODE_WORDS: Readonly<Record<string, string>> = { BUS: 'Bus', TRAM: 'Tram', SUBWAY: 'Subway', RAIL: 'Rail', REGIONAL_RAIL: 'Rail', COACH: 'Coach', FERRY: 'Ferry' };
 
 /** The options for `itineraries`, earliest arrival first (a tie leaves later, then changes less). */
@@ -97,7 +109,8 @@ function optionOf(id: number, itinerary: Itinerary, network: RouteNetwork, conte
   invariant(Number.isSafeInteger(id) && id >= 0 && itinerary.legs.length > 0, 'an itinerary has a place in the answer, and legs');
   const walkS = itinerary.legs.filter((leg) => leg.mode === 'WALK').reduce((sum, leg) => sum + leg.durationS, 0);
   const badges = itinerary.legs.map((leg) => legBadge(leg, network)).filter((badge): badge is LegBadge => badge !== null);
-  const verdict = context.position === null ? null : firstLegVerdict(itinerary, context.position, context.nowS, context.pace);
+  const position = context.position;
+  const verdict = position === null ? null : firstLegVerdict(itinerary, position, context.nowS, context.pace, isAtStart(itinerary, position));
   const option: RouteOption = {
     id,
     itinerary,
@@ -113,6 +126,15 @@ function optionOf(id: number, itinerary: Itinerary, network: RouteNetwork, conte
   };
   invariant(option.walkS >= 0 && option.badges.length <= itinerary.legs.length, 'an option walks a non-negative time and badges at most every leg');
   return option;
+}
+
+/** The rider is still where the itinerary starts (within CHIP_ROUTED_START_M of its first leg's from-place). */
+function isAtStart(itinerary: Itinerary, position: LatLon): boolean {
+  const start = itinerary.legs[0];
+  invariant(start !== undefined && isLatLon(position), 'an itinerary starts somewhere, and the rider is somewhere');
+  const metres = haversineMeters(position, { latitude: start.from.latitude, longitude: start.from.longitude });
+  invariant(Number.isFinite(metres) && metres >= 0, 'a distance is a non-negative number of metres');
+  return metres <= CHIP_ROUTED_START_M;
 }
 
 /** The overlay's missed-connection flag in words, naming the ride as its badge does ("26", "Orange Line"); null when the transfers hold. */
@@ -220,6 +242,37 @@ function placeName(place: LegPlace, network: RouteNetwork, names: PlaceNames): s
   const name = (stationKey === null ? undefined : names.stations.get(stationKey)) ?? place.name;
   invariant(name.length > 0, 'a place is named');
   return name;
+}
+
+/**
+ * What saving an option as a trip would save (mfix8, Jamie: "I don't see how to save a route"). A saved trip is
+ * m7b's ONE Metrorail or Metromover ride between two stations, so an option with exactly one ride whose stops the
+ * schedule knows saves as that ride's boarding → alighting stations; any other option says why it cannot.
+ */
+export type TripToSave =
+  | { readonly kind: 'ride'; readonly from: string; readonly to: string }
+  /** Two or more rides: a saved trip is one. */
+  | { readonly kind: 'rides'; readonly rides: number }
+  /** One ride the schedule does not know both ends of (a bus), or one that gets off where it boarded. */
+  | { readonly kind: 'not-stations' }
+  /** No ride at all: a walk is not a trip. */
+  | { readonly kind: 'walk' };
+
+export function tripToSave(itinerary: Itinerary, network: RouteNetwork): TripToSave {
+  invariant(itinerary.legs.length > 0, 'an itinerary has legs');
+  const rides = itinerary.legs.filter((leg) => leg.tripId !== null);
+  const ride = rides[0];
+  if (ride === undefined) {
+    return { kind: 'walk' };
+  }
+  if (rides.length > 1) {
+    return { kind: 'rides', rides: rides.length };
+  }
+  const from = ride.from.stopId === null ? null : network.stationOfStop(gtfsStopId(ride.from.stopId));
+  const to = ride.to.stopId === null ? null : network.stationOfStop(gtfsStopId(ride.to.stopId));
+  const save: TripToSave = from === null || to === null || from === to ? { kind: 'not-stations' } : { kind: 'ride', from, to };
+  invariant(save.kind !== 'ride' || (save.from.includes(':') && save.to.includes(':')), 'a saved ride joins two stations keyed mode:name');
+  return save;
 }
 
 /** The stations whose live predictions can correct these itineraries: rail and Mover boarding stops, earliest-arriving first. */

@@ -6,30 +6,33 @@ import { PlatformColor, Pressable, StyleSheet, View } from 'react-native';
 import { invariant } from '@/lib/invariant';
 
 import { wallClockNowS } from '../clock';
-import { type HurryTarget, useHurryVerdict } from '../hurry/useHurryVerdict';
-import { openStationSheet } from '../sheets';
+import { useNearTripVerdict } from '../hurry/useHurryVerdict';
+import { openPlanSheet } from '../sheets';
 import { countdown } from '../trips/countdown';
 import { openTrip } from '../trips/trip-routes';
-import { nowStripText } from './now-strip';
+import { nowStripText, type StripTarget, stripTarget } from './now-strip';
 import type { AccessoryPlacement, NowText } from './now-text';
 import { NowStripContent, stripEmphasis } from './NowStripContent';
 import { useHomeContext } from './useHomeContext';
 
 /**
- * The Now strip (ruling R2, plan M7c.3): the tab bar's bottom accessory, under every tab, says hurry or
- * chill for the NEAREST station — "Jog · makes the 2:14 with 1 min spare · Brickell" above the tab bar,
- * "Jog · 1 min" beside the minimized one (the placement iOS gives it, read with
- * NativeTabs.BottomAccessory.usePlacement). Tapping it opens that station's sheet; with no verdict to give
- * it opens Data & Settings, which the regular strip also keeps one tap away (its gear) — the data version
- * and Diagnostics live there, never in the strip.
+ * The Now bar (ruling R2; plan M7c.3, M7.7; mfix8): the tab bar's bottom accessory, under every tab. SAVED TRIPS
+ * drive it (decision.miami_transit_bar_uses_saved_trips, Jamie 2026-10-02: "By biggest gripe is how it says 'not
+ * worth it next in 10 min fifth street' without me even entering where I wanna go"), in the home context's
+ * order (homeContext.ts):
  *
- * m7b (M7.7) extends it with the HOME CONTEXT (homeContext.ts): a saved trip leaving within the hour
- * takes the strip — "Leave in 6 min · Home → Work", "Leave in 6 min" inline — and a tap opens the trip;
- * when nothing runs (01:30) it says so and when service starts again; otherwise it is the nearest
- * station's hurry or chill as above. The context is published to the Now store, where the Map tab reads
- * whether to auto-present the station the rider is at (useAutoPresent.ts).
+ *   a trip counting down, not near   "Dadeland South" / "Leave in 6 min"                     tap: the trip
+ *   a saved trip the rider is near   "Bayfront Park" / "Chill · 4 min spare · ~5 min walk"   tap: the trip
+ *   nothing runs (01:30)             "No trains now" / "Metrorail opens 5:00 AM"             tap: Data & Settings
+ *   otherwise                        "Where to?" — no verdict at all                         tap: route options
  *
- *   NowAccessory (placement, the hurry hook, the home context) → NowAccessoryView (props only, rendered in tests)
+ * Above the tab bar ("regular") the first line names what is judged; beside the minimized tab bar ("inline",
+ * the placement iOS gives it, read with NativeTabs.BottomAccessory.usePlacement) it is one short line. The
+ * regular bar keeps Data & Settings one tap away (its gear) — the data version and Diagnostics live there,
+ * never in the bar. The home context is published to the Now store, where the Map tab reads whether to
+ * auto-present the station the rider is at (useAutoPresent.ts).
+ *
+ *   NowAccessory (placement, the home context, the near trip's verdict) → NowAccessoryView (props only, rendered in tests)
  */
 
 export type NowAccessoryProps = {
@@ -37,46 +40,35 @@ export type NowAccessoryProps = {
   readonly clock?: () => number;
 };
 
-const NEAREST: HurryTarget = Object.freeze({ kind: 'nearest' });
 const DATA_SETTINGS = '/data';
 const GEAR_PT = 17;
 
 export function NowAccessory({ clock = wallClockNowS }: NowAccessoryProps) {
   const placement: AccessoryPlacement = NativeTabs.BottomAccessory.usePlacement();
   invariant(placement === 'regular' || placement === 'inline', 'the accessory renders in a known placement');
-  const reading = useHurryVerdict(NEAREST, clock);
   const context = useHomeContext(clock);
-  const said = nowStripText(context, reading, placement);
-  invariant(said.text.length > 0, 'the accessory always says something');
-  const trip = context.kind === 'trip' ? context.trip : null;
+  const verdict = useNearTripVerdict(context);
+  const said = nowStripText(context, verdict, placement);
+  invariant(said.lines.length > 0, 'the accessory always says something');
   const state = context.kind === 'trip' ? countdown(context.trip.status.current.leaveByEpoch, context.nowS).state : null;
-  const stationKey = trip === null && context.kind !== 'noService' && reading.kind === 'boards' ? reading.stationKey : null;
-  return <NowAccessoryView placement={placement} said={said} stationKey={stationKey} tripId={trip?.card.trip.id ?? null} emphasis={stripEmphasis(context, state)} />;
+  return <NowAccessoryView placement={placement} said={said} target={stripTarget(context)} emphasis={stripEmphasis(context, state)} />;
 }
 
 export type NowAccessoryViewProps = {
   readonly placement: AccessoryPlacement;
   readonly said: NowText;
-  /** The station whose verdict is shown (a tap opens its sheet), or null with no verdict (a tap opens Data & Settings). */
-  readonly stationKey: string | null;
-  /** The saved trip whose countdown is shown (a tap opens the trip); absent or null otherwise (M7.7). */
-  readonly tripId?: string | null;
+  /** Where a tap goes: the trip shown, route options ("Where to?"), or Data & Settings (no service). */
+  readonly target: StripTarget;
   /** The countdown's colour for a trip in its last minutes. */
   readonly emphasis?: 'none' | 'soon' | 'now';
 };
 
-export function NowAccessoryView({ placement, said, stationKey, tripId = null, emphasis = 'none' }: NowAccessoryViewProps) {
-  invariant(said.text.length > 0 && said.label.length > 0, 'the accessory says something, to the eye and to VoiceOver');
-  invariant(stationKey === null || stationKey.includes(':'), `a station is keyed mode:name, got "${stationKey}"`);
-  invariant(tripId === null || stationKey === null, 'the strip is about a trip or a station, not both');
+export function NowAccessoryView({ placement, said, target, emphasis = 'none' }: NowAccessoryViewProps) {
+  invariant(said.lines.length > 0 && said.label.length > 0, 'the accessory says something, to the eye and to VoiceOver');
+  invariant(target.kind !== 'trip' || target.tripId.length > 0, 'a trip is opened by its id');
   return (
     <View style={styles.accessory}>
-      <Pressable
-        testID="now-accessory"
-        accessibilityRole="button"
-        accessibilityLabel={said.label}
-        onPress={() => (tripId !== null ? openTrip(tripId) : stationKey === null ? openDataSettings() : openStationSheet(stationKey))}
-        style={styles.main}>
+      <Pressable testID="now-accessory" accessibilityRole="button" accessibilityLabel={said.label} onPress={() => openTarget(target)} style={styles.main}>
         <NowStripContent placement={placement} said={said} emphasis={emphasis} />
       </Pressable>
       {placement === 'regular' ? (
@@ -86,6 +78,23 @@ export function NowAccessoryView({ placement, said, stationKey, tripId = null, e
       ) : null}
     </View>
   );
+}
+
+/** Opens what a tap on the bar is about. */
+function openTarget(target: StripTarget): void {
+  invariant(typeof target.kind === 'string', 'a tap has a target');
+  invariant(target.kind !== 'trip' || target.tripId.length > 0, 'a trip is opened by its id');
+  switch (target.kind) {
+    case 'trip':
+      openTrip(target.tripId);
+      break;
+    case 'plan':
+      openPlanSheet();
+      break;
+    case 'settings':
+      openDataSettings();
+      break;
+  }
 }
 
 /** Data & Settings (M8b.1): the provider, the paces, the schedule's version; Diagnostics one tap further. */

@@ -74,13 +74,25 @@ describe('walk legs: Apple Maps walking directions (M10b.2)', () => {
 describe('transit legs (M10b.2)', () => {
   it('transit leg shows its stations, line badge and Live or Scheduled', async () => {
     const live = overlayLive(fixtureItineraries(), [livePrediction(fixtureLeg('2600'), 120)]);
-    // The 2:24 option: walk, the Orange train (2 min late, live), walk, bus 26 (scheduled), walk.
+    // The 2:24 option: walk, the Orange train (2 min late, live: it arrives 2 min late too), walk, bus 26 (scheduled), walk.
     const tree = await renderDetail(1, async () => undefined, routeOptions(live, FIXTURE_NETWORK, AT_ASK));
     expect(hostsByTestID(tree.root, 'leg-1-badge')[0]?.props.accessibilityLabel).toBe('Orange Line');
-    expect([textOf(tree, 'leg-1-board'), textOf(tree, 'leg-1-alight'), textOf(tree, 'leg-1-source-word')]).toEqual(['2:14  Government Center', '2:14  Brickell', 'Live']);
+    expect([textOf(tree, 'leg-1-board'), textOf(tree, 'leg-1-alight'), textOf(tree, 'leg-1-source-word')]).toEqual(['2:14  Government Center', '2:16  Brickell', 'Live']);
     expect(textOf(tree, 'leg-1-headsign')).toBe('ORANGE LINE DADELAND SOUTH');
     expect(hostsByTestID(tree.root, 'leg-3-badge')[0]?.props.accessibilityLabel).toBe('Bus 26');
     expect([textOf(tree, 'leg-3-board'), textOf(tree, 'leg-3-alight'), textOf(tree, 'leg-3-source-word')]).toEqual(['2:17  BRICKELL STATION (EAST SIDE)', '2:19  BRICKELL AV & SE 15 RD', 'Scheduled']);
     expect(hostsByTestID(tree.root, /^leg-\d-directions$/).map((node) => node.props.testID)).toEqual(['leg-0-directions', 'leg-2-directions', 'leg-4-directions']);
+  });
+});
+
+describe('a missed connection in the detail (mfix5)', () => {
+  it('the detail of an option whose late train overruns its transfer names the line and keeps the bus time', async () => {
+    const live = overlayLive(fixtureItineraries(), [livePrediction(fixtureLeg('2600'), 120)]);
+    // The walk to bus 26 now ends at 2:18; the bus leaves at 2:17 regardless — it is shown on its schedule.
+    const tree = await renderDetail(1, async () => undefined, routeOptions(live, FIXTURE_NETWORK, AT_ASK));
+    expect(textOf(tree, 'itinerary-risk')).toBe('Tight transfer · may miss 26');
+    expect([textOf(tree, 'leg-2-times'), textOf(tree, 'leg-3-board'), textOf(tree, 'leg-3-source-word')]).toEqual(['2:16 – 2:18', '2:17  BRICKELL STATION (EAST SIDE)', 'Scheduled']);
+    const calm = await renderDetail(1, async () => undefined);
+    expect(hostsByTestID(calm.root, 'itinerary-risk')).toHaveLength(0);
   });
 });

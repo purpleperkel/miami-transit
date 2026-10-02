@@ -12,7 +12,7 @@ import { TText } from '../primitives/TText';
 import { RADIUS, SPACING } from '../tokens';
 import { legTarget, openDirections, walkDirectionsUrl } from './leg-actions';
 import { durationText, legBadge, legEnds, modeWord, optionFacts, type PlaceNames, type RouteClock, type RouteNetwork, type RouteOption } from './route-options';
-import { LegBadgeView } from './RouteOptionsList';
+import { ConnectionRisk, LegBadgeView } from './RouteOptionsList';
 import { linkingOpenURL, useOpenLink } from './use-open-link';
 
 /**
@@ -53,6 +53,7 @@ export function ItineraryDetail({ option, network, names, clock, openURL = linki
       <TText testID="itinerary-facts" variant="subhead" tone="secondary">
         {[facts.duration, facts.transfers, facts.walk].join(' · ')}
       </TText>
+      {option.connectionAtRisk === null ? null : <ConnectionRisk testID="itinerary-risk" text={option.connectionAtRisk} />}
       {legs.map((_, j) => (
         <LegView key={`leg-${j}`} option={option} index={j} network={network} names={names} clock={clock} openURL={openURL} />
       ))}

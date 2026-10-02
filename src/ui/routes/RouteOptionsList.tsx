@@ -61,7 +61,9 @@ type RowProps = { readonly option: RouteOption; readonly index: number; readonly
 function RouteOptionRow({ option, index, clock, ctx, onSelect }: RowProps) {
   const facts = optionFacts(option, clock);
   const id = `route-option-${index}`;
-  const label = [facts.times.replace('→', 'to'), facts.duration, facts.transfers, facts.walk, ...option.badges.map(badgeLabel), option.live ? 'Live' : null].filter((part) => part !== null).join(', ');
+  const label = [facts.times.replace('→', 'to'), facts.duration, facts.transfers, facts.walk, ...option.badges.map(badgeLabel), option.live ? 'Live' : null, option.connectionAtRisk]
+    .filter((part) => part !== null)
+    .join(', ');
   invariant(label.length > facts.times.length, 'VoiceOver hears every fact of the row');
   invariant(index >= 0, 'a row has a place in the list');
   return (
@@ -89,7 +91,19 @@ function RouteOptionRow({ option, index, clock, ctx, onSelect }: RowProps) {
         ))}
         {option.live ? <FreshnessIndicator testID={`${id}-live`} freshness={LIVE} /> : null}
       </View>
+      {option.connectionAtRisk === null ? null : <ConnectionRisk testID={`${id}-risk`} text={option.connectionAtRisk} />}
     </Pressable>
+  );
+}
+
+/** A transfer a late leg may break: "Tight transfer · may miss 26" (mfix5), on the row and in its detail. */
+export function ConnectionRisk({ text, testID }: { readonly text: string; readonly testID: string }) {
+  invariant(text.length > 0, 'a missed-connection warning names the line');
+  invariant(testID.endsWith('-risk'), 'the warning is the option\'s risk line');
+  return (
+    <TText testID={testID} variant="subhead" style={styles.risk}>
+      {text}
+    </TText>
   );
 }
 
@@ -160,6 +174,7 @@ const styles = StyleSheet.create({
   routeText: { fontWeight: '600' },
   chip: { borderRadius: RADIUS.xl, paddingHorizontal: SPACING.xs, paddingVertical: 2, backgroundColor: PlatformColor('tertiarySystemFill') },
   chipText: { fontWeight: '600' },
+  risk: { color: PlatformColor('systemOrange'), fontWeight: '600' },
   attribution: { alignItems: 'center', gap: SPACING.xxs, paddingVertical: SPACING.md },
   link: { color: PlatformColor('link') },
   failure: { color: PlatformColor('systemRed') },

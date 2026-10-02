@@ -67,12 +67,20 @@ export type Leg = {
   readonly durationS: number;
 };
 
+/**
+ * A connection a late leg may break (overlay.ts): the rider reaches leg `legIndex`'s boarding stop after it
+ * leaves, so they may miss `line` (its route's short name, else its mode) — a bus does not wait for a late train.
+ */
+export type ConnectionRisk = { readonly legIndex: number; readonly line: string };
+
 export type Itinerary = {
   readonly startEpoch: number;
   readonly endEpoch: number;
   readonly durationS: number;
   readonly transfers: number;
   readonly legs: readonly Leg[];
+  /** Set by the live overlay when a delay overruns a transfer's slack; absent as parsed (and when the transfers hold). */
+  readonly connectionAtRisk?: ConnectionRisk;
 };
 
 export type PlanParseError = { readonly kind: 'malformed'; readonly message: string };

@@ -171,6 +171,8 @@ export const copy = Object.freeze({
   noPlaceFound: (words: string) => `No place found for “${words}”`,
   searchFailed: 'The search did not work',
   recentNotSaved: 'Not saved to recent places',
+  /** mfix5 (arbiter ruling 2026-10-02): a late leg's delay overruns a transfer's slack; the next ride does not wait. */
+  tightTransfer: (line: string) => `Tight transfer · may miss ${line}`,
   /** A web page (an attribution's source) would not open. */
   pageFailed: 'The page did not open',
 });

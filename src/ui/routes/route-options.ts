@@ -18,7 +18,9 @@ import { clockFor } from '../hurry/hurry-reading';
  *
  * sorted by ARRIVAL (the question is "when do I get there?"), each with its line badges, a Live badge when
  * any leg runs on a live prediction, and hurry or chill for the FIRST transit leg — m7c's engine through
- * m10a's firstLegVerdict, walking from the plan's start to the boarding stop at Jamie's paces.
+ * m10a's firstLegVerdict, walking to the boarding stop at Jamie's paces from the plan's start — or, for
+ * "Route from here", from the rider when located (mfix5; OptionContext.position). A late leg that may
+ * cost a connection says so on its row: "Tight transfer · may miss 26".
  *
  * A leg's line comes from the bundled schedule: Transitous's trip id carries the county's GTFS trip_id,
  * and the schedule knows each trip's line by its stop pattern (m3a), so the Orange train and the Brickell
@@ -57,6 +59,8 @@ export type RouteOption = {
   readonly live: boolean;
   /** Hurry or chill for the first transit leg; null for a walk-only option or without a start position. */
   readonly verdict: HurryVerdict | null;
+  /** "Tight transfer · may miss 26" when a late leg may cost the connection (m10a's overlay flag), else null. */
+  readonly connectionAtRisk: string | null;
 };
 
 /** What the hurry chip is computed from: the plan's start, now, and Jamie's paces (m8b). */
@@ -98,9 +102,25 @@ function optionOf(id: number, itinerary: Itinerary, network: RouteNetwork, conte
     badges,
     live: itinerary.legs.some((leg) => leg.live),
     verdict,
+    connectionAtRisk: connectionRiskText(itinerary, network),
   };
   invariant(option.walkS >= 0 && option.badges.length <= itinerary.legs.length, 'an option walks a non-negative time and badges at most every leg');
   return option;
+}
+
+/** The overlay's missed-connection flag in words, naming the ride as its badge does ("26", "Orange Line"); null when the transfers hold. */
+export function connectionRiskText(itinerary: Itinerary, network: RouteNetwork): string | null {
+  const risk = itinerary.connectionAtRisk;
+  if (risk === undefined) {
+    return null;
+  }
+  const leg = itinerary.legs[risk.legIndex];
+  invariant(leg !== undefined && leg.tripId !== null, `the connection at risk is a ride of the itinerary, leg ${risk.legIndex}`);
+  const badge = legBadge(leg, network);
+  const line = badge === null ? risk.line : badge.kind === 'line' ? lineById(badge.lineId).name : badge.text;
+  const text = copy.tightTransfer(line);
+  invariant(line.length > 0 && text.endsWith(line), 'the warning names the line that may be missed');
+  return text;
 }
 
 /** A leg's badge: its catalog line when the schedule knows its trip, its route name otherwise; null for a walk. */
@@ -131,6 +151,15 @@ export function modeWord(mode: string): string {
   const word = MODE_WORDS[mode] ?? `${mode.charAt(0)}${mode.slice(1).toLowerCase().replace(/_/g, ' ')}`;
   invariant(word.length > 0, 'a mode reads as a word');
   return word;
+}
+
+/** When an option leaves without the rider: its first ride's (live or scheduled) departure; a walk-only option's start. */
+export function optionLeavesS(option: RouteOption): number {
+  const ride = option.itinerary.legs.find((leg) => leg.tripId !== null);
+  const leavesS = ride === undefined ? option.departEpoch : ride.from.epoch;
+  invariant(Number.isFinite(leavesS), 'an option leaves at an instant');
+  invariant(leavesS <= option.arriveEpoch, 'an option leaves before it arrives');
+  return leavesS;
 }
 
 /** The row's words: "2:01 → 2:21", "20 min", "No transfers", "13 min walk". */

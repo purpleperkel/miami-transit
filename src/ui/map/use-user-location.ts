@@ -21,7 +21,9 @@ import { copy } from '../copy';
  * The Stations list (m6b R7: nearest first, with walking distances) follows the position through the
  * same ask: useUserPosition watches it at Balanced accuracy once granted, a new fix every
  * WATCH_DISTANCE_M — enough to keep "350 m" honest without running GPS hard — and otherwise says why
- * there is none. ONE location module for the app: the map's blue dot and the list's distances agree.
+ * there is none. The route options sheet follows it the same way for "Route from here" (mfix5), so the
+ * hurry chips walk from the rider, not the station. ONE location module for the app: the map's blue dot,
+ * the list's distances and the chips agree.
  */
 
 export type UserLocation =
@@ -150,13 +152,17 @@ type Unwatch = { remove(): void };
 /** One screen's watch: whether the screen has gone, and the expo-location subscription once it starts. */
 type Watch = { stopped: boolean; subscription: Unwatch | null };
 
-/** The rider's position, watched while the calling screen is mounted (the Stations list). */
-export function useUserPosition(): UserPosition {
+/**
+ * The rider's position, watched while the calling screen is mounted and `enabled` (the Stations list; the
+ * route options sheet's hurry chips for "Route from here"). Not enabled: no ask, no watch, no position.
+ */
+export function useUserPosition(enabled: boolean = true): UserPosition {
   const [position, setPosition] = useState<UserPosition>(WAITING);
-  useEffect(() => startWatch(setPosition), []);
-  invariant(position.coordinate === null || isLatLon(position.coordinate), 'a fix is a real coordinate');
-  invariant(position.coordinate === null || position.note === null, 'a fix carries no excuse');
-  return position;
+  useEffect(() => (enabled ? startWatch(setPosition) : undefined), [enabled]);
+  const current = enabled ? position : WAITING;
+  invariant(current.coordinate === null || isLatLon(current.coordinate), 'a fix is a real coordinate');
+  invariant(current.coordinate === null || current.note === null, 'a fix carries no excuse');
+  return current;
 }
 
 /** Starts the permission ask and the watch; returns the teardown, which also stops a watch that starts late. */

@@ -2,7 +2,7 @@ import { haversineMeters, isLatLon, type LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
 import { type HurryDeparture, type HurryInput, type HurryVerdict, hurryVerdict } from '../hurry/verdict';
 import type { LivePrediction } from '../live/types';
-import type { Itinerary, Leg } from './transitous';
+import type { ConnectionRisk, Itinerary, Leg } from './transitous';
 
 /**
  * Plan M10a.2 — the live overlay and the first-leg verdict, pure.
@@ -16,9 +16,18 @@ import type { Itinerary, Leg } from './transitous';
  * an epoch. The same trip predicted at another stop — the alighting station, say — never moves a boarding
  * departure. m4a predicts the rail and Mover routes only, so in effect only those legs ever go live.
  *
- * A matched leg takes the predicted departure as from.epoch and is marked live; every other leg (and
- * every itinerary without a match) is returned as the very same object, and the input is never mutated.
- * A trip shared by two itineraries is updated in both.
+ * A matched leg takes the predicted departure as from.epoch, its arrival moves by the same delay (a
+ * prediction carries no arrival time) and it is marked live. The delay then follows the rider (mfix5):
+ *   - a walk after a late leg starts when the rider gets there — both ends shifted, its duration kept;
+ *   - a transit leg nobody predicts keeps its schedule, so its departure ABSORBS the delay when the rider
+ *     still gets there at or before it, and every leg after it is unchanged;
+ *   - when the delay overruns a transfer's slack, that next leg STILL keeps its time (a bus does not wait
+ *     for a late train; no shifted time is invented for it), the legs after it follow that leg's own
+ *     time, and the itinerary is flagged connectionAtRisk with the line that may be missed
+ *     (ARBITER RULING 2026-10-02). Only the first such transfer is named: after it, the trip is moot.
+ * A moved itinerary's endEpoch is its last leg's arrival and its durationS endEpoch - startEpoch. An
+ * itinerary no prediction touches is returned as the very same object, an unpredicted leg is never marked
+ * live, and the input is never mutated. A trip shared by two itineraries is updated in both.
  *
  * firstLegVerdict asks m7c's engine (hurryVerdict) whether to hurry for the first transit leg: the walk is
  * the straight line from the rider to that leg's boarding stop, the departure is the leg's (live or
@@ -52,17 +61,83 @@ export function gtfsStopId(transitousStopId: string): string {
   return stopId;
 }
 
-/** The itineraries with every boarding departure a live prediction covers moved to it and marked live. */
+/** The itineraries with every boarding departure a live prediction covers moved to it, and its delay carried on. */
 export function overlayLive(itineraries: readonly Itinerary[], predictions: readonly LivePrediction[]): Itinerary[] {
   invariant(itineraries.every((it) => it.legs.length > 0), 'every itinerary has legs (as parsed)');
+  invariant(itineraries.every((it) => it.connectionAtRisk === undefined), 'the overlay reads itineraries as Transitous planned them');
   const live = liveIndex(predictions);
-  const overlaid = itineraries.map((itinerary) => {
-    const legs = itinerary.legs.map((leg) => overlayLeg(leg, live));
-    return legs.every((leg, j) => leg === itinerary.legs[j]) ? itinerary : { ...itinerary, legs };
-  });
+  const overlaid = itineraries.map((itinerary) => overlayItinerary(itinerary, live));
   invariant(overlaid.length === itineraries.length, 'every itinerary is kept, in order');
   invariant(overlaid.every((it, i) => it.legs.length === (itineraries[i] as Itinerary).legs.length), 'every leg is kept, in order');
   return overlaid;
+}
+
+/** Where the rider stands after a leg: how far behind schedule (s), when they got there, and the transfer at risk. */
+type Progress = {
+  /** Seconds behind (or, for an early train, ahead of) the schedule that later walks inherit. */
+  readonly carriedS: number;
+  /** When the rider reaches the end of the previous leg, epoch s; null before the first leg. */
+  readonly arrivedEpoch: number | null;
+  /** A transit leg came before, so the next one is boarded at a transfer. */
+  readonly rode: boolean;
+  readonly risk: ConnectionRisk | null;
+};
+
+const SETTING_OFF: Progress = Object.freeze({ carriedS: 0, arrivedEpoch: null, rode: false, risk: null });
+
+/** One itinerary, live: its legs walked in order with the delay they carry; the itinerary itself when nothing moved. */
+function overlayItinerary(itinerary: Itinerary, live: LiveIndex): Itinerary {
+  invariant(itinerary.endEpoch >= itinerary.startEpoch, 'an itinerary ends after it starts');
+  const legs: Leg[] = [];
+  let progress = SETTING_OFF;
+  for (const [index, leg] of itinerary.legs.entries()) {
+    const step = leg.tripId === null ? walkOn(leg, progress) : rideOn(leg, index, progress, live);
+    legs.push(step.leg);
+    progress = step.progress;
+  }
+  if (progress.risk === null && legs.every((leg, j) => leg === itinerary.legs[j])) {
+    return itinerary;
+  }
+  const first = legs[0] as Leg;
+  const startEpoch = first === itinerary.legs[0] ? itinerary.startEpoch : first.from.epoch;
+  const endEpoch = (legs[legs.length - 1] as Leg).to.epoch;
+  const moved: Itinerary = { ...itinerary, startEpoch, endEpoch, durationS: endEpoch - startEpoch, legs, ...(progress.risk === null ? {} : { connectionAtRisk: progress.risk }) };
+  invariant(moved.legs.length === itinerary.legs.length, 'every leg is kept, in order');
+  invariant(moved.durationS === moved.endEpoch - moved.startEpoch, 'the duration is the moved trip\'s own');
+  return moved;
+}
+
+type Step = { readonly leg: Leg; readonly progress: Progress };
+
+/** A walk starts when the rider gets there: both ends shifted by the delay carried so far. */
+function walkOn(leg: Leg, progress: Progress): Step {
+  invariant(leg.tripId === null && !leg.live, 'a walk rides no trip and is never live');
+  const walked = progress.carriedS === 0 ? leg : shifted(leg, progress.carriedS);
+  invariant(walked.durationS === leg.durationS, 'a shifted walk takes as long');
+  return { leg: walked, progress: { ...progress, arrivedEpoch: walked.to.epoch } };
+}
+
+/**
+ * A ride: its live departure (and an arrival moved by the same delay) when a prediction covers it, its
+ * schedule otherwise. Boarded at a transfer the rider reaches after it leaves, it is the connection at risk.
+ */
+function rideOn(leg: Leg, index: number, progress: Progress, live: LiveIndex): Step {
+  invariant(leg.tripId !== null, 'a ride rides a trip');
+  const ridden = overlayLeg(leg, live);
+  const touched = ridden !== leg || progress.carriedS !== 0;
+  const missed = progress.rode && touched && progress.arrivedEpoch !== null && progress.arrivedEpoch > ridden.from.epoch;
+  const risk = progress.risk ?? (missed ? { legIndex: index, line: leg.routeShortName ?? leg.mode } : null);
+  const next: Progress = { carriedS: ridden.to.epoch - leg.to.epoch, arrivedEpoch: ridden.to.epoch, rode: true, risk };
+  invariant(ridden === leg || ridden.live, 'only a predicted ride moves, and it is live');
+  return { leg: ridden, progress: next };
+}
+
+/** A leg moved `byS` seconds, both ends (its duration unchanged). */
+function shifted(leg: Leg, byS: number): Leg {
+  invariant(Number.isFinite(byS) && byS !== 0, 'a shift moves the leg');
+  const moved: Leg = { ...leg, from: { ...leg.from, epoch: leg.from.epoch + byS }, to: { ...leg.to, epoch: leg.to.epoch + byS } };
+  invariant(moved.to.epoch - moved.from.epoch === leg.to.epoch - leg.from.epoch, 'a shifted leg takes as long');
+  return moved;
 }
 
 /** m7c's hurry-or-chill verdict for an itinerary's first transit leg, or null for a walk-only itinerary. */
@@ -98,7 +173,10 @@ function liveIndex(predictions: readonly LivePrediction[]): LiveIndex {
   return index;
 }
 
-/** The leg with its boarding departure live, when a usable prediction covers it; else the leg itself. */
+/**
+ * The leg live, when a usable prediction covers its boarding: the predicted departure, the arrival moved by
+ * the same delay (m4a predicts no arrival), its duration kept; else the leg itself.
+ */
 function overlayLeg(leg: Leg, live: LiveIndex): Leg {
   invariant(Number.isFinite(leg.from.epoch), 'a leg departs at an instant');
   if (leg.tripId === null || leg.from.stopId === null) {
@@ -108,7 +186,8 @@ function overlayLeg(leg: Leg, live: LiveIndex): Leg {
   if (epoch === undefined) {
     return leg;
   }
-  const overlaid: Leg = { ...leg, from: { ...leg.from, epoch }, live: true };
-  invariant(overlaid.to === leg.to && overlaid.tripId === leg.tripId, 'only the boarding departure and the live flag change');
+  const delayS = epoch - leg.from.epoch;
+  const overlaid: Leg = { ...leg, from: { ...leg.from, epoch }, to: { ...leg.to, epoch: leg.to.epoch + delayS }, live: true };
+  invariant(overlaid.tripId === leg.tripId && overlaid.durationS === overlaid.to.epoch - overlaid.from.epoch, 'the ride moves whole: same trip, same duration');
   return overlaid;
 }

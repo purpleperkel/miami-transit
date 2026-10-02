@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, PlatformColor, ScrollView, StyleSheet, View } from 'react-native';
 
 import type { StationListing } from '@/data/schedule-queries';
@@ -18,7 +18,7 @@ import { appPlanClient } from './plan-client';
 import { readRecentPlaces, type RecentPlace, recordRecentPlace } from './recent-places';
 import { NO_ROUTE_NETWORK, type OptionContext, type PlaceNames, routeClock, type RouteNetwork, type RouteOption } from './route-options';
 import { RouteOptionsList, RoutesAttribution } from './RouteOptionsList';
-import { type OriginState, type PlanState, useLiveOptions, usePlanOrigin, usePlanRequest, useServiceBases } from './use-route-plan';
+import { type OriginState, type PlanState, useChipPosition, useLiveOptions, usePlanOrigin, usePlanRequest, useReplanOnceLeft, useServiceBases } from './use-route-plan';
 
 /**
  * Plan M10b.1–M10b.2: the route options sheet (src/app/plan.tsx, titled "Route options"). From the
@@ -26,6 +26,9 @@ import { type OriginState, type PlanState, useLiveOptions, usePlanOrigin, usePla
  * station: Transitous's options, corrected by live predictions, earliest arrival first, each with its
  * hurry chip; a tapped option opens its legs here in the sheet, with walking directions one tap away.
  * When Transitous cannot answer, Apple Maps can ("Open in Apple Maps"). The credits sit at the bottom.
+ * mfix5: once the first option has left, the open sheet asks again — once per answer, and not while an
+ * option's legs are open (the rider may be on that train) — and for "Route from here" the hurry chips
+ * walk from the rider when the location module has a fix, since the plan itself starts at the station.
  *
  *   PlanScreen (schedule DB, location, Transitous, live runtime, clock) → PlanBody (props only)
  */
@@ -51,11 +54,16 @@ export function PlanScreen({ fromStation }: PlanScreenProps) {
   const [destination, setDestination] = useState<RecentPlace | null>(null);
   const [recents, setRecents] = useState<readonly RecentPlace[]>(() => readRecentPlaces());
   const [notice, setNotice] = useState<string | null>(null);
-  const plan = usePlanRequest(appPlanClient(), from, destination, wallClockMs);
+  const [round, setRound] = useState(0);
+  const [reading, setReading] = useState(false);
+  const replan = useCallback(() => setRound((previous) => previous + 1), []);
+  const plan = usePlanRequest(appPlanClient(), from, destination, wallClockMs, round);
   const nowS = useNowS(PLAN_TICK_MS);
   const { walkMps, jogMps } = readWalkingPace();
-  const context = useMemo<OptionContext>(() => ({ position: from, nowS, pace: { walkMps, jogMps } }), [from, nowS, walkMps, jogMps]);
+  const chipFrom = useChipPosition(fromStation, from);
+  const context = useMemo<OptionContext>(() => ({ position: chipFrom, nowS, pace: { walkMps, jogMps } }), [chipFrom, nowS, walkMps, jogMps]);
   const options = useLiveOptions(plan.kind === 'ok' ? plan.itineraries : NO_ITINERARIES, network, context);
+  useReplanOnceLeft(plan, options, nowS, reading ? null : replan);
   const bases = useServiceBases(repo, nowS);
   const choose = useCallback((place: RecentPlace) => choosePlace(place, setDestination, setRecents, setNotice), []);
   const clear = useCallback(() => setDestination(null), []);
@@ -78,7 +86,7 @@ export function PlanScreen({ fromStation }: PlanScreenProps) {
           {notice}
         </TText>
       )}
-      <PlanBody origin={origin} destination={destination} plan={plan} options={options} network={network} names={names} clock={routeClock(bases, nowS)} nowS={nowS} />
+      <PlanBody origin={origin} destination={destination} plan={plan} options={options} network={network} names={names} clock={routeClock(bases, nowS)} nowS={nowS} onDetail={setReading} />
       <RoutesAttribution />
     </ScrollView>
   );
@@ -137,16 +145,20 @@ type PlanBodyProps = {
   readonly names: PlaceNames;
   readonly clock: (epoch: number) => string;
   readonly nowS: number;
+  /** Told whether one option's legs are open (the sheet holds its re-plan while the rider reads them). */
+  readonly onDetail?: (open: boolean) => void;
 };
 
 /** The option whose legs are open: by its id within the one answer it belongs to (a new answer closes it). */
 type Selection = { readonly itineraries: readonly Itinerary[]; readonly id: number };
 
 /** Under the fields: nothing yet, a wait, the options (or one option's legs), or Apple Maps instead. */
-export function PlanBody({ origin, destination, plan, options, network, names, clock, nowS }: PlanBodyProps) {
+export function PlanBody({ origin, destination, plan, options, network, names, clock, nowS, onDetail }: PlanBodyProps) {
   const [selected, setSelected] = useState<Selection | null>(null);
   const answer = plan.kind === 'ok' ? plan.itineraries : null;
   const open = selected !== null && selected.itineraries === answer ? options.find((option) => option.id === selected.id) : undefined;
+  const reading = open !== undefined;
+  useEffect(() => onDetail?.(reading), [onDetail, reading]);
   invariant(destination !== null || plan.kind === 'idle', 'options are for a destination');
   invariant(Number.isFinite(nowS), 'the body is drawn at an instant');
   if (destination === null) {

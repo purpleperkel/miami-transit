@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { StationListing } from '@/data/schedule-queries';
 import type { ScheduleRepo } from '@/data/schedule-repo';
@@ -12,20 +12,23 @@ import { err, type Result } from '@/lib/result';
 import { useLive } from '@/live/live-context';
 import type { LiveRuntime } from '@/live/runtime';
 
+import { wallClockNowS } from '../clock';
 import { copy } from '../copy';
-import { askForLocation, currentPosition } from '../map/use-user-location';
+import { askForLocation, currentPosition, useUserPosition } from '../map/use-user-location';
 import { watchStation } from '../stations/use-station-predictions';
 import type { RecentPlace } from './recent-places';
-import { boardingStations, type OptionContext, predictionsAt, type RouteNetwork, type RouteOption, routeOptions } from './route-options';
+import { boardingStations, type OptionContext, optionLeavesS, predictionsAt, type RouteNetwork, type RouteOption, routeOptions } from './route-options';
 
 /**
- * Plan M10b.1, the route options sheet's live half — three hooks the sheet (PlanScreen) composes:
+ * Plan M10b.1 (and mfix5), the route options sheet's live half — the hooks the sheet (PlanScreen) composes:
  *
  *   usePlanOrigin    where the plan starts: the rider's location (ONE fix when the sheet opens, through the
  *                    app's location module — a moving start would re-plan, and Transitous asked for few
  *                    requests), or the station whose sheet said "Route from here"
  *   usePlanRequest   Transitous's itineraries for (start, destination) through the app's polite client;
  *                    'superseded' (a newer call replaced this one) is ignored, never shown as an error
+ *   useReplanOnceLeft  asks again ONCE per answer, once its first option has left (mfix5)
+ *   useChipPosition  where the hurry chips walk from: for "Route from here", the rider when located (mfix5)
  *   useLiveOptions   the itineraries corrected by m4b's live predictions (m10a's overlay) for their
  *                    boarding stations — watched only while the sheet is open, at most MAX_WATCHED_STATIONS
  *                    (REALTIME COST RULE) — as rows sorted by arrival, each with its hurry chip
@@ -83,11 +86,16 @@ function locateOnce(report: (state: OriginState) => void): () => void {
 /** The tagged answer: which (start, destination) it answers, so a new destination never shows the last one's options. */
 type Answer = { readonly key: string; readonly state: PlanState };
 
-/** Transitous's itineraries from `from` to `to`, asked once per (start, destination) through `client`. */
-export function usePlanRequest(client: PolitePlanClient, from: LatLon | null, to: RecentPlace | null, clockMs: () => number): PlanState {
+/**
+ * Transitous's itineraries from `from` to `to`, asked through `client` once per (start, destination) — and
+ * again each time `round` moves (a re-plan: leaving now, a new minute, so a new cache key). The answer on
+ * screen stays until the new one replaces it.
+ */
+export function usePlanRequest(client: PolitePlanClient, from: LatLon | null, to: RecentPlace | null, clockMs: () => number, round: number = 0): PlanState {
   const [answer, setAnswer] = useState<Answer | null>(null);
   const key = from === null || to === null ? null : tripKey(from, { latitude: to.lat, longitude: to.lon });
-  useEffect(() => (from === null || to === null ? undefined : requestPlan(client, planQuery(from, to, clockMs), setAnswer)), [client, from, to, clockMs]);
+  invariant(Number.isSafeInteger(round) && round >= 0, `a re-plan round is a count, got ${round}`);
+  useEffect(() => (from === null || to === null ? undefined : requestPlan(client, planQuery(from, to, clockMs), setAnswer)), [client, from, to, clockMs, round]);
   const state = key === null ? IDLE : answer !== null && answer.key === key ? answer.state : LOADING;
   invariant(key !== null || state.kind === 'idle', 'without a start and a destination there is nothing to plan');
   invariant(state.kind !== 'ok' || answer?.key === key, 'options shown answer the trip asked');
@@ -130,6 +138,53 @@ function stateOf(outcome: Exclude<PlanOutcome, { readonly kind: 'superseded' }>)
   const state: PlanState = outcome.kind === 'ok' ? { kind: 'ok', itineraries: outcome.itineraries } : { kind: 'unavailable', reason: outcome.reason };
   invariant(state.kind === outcome.kind, 'the state is the answer');
   return state;
+}
+
+/** The answer the re-plan watches: which one, when it reached the sheet (epoch s), and whether it has asked again. */
+type Watched = { readonly itineraries: readonly Itinerary[]; readonly arrivedS: number; readonly asked: boolean };
+
+/**
+ * mfix5: asks again (`replan`) ONCE per answer, once its first option has left — so the rows and hurry
+ * chips never sit on a train that is gone. An answer whose first option had already left when it arrived
+ * never asks (the re-plan's own answer, say, when nothing leaves later): no storm. `replan` null holds
+ * the ask (an itinerary's legs are open); it fires when the list is back, if the option has left by then.
+ */
+export function useReplanOnceLeft(plan: PlanState, options: readonly RouteOption[], nowS: number, replan: (() => void) | null): void {
+  const itineraries = plan.kind === 'ok' ? plan.itineraries : null;
+  const first = options[0];
+  const leavesS = first === undefined ? null : optionLeavesS(first);
+  const watched = useRef<Watched | null>(null);
+  invariant(Number.isFinite(nowS), 'the re-plan is judged at an instant');
+  invariant(itineraries !== null || options.length === 0, 'options come from an answer');
+  useEffect(() => replanIfLeft(watched, itineraries, leavesS, nowS, replan), [itineraries, leavesS, nowS, replan]);
+}
+
+/** One look at the answer on screen: notes when it arrived, and re-plans the first time its first option has left. */
+function replanIfLeft(watched: { current: Watched | null }, itineraries: readonly Itinerary[] | null, leavesS: number | null, nowS: number, replan: (() => void) | null): void {
+  invariant(Number.isFinite(nowS), 'the answer is looked at at an instant');
+  invariant(leavesS === null || itineraries !== null, 'an option that leaves belongs to an answer');
+  if (itineraries === null || leavesS === null) {
+    return;
+  }
+  const seen = watched.current !== null && watched.current.itineraries === itineraries ? watched.current : { itineraries, arrivedS: wallClockNowS(), asked: false };
+  const due = !seen.asked && replan !== null && leavesS > seen.arrivedS && nowS > leavesS;
+  watched.current = due ? { ...seen, asked: true } : seen;
+  if (due) {
+    replan();
+  }
+}
+
+/**
+ * Where the hurry chips measure the walk from: for "Route from here" (the plan starts at the station),
+ * the rider — followed by the app's ONE location module while the sheet is open — once located; the
+ * plan's start otherwise (and always for a plan from the rider's own location, which IS that start).
+ */
+export function useChipPosition(fromStation: string | null, start: LatLon | null): LatLon | null {
+  const rider = useUserPosition(fromStation !== null);
+  const position = fromStation !== null && rider.coordinate !== null ? rider.coordinate : start;
+  invariant(fromStation !== null || rider.coordinate === null, 'the rider is only followed for a plan from a station');
+  invariant(position === null || isLatLon(position), 'the chip walks from a real coordinate');
+  return position;
 }
 
 /** The rows: `itineraries` with their boarding departures corrected by live predictions, sorted by arrival. */

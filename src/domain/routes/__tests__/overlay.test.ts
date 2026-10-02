@@ -49,16 +49,18 @@ describe('live overlay, matched legs (M10a.2)', () => {
     const moverLive = mover.leg.from.epoch + 90;
     const out = overlayLive(its, [prediction(rail.leg, rail.leg.from.stopId ?? '', railLive), prediction(mover.leg, mover.leg.from.stopId ?? '', moverLive)]);
     expect(JSON.stringify(its)).toBe(before);
-    // The rail trip is shared by several itineraries: it goes live in every one of them.
+    // The rail trip is shared by several itineraries: it goes live in every one of them. A prediction
+    // carries no arrival, so the ride arrives as late as it leaves (mfix5).
     expect(rail.riders.length).toBeGreaterThanOrEqual(2);
     for (const i of rail.riders) {
       const leg = out[i]?.legs.find((l) => l.tripId === rail.leg.tripId);
-      expect(leg).toEqual({ ...rail.leg, from: { ...rail.leg.from, epoch: railLive }, live: true });
+      expect(leg).toEqual({ ...rail.leg, from: { ...rail.leg.from, epoch: railLive }, to: { ...rail.leg.to, epoch: rail.leg.to.epoch + 150 }, live: true });
     }
     const movedMover = out[mover.riders[0] as number]?.legs.find((l) => l.tripId === mover.leg.tripId);
     expect(movedMover?.from.epoch).toBe(moverLive);
     expect(movedMover?.live).toBe(true);
-    expect(movedMover?.to).toEqual(mover.leg.to);
+    expect(movedMover?.to).toEqual({ ...mover.leg.to, epoch: mover.leg.to.epoch + 90 });
+    expect(movedMover?.durationS).toBe(mover.leg.durationS);
   });
 });
 
@@ -77,11 +79,16 @@ describe('live overlay, unmatched legs (M10a.2)', () => {
     for (const predictions of ignored) {
       expect(overlayLive(its, predictions)).toEqual(its);
     }
-    // With the rail leg live, every other leg is the very same leg.
+    // With the rail leg live, every itinerary not riding it is the very same itinerary, leg for leg; in
+    // those riding it, the legs before the late train are the same legs (its delay only moves later ones).
     const out = overlayLive(its, [prediction(rail, boarding, at)]);
-    const others = out.flatMap((it, i) => it.legs.filter((l) => l.tripId !== rail.tripId).map((l, j) => [l, its[i]?.legs.filter((m) => m.tripId !== rail.tripId)[j]]));
+    const riding = its.map((it) => it.legs.findIndex((l) => l.tripId === rail.tripId));
+    const others = out.flatMap((it, i) => (riding[i] === -1 ? it.legs.map((l, j) => [l, its[i]?.legs[j]]) : []));
     expect(others.length).toBeGreaterThan(0);
     expect(others.every(([got, want]) => got === want)).toBe(true);
+    const before = out.flatMap((it, i) => it.legs.slice(0, Math.max(0, riding[i] ?? 0)).map((l, j) => [l, its[i]?.legs[j]]));
+    expect(before.length).toBeGreaterThan(0);
+    expect(before.every(([got, want]) => got === want)).toBe(true);
   });
 });
 

@@ -83,6 +83,22 @@ describe('the first leg and live times on a route option (M10b.1)', () => {
   });
 });
 
+describe('a missed connection on a route option (mfix5)', () => {
+  it('an option whose transfer may be missed says Tight transfer · may miss 26', async () => {
+    // The Orange train 2 min late reaches Brickell at 2:16; after the 2 min walk the rider is at bus 26's stop
+    // at 2:18, a minute after it leaves at 2:17. The bus does not wait, so the 2:07 → 2:24 option keeps its
+    // times and warns instead.
+    const live = overlayLive(fixtureItineraries(), [livePrediction(fixtureLeg('2600'), 120)]);
+    const tree = await renderList(routeOptions(live, FIXTURE_NETWORK, AT_ASK));
+    expect(textOf(tree, 'route-option-1-times')).toBe('2:07 → 2:24');
+    expect(textOf(tree, 'route-option-1-risk')).toBe('Tight transfer · may miss 26');
+    expect(hostsByTestID(tree.root, /^route-option-\d+-risk$/)).toHaveLength(1);
+    expect(hostsByTestID(tree.root, 'route-option-1')[0]?.props.accessibilityLabel).toBe('2:07 to 2:24, 17 min, 1 transfer, 12 min walk, Orange Line, Bus 26, Live, Tight transfer · may miss 26');
+    // The rail-only option has no transfer to miss: its arrival moves instead (2:28 → 2:30).
+    expect(textOf(tree, 'route-option-3-times')).toBe('2:07 → 2:30');
+  });
+});
+
 describe('the route options footer (M10b.1)', () => {
   it('footer credits Routes by Transitous with a link to its sources', async () => {
     const openURL = jest.fn(async (_url: string): Promise<void> => undefined);

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# m7b_trips_ui — trips UI (plan M7.5–M7.9): reminder service + leave-now cue, Apple Maps handoff, home context + Now strip, Trips tab, add-trip flow.
+# m7b_trips_ui — trips UI (plan M7.5–M7.9): reminder service + leave-now cue, directions route, home context + Now strip, Trips tab, add-trip flow + save trip.
+# Re-sequenced 2026-10-01 (lands LAST: after m7a, m7c, m10b, m6b). R5: the Apple Maps handoff module + its tests moved to m6b. R2: NowAccessory
+# (file, usePlacement, mount) moved to m7c; this card extends it. R4: m6b's save-trip gate moved here. R6: the saved-trip -> /plan link moved here from m10b.
 source "$(dirname "$0")/lib.sh"
 cd "$(dirname "$0")/../.."
-trap 'echo "ratchet: m7b_trips_ui gate failed at verify script line $LINENO"' ERR
 
 # Under `set -e`, a failure on the LEFT of `&&` does not stop the script, so every gate below is ONE
 # simple command (a lib.sh helper, a card helper, or a for-loop of one), and every compound check lives
@@ -15,9 +16,7 @@ trap 'echo "ratchet: m7b_trips_ui gate failed at verify script line $LINENO"' ER
 JEST_CASES=(
   "shouldCue fires once per departure" "shouldCue fires again for a new departure"
   "schedules added reminders" "cancels removed reminders"
-  "transit url" "walk url" "fallback url"
-  "openURL resolving undefined" "openURL resolving false" "openURL rejects falls back"
-  "120 m" "map gesture" "01:30" "12 char"
+  "120 m" "map gesture" "01:30" "14 char"
   "sorted by leaveAt" "empty state" "never says transfer"
 )
 
@@ -207,30 +206,89 @@ console.log(`ratchet: ${files.length} test files, ${mocks} labelled native-modul
 ' "$@" || return 1
 }
 
+# _pin_anchored / jest_pin — copied verbatim from verify-m6b_sheets_stations.sh with its save-trip gate (R4).
+_pin_anchored() {
+  case "$1" in
+    *'$') return 0 ;;
+    *) echo "ratchet: test-name pin '$1' must end in \$ so each acceptance case needs its own test"; return 1 ;;
+  esac
+}
+
+# jest_pin <path> <'(^| )phrase$'> — lib's jest_nonempty (jest -t is new RegExp(pin, 'i') on the full
+# name; >= 1 test passed) with an anchored pin, so the passing test is this case's own.
+jest_pin() {
+  _pin_anchored "$2" || return 1
+  jest_nonempty "$1" "$2" || return 1
+}
+
+# closure_links <entry> <href> — m10b's `_m10b_graph links` (the TypeScript-AST value-import closure of
+# <entry>, tests and the href's own route file excluded, must hold a quoted href to <href> in CODE: comments
+# and JSX display text are blanked first), reused rather than duplicated: m10b lands before this card, so its
+# script is in the tree. It runs in its own bash, sourced by its repo-relative path from the repo root (this
+# script has cd'd there), so m10b's `dirname "$0"` resolves wherever this script was started from.
+closure_links() {
+  need_file "$1" || return 1
+  need_file scripts/ratchet/verify-m10b_routes_ui.sh || return 1
+  bash -c 'source "$0" || exit 1; _m10b_graph links "$1" "$2"' scripts/ratchet/verify-m10b_routes_ui.sh "$1" "$2" || return 1
+}
+
+# footer_opens_add_trip — R4: m6b's StationSheetFooter really opens the add-trip flow. M7.9's flow is
+# src/app/trip/new/{_layout,from,to,start,confirm}.tsx with NO index route, so a bare '/trip/new' link lands
+# on no screen. The footer's non-test closure must link a step route this card creates — '/trip/new/to'
+# (this station as the origin) or '/trip/new/from' — or '/trip/new' only if src/app/trip/new/index.tsx exists.
+footer_opens_add_trip() {
+  local footer=src/ui/stations/StationSheetFooter.tsx href route out tried=''
+  need_file "$footer" || return 1
+  for href in /trip/new/to /trip/new/from /trip/new; do
+    case "$href" in /trip/new) route=src/app/trip/new/index.tsx ;; *) route="src/app$href.tsx" ;; esac
+    if [ ! -f "$route" ]; then tried="$tried; $href: no route file $route"; continue; fi
+    if out=$(closure_links "$footer" "$href"); then echo "$out"; return 0; fi
+    tried="$tried; $href: ${out##*$'\n'}"
+  done
+  echo "ratchet: $footer opens no add-trip route that exists${tried}"
+  return 1
+}
+
 # full_gate_over_card — the repo-wide gate, run once this card's tests exist (the tree passing it today
 # says nothing about m7b).
 full_gate_over_card() {
   local p
-  for p in src/domain/handoff/__tests__ src/ui/trips/__tests__ src/ui/now/__tests__ scripts/gtfs/__tests__/repo-reachable.test.ts; do
+  for p in src/ui/trips/__tests__ src/ui/now/__tests__ scripts/gtfs/__tests__/repo-reachable.test.ts; do
     [ -e "$p" ] || { echo "ratchet: missing $p — the repo-wide gate must run over this card's tests"; return 1; }
   done
   full_gate || return 1
 }
 
-# export_bundles_routes <route>... — a FRESH iOS export (lib's ios_export), then the Hermes bundle that
-# metadata.json names carries expo-router's require.context key "./<route>" for every route.
+# export_bundles_routes <route>... — guarded by this card's route files: Metro bundles the app for iOS
+# (lib's ios_export, the plan's Hermes export), then a --no-bytecode export of the same app registers
+# expo-router's require.context key "./<route>" as a whole quoted string for every route. The Hermes .hbc is
+# never grepped (its string table packs strings back to back — see m5b). Both exports run on a Metro cache
+# private to THIS tree (TMPDIR -> .cache/metro-tmp-m7b): on the shared cache a tree whose node_modules is a
+# symlink reused the MAIN repo's cached require.context and bundled the main repo's src/app (m10b, proven
+# 2026-10-01), and a private cache never writes into the shared one.
 export_bundles_routes() {
-  local bundle r
-  ios_export || return 1
-  bundle=$(node -e 'process.stdout.write(String(require("./.cache/export/metadata.json").fileMetadata.ios.bundle))') \
-    || { echo "ratchet: .cache/export/metadata.json names no iOS bundle"; return 1; }
-  [ -s ".cache/export/$bundle" ] || { echo "ratchet: the exported iOS bundle .cache/export/$bundle is missing or empty"; return 1; }
+  local dir=.cache/export-m7b-js metro_tmp="$PWD/.cache/metro-tmp-m7b" r out rc
+  for r in "$@"; do need_file "src/app/$r" || return 1; done
+  mkdir -p "$metro_tmp" || { echo "ratchet: cannot create $metro_tmp"; return 1; }
+  ( export TMPDIR="$metro_tmp"; ios_export ) || return 1
+  [ -d .cache/export/_expo/static/js/ios ] || { echo "ratchet: the export wrote no .cache/export/_expo/static/js/ios bundle"; return 1; }
+  rm -rf "$dir" || { echo "ratchet: cannot clear $dir"; return 1; }
+  out=$(TMPDIR="$metro_tmp" local_bin expo export --platform ios --no-bytecode --output-dir "$dir" 2>&1) \
+    || { echo "$out" | tail -30; echo "ratchet: the --no-bytecode iOS export failed"; return 1; }
+  [ -d "$dir/_expo/static/js/ios" ] || { echo "$out" | tail -10; echo "ratchet: the --no-bytecode export wrote no $dir/_expo/static/js/ios bundle"; return 1; }
   for r in "$@"; do
-    grep -aqF -- "./$r" ".cache/export/$bundle" \
-      || { echo "ratchet: the exported iOS bundle has no route ./$r — Metro did not bundle it"; return 1; }
+    rc=0
+    grep -rqF -- "\"./$r\"" "$dir/_expo/static/js/ios" || rc=$?
+    [ "$rc" -le 1 ] || { echo "ratchet: grep failed (exit $rc) scanning $dir"; return 1; }
+    [ "$rc" -eq 0 ] || { echo "ratchet: the iOS JS bundle registers no route \"./$r\" — Metro did not bundle this tree's src/app/$r"; return 1; }
   done
-  echo "ratchet: the exported iOS bundle carries all $# routes of this card"
+  echo "ratchet: the iOS JS bundle registers all $# routes of this card"
 }
+
+# Sourcing this file (to run one gate alone) stops here, before gate 1:
+#   bash -c 'source "$0"; footer_opens_add_trip' scripts/ratchet/verify-m7b_trips_ui.sh
+if (return 0 2>/dev/null); then return 0; fi
+trap 'echo "ratchet: m7b_trips_ui gate failed at verify script line $LINENO"' ERR
 
 # --- M7.5 Notification service + leave-now cue ------------------------------------------------------
 # 1. useLeaveNowCue.ts exports shouldCue and cues "Leave now" with one haptic (expo-haptics) plus a VoiceOver announcement (plan §4 UX)
@@ -246,68 +304,65 @@ need_re "from ['\"][^'\"]*/notifications['\"]" src/app src/ui
 # 6. the leave-now cue is wired: a non-test module under src/app or src/ui imports useLeaveNowCue
 need_re "from ['\"][^'\"]*/useLeaveNowCue['\"]" src/app src/ui
 
-# --- M7.6 Apple Maps handoff -------------------------------------------------------------------------
-# 7. src/domain/handoff/apple-maps.ts is pure (loads under plain Node via tsx) and exports appleMapsUrl
-need_pure_export src/domain/handoff/apple-maps.ts appleMapsUrl
-# 8. the handoff tests assert the plan's exact values: the transit URL, walk mode dirflg=w, the https://maps.apple.com fallback
-need_lits src/domain/handoff/__tests__ 'maps://?daddr=25.7759,-80.1961&dirflg=r' 'dirflg=w' 'https://maps.apple.com'
-# 9. A (M7.6) + the M1.19 handoff rule (plan V `npx jest src/domain/handoff --ci`): transit/walk/fallback URLs; openURL resolving undefined or false = opened (value never read); rejection falls back to https
-jest_cases src/domain/handoff "transit url" "walk url" "fallback url" "openURL resolving undefined" "openURL resolving false" "openURL rejects falls back"
-# 10. src/app/directions.tsx builds the link with the domain module and hands Linking's openURL to it
+# --- M7.6 Directions route (the handoff module + its gates moved to m6b, ruling R5) --------------------
+# 7. src/app/directions.tsx builds the link with the domain module and hands Linking's openURL to it
 need_all src/app/directions.tsx 'domain/handoff/apple-maps' 'openURL'
-# 11. directions.tsx never awaits or .then()s openURL itself — every open goes through the tested handoff rule
+# 8. directions.tsx never awaits or .then()s openURL itself — every open goes through the tested handoff rule
 absent_re 'await[[:space:]]+[A-Za-z_$.]*openURL[[:space:]]*\(|openURL\([^)]*\)[[:space:]]*\.then' src/app/directions.tsx
 
 # --- M7.7 Home context + Now strip -------------------------------------------------------------------
-# 12. the Now strip modules exist where the plan puts them
-for f in src/ui/now/homeContext.ts src/ui/now/nowStore.ts src/ui/now/NowStripContent.tsx src/ui/now/NowAccessory.tsx; do need_file "$f"; done
-# 13. homeContext.ts has the no-service state (plan: noService; m7a's rides kind is 'no-service') so the strip never claims a train at 01:30
+# (NowAccessory.tsx, its usePlacement and its BottomAccessory mount are m7c's gates now — ruling R2.)
+# 9. the Now strip modules exist where the plan puts them
+for f in src/ui/now/homeContext.ts src/ui/now/nowStore.ts src/ui/now/NowStripContent.tsx; do need_file "$f"; done
+# 10. homeContext.ts has the no-service state (plan: noService; m7a's rides kind is 'no-service') so the strip never claims a train at 01:30
 need_all src/ui/now/homeContext.ts 'noService|no-service'
-# 14. inline vs regular text follows the real accessory placement: NativeTabs.BottomAccessory.usePlacement() in non-test src/ui/now
-need_re 'usePlacement' src/ui/now
-# 15. A (M7.7, plan V `npx jest src/ui/now --ci`): 120 m from a station -> station context + auto-present; after a map gesture -> no auto-present; 01:30 -> noService; inline text <= 12 chars
-jest_cases src/ui/now "120 m" "map gesture" "01:30" "12 char"
-# 16. NowAccessory is mounted in the tab bar's BottomAccessory
-need_all 'src/app/(tabs)/_layout.tsx' 'NowAccessory' 'BottomAccessory'
-# 17. map gestures reach the Now store: a non-test module under src/app or src/ui/map imports ui/now/nowStore
+# 11. A (M7.7, plan V `npx jest src/ui/now --ci`): 120 m from a station -> station context + auto-present; after a map gesture -> no auto-present; 01:30 -> noService; inline text <= 14 chars (ruling R1)
+jest_cases src/ui/now "120 m" "map gesture" "01:30" "14 char"
+# 12. map gestures reach the Now store: a non-test module under src/app or src/ui/map imports ui/now/nowStore
 need_re 'now/nowStore' src/app src/ui/map
 
 # --- M7.8 Trips tab + TripCard + CountdownHero -------------------------------------------------------
-# 18. the Trips tab renders TripCards (m5b's route + EmptyState gain the card list): a non-test module under the tab route or src/ui/trips imports TripCard
+# 13. the Trips tab renders TripCards (m5b's route + EmptyState gain the card list): a non-test module under the tab route or src/ui/trips imports TripCard
 need_re "from ['\"][^'\"]*/TripCard['\"]" 'src/app/(tabs)/trips' src/ui/trips
-# 19. leaveAt comes from M7.1's pure leave-by (m7a), not a UI re-implementation
+# 14. leaveAt comes from M7.1's pure leave-by (m7a), not a UI re-implementation
 need_re 'domain/trips/leave-by' 'src/app/(tabs)/trips' src/ui/trips
-# 20. TripCard renders the CountdownHero
+# 15. TripCard renders the CountdownHero
 need_all src/ui/trips/TripCard.tsx "from ['\"][^'\"]*/CountdownHero['\"]"
-# 21. the hero's states come from M7.2's countdown module (m7a's src/ui/trips/countdown.ts)
+# 16. the hero's states come from M7.2's countdown module (m7a's src/ui/trips/countdown.ts)
 need_re "from ['\"][^'\"]*/countdown['\"]" src/ui/trips
-# 22. A (M7.8) + the m3a input: trips sorted by leaveAt; the empty state; at night (no service) the card never says "transfer"
+# 17. A (M7.8) + the m3a input: trips sorted by leaveAt; the empty state; at night (no service) the card never says "transfer"
 jest_cases src/ui/trips "sorted by leaveAt" "empty state" "never says transfer"
-# 23. the trips tests assert the plan's empty-state copy (M5.5) literally
+# 18. the trips tests assert the plan's empty-state copy (M5.5) literally
 need_lits src/ui/trips/__tests__ 'No trips yet'
 
 # --- M7.9 Add-trip flow ------------------------------------------------------------------------------
-# 24. the add-trip routes exist where the plan puts them
+# 19. the add-trip routes exist where the plan puts them
 for f in src/app/trip/new/_layout.tsx src/app/trip/new/from.tsx src/app/trip/new/to.tsx src/app/trip/new/start.tsx src/app/trip/new/confirm.tsx 'src/app/trip/[tripId].tsx'; do need_file "$f"; done
-# 25. the add-trip flow is a Stack whose steps carry real titles (M1.19: no "(tabs)" back labels)
+# 20. the add-trip flow is a Stack whose steps carry real titles (M1.19: no "(tabs)" back labels)
 need_all src/app/trip/new/_layout.tsx '\bStack\b' 'title'
-# 26. A (M7.9) on the REAL schedule DB: directReachable(Dadeland South) includes Government Center and excludes Bayfront Park
+# 21. A (M7.9) on the REAL schedule DB: directReachable(Dadeland South) includes Government Center and excludes Bayfront Park
 nodetest_real_cases scripts/gtfs/__tests__/repo-reachable.test.ts "includes government center" "excludes bayfront park"
-# 27. the real-DB test calls directReachable and asserts the exclusion reason needs-transfer literally
+# 22. the real-DB test calls directReachable and asserts the exclusion reason needs-transfer literally
 need_lits scripts/gtfs/__tests__/repo-reachable.test.ts 'directReachable' 'needs-transfer'
-# 28. directReachable lives in the engine (non-test src/data or src/domain), where node:test can load it
+# 23. directReachable lives in the engine (non-test src/data or src/domain), where node:test can load it
 need_re '(^|[^A-Za-z0-9_$])directReachable([^A-Za-z0-9_$]|$)' src/data src/domain
-# 29. the add-trip flow consumes directReachable (non-test src/app/trip or src/ui/trips)
+# 24. the add-trip flow consumes directReachable (non-test src/app/trip or src/ui/trips)
 need_re '(^|[^A-Za-z0-9_$])directReachable([^A-Za-z0-9_$]|$)' src/app/trip src/ui/trips
-# 30. the add-trip flow persists through M7.3's saved-trips repo
+# 25. the add-trip flow persists through M7.3's saved-trips repo
 need_re 'saved-trips-repo' src/app/trip src/ui/trips
+# 26. A (M6.4, moved from m6b gate 8 by ruling R4): the footer offers save trip, starting a trip from this station — its own test.
+jest_pin src/ui/stations/__tests__/StationSheetFooter.test.tsx '(^| )save trip starts a trip from this station$'
+# 27. R4: m6b's StationSheetFooter really opens the add-trip flow: its non-test closure links an add-trip route that exists ('/trip/new/to' with the station as origin, or '/trip/new/from'; bare '/trip/new' only with a trip/new/index.tsx).
+footer_opens_add_trip
+# 28. R6 (moved from m10b gate 7): a saved trip opens route options — src/app/trip/[tripId].tsx's non-test closure links '/plan'.
+closure_links 'src/app/trip/[tripId].tsx' /plan
 
 # --- whole card --------------------------------------------------------------------------------------
-# 31. every jest.mock in this card's tests is a LABELLED NATIVE-module mock (no stubs of our own code)
-native_mocks_labelled src/domain/handoff/__tests__ src/ui/trips/__tests__ src/ui/now/__tests__
-# 32. repo-wide gate over this card's code: tsc (app + scripts), eslint --max-warnings 0, standards, jest, node:test
+# 29. every jest.mock in this card's tests — and in m6b's handoff tests (R5 moved them to m6b, which has no mock audit) — is a LABELLED NATIVE-module mock (no stubs of our own code)
+native_mocks_labelled src/ui/trips/__tests__ src/ui/now/__tests__ src/domain/handoff/__tests__
+# 30. repo-wide gate over this card's code: tsc (app + scripts), eslint --max-warnings 0, standards, jest, node:test
 full_gate_over_card
-# 33. Metro bundles the app for iOS and the bundle carries every route this card adds
+# 31. Metro bundles the app for iOS, and a --no-bytecode export on a private Metro cache registers every route this card adds
 export_bundles_routes directions.tsx 'trip/new/_layout.tsx' 'trip/new/from.tsx' 'trip/new/to.tsx' 'trip/new/start.tsx' 'trip/new/confirm.tsx' 'trip/[tripId].tsx' '(tabs)/trips/index.tsx'
 
-echo "m7b_trips_ui: all 33 gates green"
+echo "m7b_trips_ui: all 31 gates green"

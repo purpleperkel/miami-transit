@@ -89,8 +89,14 @@ M7C_WIRING_PHRASES=(
   'walkMeters is the straight-line distance to the platform'
   'never offers a canceled departure'
   'Now strip inline shows the hurry verdict'
+  'accessory text never shows a feed hash'
 )
-M7C_PHRASES=("${M7C_VERDICT_PHRASES[@]}" "${M7C_COPY_PHRASES[@]}" "${M7C_CARD_PHRASES[@]}" "${M7C_WIRING_PHRASES[@]}")
+# m5b's tab-shell test (src/ui/__tests__/tab-shell.test.tsx): its accessory case now expects NowAccessory (R2).
+M7C_SHELL_PHRASES=(
+  'keeps the BottomAccessory'
+)
+M7C_PHRASES=("${M7C_VERDICT_PHRASES[@]}" "${M7C_COPY_PHRASES[@]}" "${M7C_CARD_PHRASES[@]}" "${M7C_WIRING_PHRASES[@]}"
+  "${M7C_SHELL_PHRASES[@]}")
 
 # The plan's copy (M7c.2) and the Now-strip example (M7c.3), byte-exact (U+00B7 middle dot).
 M7C_COPY_STRINGS=('Chill · 3 min to spare' 'Jog · makes the 2:14 with 1 min spare' 'Not worth it · next in 3 min'
@@ -384,7 +390,9 @@ absent_src() {
 
 # reaches <entry> <ERE>... — the entry exists and its VALUE-import closure (TypeScript AST; `import type`
 # is erased; ./ ../ and @/ specifiers followed to .ts/.tsx files, plus require()/import()) contains, for
-# every ERE (case-insensitive), a repo path or an external package recorded as 'pkg:<specifier>'.
+# every ERE (case-insensitive), a repo path or an external package recorded as 'pkg:<specifier>'. An ERE
+# written '!<ERE>' is the opposite: NO path in the closure may match it (an import-graph absence, so a
+# comment naming the module neither fails it nor an aliased re-export slips past it).
 # Walked with an explicit queue (no recursion).
 reaches() {
   need_file "$1" || return 1
@@ -449,16 +457,20 @@ for (let i = 0; i < queue.length && i < 5000; i += 1) {
   }
 }
 const all = [...found];
-const missing = patterns.filter((p) => !all.some((f) => new RegExp(p, 'i').test(f)));
+const wanted = patterns.filter((p) => !p.startsWith('!'));
+const banned = patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1));
+const missing = wanted.filter((p) => !all.some((f) => new RegExp(p, 'i').test(f)));
 if (missing.length > 0) {
   fail(`${entry} never imports (directly or transitively, value imports only) a module matching ${missing.map((p) => `/${p}/i`).join(', ')}; it reaches: ${all.filter((f) => f.startsWith('src/')).join(', ')}`);
 }
-console.log(`ratchet: ${entry} reaches ${patterns.map((p) => `/${p}/i`).join(', ')}`);
+const forbidden = all.filter((f) => banned.some((p) => new RegExp(p, 'i').test(f)));
+if (forbidden.length > 0) fail(`${entry} must not reach ${banned.map((p) => `/${p}/i`).join(', ')}, but its value-import closure holds ${forbidden.join(', ')}`);
+console.log(`ratchet: ${entry} reaches ${wanted.map((p) => `/${p}/i`).join(', ') || 'only allowed modules'}${banned.length > 0 ? ` and never ${banned.map((p) => `/${p}/i`).join(', ')}` : ''}`);
 NODE
 }
 
 # wired_into <entry> <ERE>... — this card's wiring modules exist first (so an unbuilt card fails on its
-# OWN artifact), then <entry> (an m6b/m7b screen) reaches every ERE.
+# OWN artifact), then <entry> (m6b's station route, or this card's Now accessory) reaches every ERE.
 wired_into() {
   need_files src/ui/hurry/useHurryVerdict.ts src/ui/hurry/HurryCard.tsx || return 1
   need_copy_module || return 1
@@ -501,11 +513,85 @@ console.log(`ratchet: ${files.length} test files, ${mocks} labelled native-modul
 NODE
 }
 
-# now_strip_calls_inline — this card's copy module exists first, then m7b's Now strip (src/ui/now, non-test)
+# _m7c_ast <cmd> <args>... — checks over the TypeScript AST (comments are trivia, never nodes, so a comment
+# or a string naming a thing never satisfies them). Explicit stacks, no recursion.
+#   calls <dir> <name>                 a NON-TEST .ts/.tsx under <dir> calls name(…) or x.name(…)
+#   mounts <file> <outer> <inner>      <file> renders a JSX <inner> element inside a JSX <outer> element
+#   uses <file> <name> <spec-ERE>      <file> value-imports <name> from a specifier matching ^ERE$ AND
+#                                      references <name> outside the import
+_m7c_ast() {
+  node - "$@" <<'NODE' || return 1
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const ROOT = process.cwd();
+const fail = (m) => { console.log(`ratchet: ${m}`); process.exit(1); };
+let ts;
+try { ts = require(path.join(ROOT, 'node_modules', 'typescript')); } catch (e) { fail(`typescript is not installed in node_modules (${e.message})`); }
+const [cmd, target, a, b] = process.argv.slice(2);
+if (!fs.existsSync(target)) fail(`missing ${target}`);
+const parse = (f) => ts.createSourceFile(f, fs.readFileSync(f, 'utf8'), ts.ScriptTarget.Latest, true, f.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+function nodes(root) {
+  const out = [], stack = [root];
+  for (let g = 0; stack.length > 0 && g < 500000; g += 1) { const n = stack.pop(); out.push(n); ts.forEachChild(n, (k) => { stack.push(k); }); }
+  return out;
+}
+const tag = (el, sf) => el.tagName.getText(sf);
+if (cmd === 'calls') {
+  const files = [], todo = [target];
+  for (let g = 0; todo.length > 0 && g < 10000; g += 1) {
+    const p = todo.pop();
+    if (fs.statSync(p).isDirectory()) { if (path.basename(p) !== '__tests__') for (const e of fs.readdirSync(p)) todo.push(path.join(p, e)); }
+    else if (/\.tsx?$/.test(p) && !/\.test\.tsx?$/.test(p)) files.push(p);
+  }
+  const hit = files.find((f) => nodes(parse(f)).some((n) => ts.isCallExpression(n)
+    && ((ts.isIdentifier(n.expression) && n.expression.text === a) || (ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === a))));
+  if (hit === undefined) fail(`no non-test code under ${target} calls ${a}(…) (comments and strings do not count; searched ${files.length} files)`);
+  console.log(`ratchet: ${hit} calls ${a}(…)`);
+} else if (cmd === 'mounts') {
+  const sf = parse(target);
+  const outers = nodes(sf).filter((n) => ts.isJsxElement(n) && tag(n.openingElement, sf) === a);
+  const inside = outers.some((o) => nodes(o).some((n) => (ts.isJsxSelfClosingElement(n) || ts.isJsxOpeningElement(n)) && n !== o.openingElement && tag(n, sf) === b));
+  if (!inside) fail(`${target} renders no <${b}> element inside a <${a}> element (${outers.length} <${a}> found; comments do not count)`);
+  console.log(`ratchet: ${target} mounts <${b}> inside <${a}>`);
+} else if (cmd === 'uses') {
+  const sf = parse(target), re = new RegExp(`^(${b})$`);
+  const imp = sf.statements.find((s) => ts.isImportDeclaration(s) && !(s.importClause && s.importClause.isTypeOnly) && re.test(s.moduleSpecifier.text)
+    && s.importClause && s.importClause.namedBindings && ts.isNamedImports(s.importClause.namedBindings)
+    && s.importClause.namedBindings.elements.some((e) => !e.isTypeOnly && e.name.text === a));
+  if (imp === undefined) fail(`${target} does not value-import { ${a} } from /^(${b})$/`);
+  const refs = nodes(sf).filter((n) => ts.isIdentifier(n) && n.text === a && !(n.pos >= imp.pos && n.end <= imp.end));
+  if (refs.length === 0) fail(`${target} imports ${a} but never uses it`);
+  console.log(`ratchet: ${target} imports ${a} and uses it ${refs.length} time(s)`);
+} else fail(`unknown _m7c_ast command '${cmd}'`);
+NODE
+}
+
+# now_strip_calls_inline — this card's copy module exists first, then its Now accessory (src/ui/now, non-test)
 # calls hurryInline: the inline (<= 14-character) verdict text is what the accessory shows.
 now_strip_calls_inline() {
   need_copy_module || return 1
   need_src src/ui/now 'hurryInline\('
+}
+
+# accessory_replaces_data_version — the tab bar's BottomAccessory shows this card's NowAccessory INSTEAD of
+# the debug DataVersionAccessory (ruling R2: the data version stays reachable in Data & Settings /
+# Diagnostics, not in the accessory). An import-graph absence, not a text check: the tab layout's value-import
+# closure reaches NowAccessory.tsx and NEVER src/ui/diagnostics/DataVersionAccessory.tsx — so a doc comment
+# naming the old accessory does not fail it, and an aliased import or re-export of it does not slip past.
+accessory_replaces_data_version() {
+  need_file src/ui/now/NowAccessory.tsx || return 1
+  reaches 'src/app/(tabs)/_layout.tsx' 'src/ui/now/NowAccessory\.tsx$' '!src/ui/diagnostics/DataVersionAccessory\.tsx$'
+}
+
+# tab_shell_expects_now — m5b's tab-shell test keeps its accessory case, now about the accessory the layout
+# really mounts (R2: the ONE m5b test change m7c may make): the test value-imports NowAccessory from the
+# module the layout reaches and uses it, and its 'keeps the BottomAccessory' case passes (unfiltered run).
+tab_shell_expects_now() {
+  local test=src/ui/__tests__/tab-shell.test.tsx
+  need_file src/ui/now/NowAccessory.tsx || return 1
+  _m7c_ast uses "$test" NowAccessory '\.\./now/NowAccessory|@/ui/now/NowAccessory' || return 1
+  case_pin "$test" 'keeps the BottomAccessory'
 }
 
 # full_gate_built — the repo-wide gate, run only once this card's modules and suites exist (on an unbuilt
@@ -517,11 +603,11 @@ full_gate_built() {
 }
 
 # ios_export_built — a fresh iOS export (lib's ios_export), run only once this card's modules exist AND the
-# mounted Now accessory reaches them, so Metro has to bundle the hurry code.
+# tab layout reaches NowAccessory and, through it, the hurry hook, so Metro has to bundle the hurry code.
 ios_export_built() {
   need_files "${M7C_ARTIFACTS[@]}" || return 1
   need_copy_module || return 1
-  reaches src/ui/now/NowAccessory.tsx 'src/ui/hurry/useHurryVerdict\.ts$' || return 1
+  reaches 'src/app/(tabs)/_layout.tsx' 'src/ui/now/NowAccessory\.tsx$' 'src/ui/hurry/useHurryVerdict\.ts$' || return 1
   ios_export
 }
 
@@ -620,25 +706,40 @@ need_pure_export src/domain/hurry/board.ts hurryDepartures
 engine_is board
 # 55. Named board test.
 case_pin src/domain/hurry/__tests__/board.test.ts 'never offers a canceled departure'
-# 56. The hook composes the real pieces: the verdict, platform and board modules, m4a's merge, m4b's live context, m7a's settings repo (paces) and expo-location.
+# 56. The hook composes the real pieces: the verdict, platform and board modules, m4a's merge, m4b's live context, m8b's walking-pace settings (paces) and expo-location.
 reaches src/ui/hurry/useHurryVerdict.ts 'src/domain/hurry/verdict\.ts$' 'src/domain/hurry/platform\.ts$' 'src/domain/hurry/board\.ts$' 'src/domain/live/merge-departures\.ts$' 'src/live/live-context\.tsx$' 'src/ui/settings/walking-pace\.ts$' '^pkg:expo-location$'
-# 57. Staleness uses the per-provider fresh threshold (§3 / constants.ts freshS: Swiftly 75 s, Transitland 150 s), not a flat number.
+# 57. Staleness uses the per-provider fresh threshold (§3 / constants.ts freshS: Swiftly 75 s, Transitland 180 s since mfix3 — the feed-fresh limit), not a flat number.
 need_src src/ui/hurry '\.freshS\b'
-# 58. The Now strip (m7b's NowAccessory) reaches the hook and the copy...
+# 58. The Now accessory module exists where the plan puts it (moved from m7b gate 12 by ruling R2; m7b extends it later with trip context).
+need_file src/ui/now/NowAccessory.tsx
+# 59. Inline vs regular text follows the real accessory placement: non-test src/ui/now CALLS NativeTabs.BottomAccessory.usePlacement() (moved from m7b gate 14; an AST call — a comment or string does not count).
+_m7c_ast calls src/ui/now usePlacement
+# 60. NowAccessory is mounted in the tab bar's BottomAccessory: a JSX <NowAccessory> element inside <NativeTabs.BottomAccessory> (moved from m7b gate 16; AST, so a JSX comment does not count).
+_m7c_ast mounts 'src/app/(tabs)/_layout.tsx' NativeTabs.BottomAccessory NowAccessory
+# 61. ...and that element is the real module: the tab layout's value-import closure reaches src/ui/now/NowAccessory.tsx.
+reaches 'src/app/(tabs)/_layout.tsx' 'src/ui/now/NowAccessory\.tsx$'
+# 62. R2: NowAccessory REPLACES the debug DataVersionAccessory: the layout's import closure never reaches src/ui/diagnostics/DataVersionAccessory.tsx (the data version lives on in Data & Settings / Diagnostics).
+accessory_replaces_data_version
+# 63. m5b's tab-shell accessory case now expects NowAccessory (the one m5b test change R2 allows), imported from the mounted module, and passes.
+tab_shell_expects_now
+# 64. R2 (mfix2's accessory contract, carried to the accessory that replaces it): a Now-accessory test under src/ui/now
+#     — its own passing case — asserts the rendered accessory text never shows a feed hash (no /Data [0-9a-f]{6,}/).
+case_pin src/ui/now 'accessory text never shows a feed hash'
+# 65. The Now strip (this card's NowAccessory) reaches the hook and the copy...
 wired_into src/ui/now/NowAccessory.tsx 'src/ui/hurry/useHurryVerdict\.ts$' 'src/ui/hurry/copy\.tsx?$'
-# 59. ...and its non-test code calls hurryInline (the <= 14-character inline text).
+# 66. ...and its non-test code calls hurryInline (the <= 14-character inline text).
 now_strip_calls_inline
-# 60. Named Now-strip test (anywhere under src/ui/now), asserting the plan's inline example literally.
+# 67. Named Now-strip test (anywhere under src/ui/now), asserting the plan's inline example literally.
 case_pin src/ui/now 'Now strip inline shows the hurry verdict'
-# 61. The Now-strip tests carry the inline example "Jog · 1 min".
+# 68. The Now-strip tests carry the inline example "Jog · 1 min".
 need_lits src/ui/now/__tests__ 'Jog · 1 min'
-# 62. The station sheet header (m6b's route) reaches HurryCard and the hook.
+# 69. The station sheet header (m6b's route) reaches HurryCard and the hook.
 wired_into 'src/app/station/[stationKey].tsx' 'src/ui/hurry/HurryCard\.tsx$' 'src/ui/hurry/useHurryVerdict\.ts$'
 
 # ===== Whole card ======================================================================================
-# 63. Repo-wide gate (tsc app + scripts, eslint incl. src/domain purity, standards incl. no recursion, jest, node:test), once this card's modules exist.
+# 70. Repo-wide gate (tsc app + scripts, eslint incl. src/domain purity, standards incl. no recursion, jest, node:test), once this card's modules exist.
 full_gate_built
-# 64. Metro bundles the app for iOS with the hurry code reached from the mounted Now accessory.
+# 71. Metro bundles the app for iOS with the hurry code reached from the tab layout through the mounted Now accessory.
 ios_export_built
 
-echo "m7c_hurry_or_chill: all 64 gates green"
+echo "m7c_hurry_or_chill: all 71 gates green"

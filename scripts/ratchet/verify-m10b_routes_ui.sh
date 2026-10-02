@@ -2,8 +2,9 @@
 # m10b_routes_ui — Route options UI (plan M10b.1–M10b.2): the "Route options" plan sheet, the options list
 # (sorted by arrival, line badges, Live badge, the first leg's hurry-or-chill chip, "Routes by Transitous"),
 # itinerary detail with walk-leg Apple Maps directions (dirflg=w; success = openURL resolved), and the
-# unavailable state's "Open in Apple Maps" (dirflg=r). Builds on m10a (Transitous client, polite client,
-# live overlay + firstLegVerdict), m7c (hurry verdict + copy), m5a (tokens/primitives), m6a (LineBadge)
+# unavailable state's "Open in Apple Maps" (dirflg=r), recent places persisted in expo-sqlite/kv-store (ruling R6)
+# and the Trips tab empty state's "Plan a route" (R6). Builds on m10a (Transitous client, polite client,
+# live overlay + firstLegVerdict), m7c (hurry verdict + copy), m5a (tokens/primitives), m6a (LineBadge), m6b (station route)
 # and m4b (live context).
 source "$(dirname "$0")/lib.sh"
 cd "$(dirname "$0")/../.."
@@ -23,7 +24,7 @@ cd "$(dirname "$0")/../.."
 
 # ---- fixed card data (read by helpers; no gate sets them) ----
 
-# The card-wide universe of named jest cases (gates 8 and 10, plus the full-gate guard).
+# The card-wide universe of named jest cases (gates 8, 13 and 14, plus the full-gate guard).
 M10B_CASES=(
   'route options are sorted by arrival'
   'route option shows depart and arrive times, duration, transfers and walk minutes'
@@ -36,6 +37,7 @@ M10B_CASES=(
   'walk leg Directions shows the failure when openURL rejects'
   'transit leg shows its stations, line badge and Live or Scheduled'
   'unavailable routes offer Open in Apple Maps with dirflg=r'
+  'Trips tab empty state offers Plan a route linking /plan'
 )
 # The card's own modules: the guards in front of every repo-wide gate.
 M10B_FILES=(
@@ -45,6 +47,7 @@ M10B_FILES=(
   src/ui/routes/RouteOptionsList.tsx
   src/ui/routes/ItineraryDetail.tsx
   src/ui/routes/PlanUnavailable.tsx
+  src/ui/routes/recent-places.ts
 )
 M10B_TESTS=src/ui/routes/__tests__
 
@@ -114,6 +117,7 @@ NODE
 #   contains <entry> <ERE>             a non-test file in entry's closure (entry included) has text matching ERE
 #   links <entry> <href>               a non-test file in entry's closure, OTHER than the href's own route
 #                                      file, has a quoted href to <href> ('/plan', "/plan?…", `/plan?…`)
+#     (contains and links match CODE: comments are blanked first; strings, templates, JSX text stay)
 #   title <route> <expected>           the route's screen title is exactly <expected>: from a nameless
 #     <X.Screen options> in the route or a non-test .tsx it reaches, or <X.Screen name="<route>"> in an
 #     ancestor _layout.tsx (option values: literals, consts — same file or a named ./ ../ @/ import —,
@@ -314,6 +318,29 @@ function checkTitle(route, expected) {
   if (shown !== undefined && shown.keys.get('headerShown') !== true) fail(`${route}: headerShown resolves to ${JSON.stringify(shown.keys.get('headerShown'))} (set in ${shown.where}), so the ${JSON.stringify(expected)} title never shows — set headerShown: true on the route`);
   return `${route} shows the screen title ${JSON.stringify(expected)} (set in ${titled[0].where})`;
 }
+// The file's text with every comment blanked (same length, newlines kept) and every string, template and
+// JSX text left intact, so `contains` / `links` never count a comment. Every comment lies in the trivia
+// before some leaf token of the PARSED tree (the parser knows JSX context, unlike a bare scanner): TS
+// reports its same-line part as trailing ranges and its after-newline part as leading ranges, so both
+// are read. JSDoc subtrees and JsxText leaves (whose text may hold '//') are never read as trivia.
+// keepJsxText false (links) also blanks JSX display text: words on screen are not a navigation target.
+const JSDOC = (k) => k >= ts.SyntaxKind.FirstJSDocNode && k <= ts.SyntaxKind.LastJSDocNode;
+function codeText(abs, keepJsxText) {
+  const sf = sourceOf(abs);
+  const chars = sf.text.split('');
+  const blank = (from, to) => { for (let i = from; i < to; i += 1) { if (chars[i] !== '\n') chars[i] = ' '; } };
+  const stack = [sf];
+  for (let guard = 0; stack.length > 0 && guard < 1000000; guard += 1) {
+    const node = stack.pop();
+    const kids = node.getChildren(sf);
+    if (kids.length > 0) { for (const kid of kids) { if (!JSDOC(kid.kind)) stack.push(kid); } continue; }
+    if (node.kind === ts.SyntaxKind.JsxText) { if (!keepJsxText) blank(node.pos, node.end); continue; }
+    const ranges = [ts.getTrailingCommentRanges(sf.text, node.pos), ts.getLeadingCommentRanges(sf.text, node.pos)];
+    for (const range of ranges.flatMap((r) => r ?? [])) blank(range.pos, range.end);
+  }
+  if (stack.length > 0) fail(`${relPath(abs)} is too large to strip its comments`);
+  return chars.join('');
+}
 function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function main() {
   if (cmd === 'reaches') {
@@ -327,7 +354,7 @@ function main() {
     const [entry, pattern] = args;
     const re = new RegExp(pattern);
     const files = closureOf(needFile(entry)).filter((f) => !isTest(f));
-    const hit = files.find((f) => re.test(fs.readFileSync(absPath(f), 'utf8')));
+    const hit = files.find((f) => re.test(codeText(absPath(f), true)));
     if (hit === undefined) fail(`no non-test module reached from ${entry} contains /${pattern}/ (searched: ${files.join(', ')})`);
     return `${hit} (reached from ${entry}) contains /${pattern}/`;
   }
@@ -336,7 +363,7 @@ function main() {
     const target = `src/app${href}.tsx`;
     const re = new RegExp(`["'\`]${escapeRe(href)}(\\?[^"'\`]*)?["'\`]`);
     const files = closureOf(needFile(entry)).filter((f) => !isTest(f) && f !== target);
-    const hit = files.find((f) => re.test(fs.readFileSync(absPath(f), 'utf8')));
+    const hit = files.find((f) => re.test(codeText(absPath(f), false)));
     if (hit === undefined) fail(`nothing reached from ${entry} (tests and ${target} itself excluded) links to '${href}' — no entry point opens it (searched: ${files.join(', ')})`);
     return `${hit} (reached from ${entry}) links to '${href}'`;
   }
@@ -354,16 +381,22 @@ plan_reaches() { _m10b_graph reaches "$@" || return 1; }
 # plan_contains <entry> <ERE> — a non-test module the entry reaches (or the entry) contains ERE.
 plan_contains() { _m10b_graph contains "$@" || return 1; }
 
-# plan_entry_points — the plan's entry points open '/plan': the map tab (the Directions button) always;
-# the station sheet ("Route from here") and a saved trip (src/app/trip/[tripId].tsx) whenever those routes
-# exist in the tree. Guarded by the card's own route, so it cannot pass before the plan sheet exists.
+# plan_entry_points — the plan's entry points open '/plan': the map tab (the Directions button) and the
+# station sheet ("Route from here" on m6b's src/app/station/[stationKey].tsx, which lands before this card),
+# both unconditionally. The saved-trip entry point (src/app/trip/[tripId].tsx) is m7b's gate (ruling R4/R6:
+# m7b lands after this card). Guarded by the card's own route, so it cannot pass before the plan sheet exists.
 plan_entry_points() {
-  local route
   need_file src/app/plan.tsx || return 1
   _m10b_graph links "src/app/(tabs)/index.tsx" /plan || return 1
-  for route in "src/app/station/[stationKey].tsx" "src/app/trip/[tripId].tsx"; do
-    if [ -f "$route" ]; then _m10b_graph links "$route" /plan || return 1; fi
-  done
+  _m10b_graph links "src/app/station/[stationKey].tsx" /plan || return 1
+}
+
+# trips_empty_plans — the Trips tab is useful before saved trips land (ruling R6): its route's non-test
+# closure carries the "Plan a route" action text and links '/plan'. Guarded by the card's own route.
+trips_empty_plans() {
+  need_file src/app/plan.tsx || return 1
+  _m10b_graph contains "src/app/(tabs)/trips/index.tsx" 'Plan a route' || return 1
+  _m10b_graph links "src/app/(tabs)/trips/index.tsx" /plan || return 1
 }
 
 # hurry_chip_runs_engine <phrase> — runs the card's test dir UNFILTERED with a spy on every top-level
@@ -494,8 +527,112 @@ EOF
   echo "ratchet: leg-actions $check contract holds on the real module"
 }
 
+# recents_survive_reload — ruling R6: recent places persist through expo-sqlite/kv-store (the same ruling
+# as src/ui/settings/walking-pace.ts), never in module memory and never through m7a's settings-repo. An
+# oracle under the repo's own jest (independent of the builder's tests) drives the REAL
+# src/ui/routes/recent-places.ts over a labelled test-time mock of expo-sqlite/kv-store whose Map lives on
+# globalThis, so it survives jest.resetModules() the way the SQLite file survives an app reload:
+#   readRecentPlaces() on an empty store is []; recordRecentPlace(Brickell), (Government Center),
+#   (Brickell) each return ok; the store now holds something; then jest.resetModules() (the reload) and a
+#   fresh require: readRecentPlaces() names exactly [Brickell, Government Center] — newest first, no
+#   duplicate. A module-level array passes before the reload and fails after it.
+# The throwaway test lives in the gitignored .cache and is removed whether the check passes or fails.
+recents_survive_reload() {
+  local module=src/ui/routes/recent-places.ts dir out rc=0
+  need_file "$module" || return 1
+  dir="$PWD/.cache/ratchet-m10b-recents.$$.$RANDOM"
+  mkdir -p "$dir" || { echo "ratchet: cannot create $dir"; return 1; }
+  {
+    printf "const MODULE = '%s';\n" "$PWD/${module%.ts}"
+    cat <<'EOF'
+jest.mock('expo-sqlite/kv-store', () => { // test-time mock of native module
+  // One Map on globalThis backs every store (the default/Storage/AsyncStorage instance and any
+  // `new SQLiteStorage(db)`, namespaced by db), so any correct kv-store style persists across a reload.
+  const g = globalThis as any;
+  if (!(g.__ratchetKv instanceof Map)) g.__ratchetKv = new Map();
+  const map: Map<string, string> = g.__ratchetKv;
+  const makeStore = (db: string) => {
+    const k = (key: string) => (db === '' ? key : db + '\u0000' + key);
+    const own = () => [...map.keys()].filter((x) => (db === '' ? !x.includes('\u0000') : x.startsWith(db + '\u0000'))).map((x) => (db === '' ? x : x.slice(db.length + 1)));
+    const get = (key: string) => map.get(k(key)) ?? null;
+    const put = (key: string, value: any) => { map.set(k(key), typeof value === 'function' ? String(value(get(key))) : String(value)); };
+    const del = (key: string) => map.delete(k(key));
+    const clear = () => { for (const x of own()) map.delete(k(x)); return true; };
+    return {
+      getItemSync: get, setItemSync: put, removeItemSync: del, getAllKeysSync: own, clearSync: clear, getLengthSync: () => own().length,
+      getItemAsync: async (key: string) => get(key), setItemAsync: async (key: string, v: any) => put(key, v), removeItemAsync: async (key: string) => del(key),
+      getAllKeysAsync: async () => own(), clearAsync: async () => clear(), getLengthAsync: async () => own().length,
+      getItem: async (key: string) => get(key), setItem: async (key: string, v: any) => put(key, v), removeItem: async (key: string) => { del(key); },
+      getAllKeys: async () => own(), clear: async () => { clear(); },
+      mergeItem: async (key: string, v: any) => { const prev = get(key); put(key, prev === null ? v : JSON.stringify({ ...JSON.parse(prev), ...JSON.parse(String(v)) })); },
+      multiGet: async (keys: string[]) => keys.map((key) => [key, get(key)]),
+      multiSet: async (pairs: [string, any][]) => { for (const [key, v] of pairs) put(key, v); },
+      multiRemove: async (keys: string[]) => { for (const key of keys) del(key); },
+    };
+  };
+  const store = makeStore('');
+  class SQLiteStorage { constructor(db?: string) { Object.assign(this, makeStore(String(db ?? 'ExpoSQLiteStorage'))); } }
+  return { __esModule: true, default: store, Storage: store, AsyncStorage: store, SQLiteStorage };
+});
+const fail = (m: string): never => { throw new Error('ratchet-oracle: ' + m); };
+const BRICKELL = { name: 'Brickell', lat: 25.7584, lon: -80.1918 };
+const GOV = { name: 'Government Center', lat: 25.7743, lon: -80.1955 };
+function load(): Record<string, any> {
+  const m = require(MODULE);
+  for (const name of ['recordRecentPlace', 'readRecentPlaces']) {
+    if (typeof m[name] !== 'function') fail(`src/ui/routes/recent-places.ts exports no function ${name} (exports: ${Object.keys(m).join(', ') || 'none'})`);
+  }
+  return m;
+}
+async function names(m: Record<string, any>): Promise<string[]> {
+  const list: unknown = await m.readRecentPlaces();
+  if (!Array.isArray(list)) fail(`readRecentPlaces() returned ${JSON.stringify(list)}, not an array of places`);
+  return (list as any[]).map((p) => String(p?.name));
+}
+it('ratchet oracle recents survive a reload', async () => {
+  const g = globalThis as any;
+  g.__ratchetKv = new Map();
+  const first = load();
+  const empty = await names(first);
+  if (empty.length !== 0) fail(`readRecentPlaces() on an empty store gave ${JSON.stringify(empty)}, expected []`);
+  for (const place of [BRICKELL, GOV, BRICKELL]) {
+    const r: any = await first.recordRecentPlace(place);
+    if (r?.ok !== true) fail(`recordRecentPlace(${JSON.stringify(place)}) returned ${JSON.stringify(r)}, not ok`);
+  }
+  if (g.__ratchetKv.size === 0) fail('recordRecentPlace stored nothing in expo-sqlite/kv-store — recents must persist there (ruling R6)');
+  jest.resetModules();
+  const after = await names(load());
+  const want = ['Brickell', 'Government Center'];
+  if (JSON.stringify(after) !== JSON.stringify(want)) fail(`after a reload readRecentPlaces() names ${JSON.stringify(after)}, expected ${JSON.stringify(want)} (newest first, no duplicates, read back from expo-sqlite/kv-store)`);
+  // The list must come FROM the store: wipe the store and reload -> []; restore it and reload -> the list again.
+  // (A copy kept in module memory or on globalThis survives resetModules; this catches it.)
+  const snapshot = [...g.__ratchetKv.entries()];
+  g.__ratchetKv.clear();
+  jest.resetModules();
+  const wiped = await names(load());
+  if (wiped.length !== 0) fail(`with expo-sqlite/kv-store emptied, a reload still reads ${JSON.stringify(wiped)} — recents must be read from the kv-store, not from memory or globalThis`);
+  for (const [key, value] of snapshot) g.__ratchetKv.set(key, value);
+  jest.resetModules();
+  const restored = await names(load());
+  if (JSON.stringify(restored) !== JSON.stringify(want)) fail(`with expo-sqlite/kv-store restored, a reload reads ${JSON.stringify(restored)}, expected ${JSON.stringify(want)}`);
+  expect(after).toEqual(want);
+  expect(restored).toEqual(want);
+}, 120_000);
+EOF
+  } > "$dir/recents.oracle.test.ts" || { rm -rf "$dir"; echo "ratchet: cannot write the oracle test"; return 1; }
+  out=$(local_bin jest --ci --rootDir "$PWD" --roots "$dir" --testMatch '**/*.oracle.test.ts' 2>&1) || rc=$?
+  rm -rf "$dir"
+  if [ "$rc" -ne 0 ]; then
+    if echo "$out" | grep -q "ratchet-oracle:"; then echo "$out" | grep -m1 "ratchet-oracle:"; else echo "$out" | tail -25; fi
+    echo "ratchet: recent places do not survive a reload through expo-sqlite/kv-store"; return 1
+  fi
+  echo "$out" | grep -qE "Tests: +1 passed, 1 total" \
+    || { echo "$out" | tail -15; echo "ratchet: the recents oracle did not run"; return 1; }
+  echo "ratchet: recent places survive a reload through expo-sqlite/kv-store (newest first, no duplicates)"
+}
+
 # openurl_value_unread — no non-test card code binds or branches on the value openURL resolved with
-# (M1.19: RN Linking.openURL is Promise<void>; success = resolve, failure = reject). Gate 14's oracle
+# (M1.19: RN Linking.openURL is Promise<void>; success = resolve, failure = reject). Gate 18's oracle
 # catches a read the grep cannot see (resolving false must still be ok).
 openurl_value_unread() {
   local f hits rc=0
@@ -613,33 +750,41 @@ plan_contains src/app/plan.tsx 'geocodeAsync\('
 plan_contains src/app/plan.tsx 'Routes by Transitous'
 # 6. The attribution links exactly https://transitous.org/sources (a whole quoted literal; no other path).
 plan_contains src/app/plan.tsx "[\"'\`]https://transitous\.org/sources[\"'\`]"
-# 7. Entry points open '/plan': the map tab always; the station sheet and a saved trip whenever those routes exist.
+# 7. Entry points open '/plan': the map tab and the station sheet ("Route from here"), both unconditionally (the saved-trip entry point is m7b's gate).
 plan_entry_points
 # 8. M10b.1 A, one passing test each: sorted by arrival; row facts; first-leg hurry chip; Live badge; attribution footer; recent places.
 m10b_cases src/ui/routes/__tests__ 'route options are sorted by arrival' 'route option shows depart and arrive times, duration, transfers and walk minutes' 'route option shows the first leg hurry chip' 'route option with a live leg shows the Live badge' 'footer credits Routes by Transitous with a link to its sources' 'a planned destination goes first in recent places without duplicates'
 # 9. The hurry chip is the REAL verdict: m7c's src/domain/hurry/verdict.ts runs during the chip test (spied, unfiltered run).
 hurry_chip_runs_engine 'route option shows the first leg hurry chip'
+# 10. Ruling R6: plan.tsx reaches the card's recent-places module (the "To" field offers recent places).
+plan_reaches src/app/plan.tsx 'src/ui/routes/recent-places\.ts$'
+# 11. Ruling R6 oracle: recent places persist through expo-sqlite/kv-store and survive a reload (jest.resetModules + fresh require), newest first, no duplicates.
+recents_survive_reload
+# 12. Ruling R6: the Trips tab's empty state offers "Plan a route", and the Trips route's closure links '/plan'.
+trips_empty_plans
+# 13. Ruling R6, one passing test: the Trips tab's empty state offers Plan a route linking /plan.
+m10b_cases src/ui/routes/__tests__ 'Trips tab empty state offers Plan a route linking /plan'
 
 # --- M10b.2 Itinerary detail + directions ---------------------------------------------------------------
-# 10. M10b.2 A, one passing test each: walk Directions URL; openURL resolving undefined = opened; rejection shown; transit leg detail; unavailable -> Open in Apple Maps.
+# 14. M10b.2 A, one passing test each: walk Directions URL; openURL resolving undefined = opened; rejection shown; transit leg detail; unavailable -> Open in Apple Maps.
 m10b_cases src/ui/routes/__tests__ 'walk leg Directions opens Apple Maps walking with dirflg=w' 'walk leg Directions counts openURL resolving undefined as opened' 'walk leg Directions shows the failure when openURL rejects' 'transit leg shows its stations, line badge and Live or Scheduled' 'unavailable routes offer Open in Apple Maps with dirflg=r'
-# 11. The card's tests assert the exact values: the maps:// link, walk and transit modes, the attribution text and URL.
+# 15. The card's tests assert the exact values: the maps:// link, walk and transit modes, the attribution text and URL.
 need_lits src/ui/routes/__tests__ 'maps://?daddr=' '&dirflg=w' '&dirflg=r' 'https://transitous.org/sources' 'Routes by Transitous'
-# 12. Oracle: walkDirectionsUrl({lat: 25.7759, lon: -80.1961}) is exactly 'maps://?daddr=25.7759,-80.1961&dirflg=w'.
+# 16. Oracle: walkDirectionsUrl({lat: 25.7759, lon: -80.1961}) is exactly 'maps://?daddr=25.7759,-80.1961&dirflg=w'.
 leg_actions_oracle walk
-# 13. Oracle: transitDirectionsUrl({lat: 25.7759, lon: -80.1961}) is exactly 'maps://?daddr=25.7759,-80.1961&dirflg=r' (the unavailable fallback).
+# 17. Oracle: transitDirectionsUrl({lat: 25.7759, lon: -80.1961}) is exactly 'maps://?daddr=25.7759,-80.1961&dirflg=r' (the unavailable fallback).
 leg_actions_oracle transit
-# 14. Oracle (M1.19): openDirections treats ANY openURL resolution (undefined/false/true/null) as opened, and a rejection as an err naming the link, never a throw.
+# 18. Oracle (M1.19): openDirections treats ANY openURL resolution (undefined/false/true/null) as opened, and a rejection as an err naming the link, never a throw.
 leg_actions_oracle opener
-# 15. No non-test card code binds or branches on openURL's resolved value.
+# 19. No non-test card code binds or branches on openURL's resolved value.
 openurl_value_unread
-# 16. Every jest.mock in the card's tests is a labelled mock of a native module (no stubs of our own code).
+# 20. Every jest.mock in the card's tests is a labelled mock of a native module (no stubs of our own code).
 native_mocks_labelled src/ui/routes/__tests__
 
 # --- Repo-wide ------------------------------------------------------------------------------------------
-# 17. Guarded: the card's modules exist and all 11 named tests pass as their own tests, then tsc (app + scripts), eslint --max-warnings 0, standards, jest, node:test are green.
+# 21. Guarded: the card's modules exist and all 12 named tests pass as their own tests, then tsc (app + scripts), eslint --max-warnings 0, standards, jest, node:test are green.
 m10b_full_gate
-# 18. Guarded: Metro bundles the app for iOS on a tree-private cache, and the iOS JS (--no-bytecode) carries the ./plan.tsx route plus "Routes by Transitous", "Route options" and "https://transitous.org/sources" as whole quoted literals.
-m10b_bundle_carries 'Routes by Transitous' 'Route options' 'https://transitous.org/sources'
+# 22. Guarded: Metro bundles the app for iOS on a tree-private cache, and the iOS JS (--no-bytecode) carries the ./plan.tsx route plus "Routes by Transitous", "Route options", "https://transitous.org/sources" and the Trips tab's "Plan a route" as whole quoted literals (Metro strips comments, so gate 12's text must really ship).
+m10b_bundle_carries 'Routes by Transitous' 'Route options' 'https://transitous.org/sources' 'Plan a route'
 
-echo "m10b_routes_ui: all 18 gates green"
+echo "m10b_routes_ui: all 22 gates green"

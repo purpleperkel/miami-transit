@@ -386,6 +386,24 @@ describe('LivePoller (mfix10 fix rounds 5 and 6): leaving the foreground', () =>
   });
 });
 
+describe('LivePoller (mfix10 review of round 6): a key change during a pause', () => {
+  it('a key pasted while a paused poll is still out wins: its task starts over at once with the new key', async () => {
+    const h = new Harness();
+    h.keys.swiftly = true;
+    h.swiftly.hold = true;
+    await h.step(0); // Swiftly's vehicles poll starts at 0 and hangs
+    expect(callTimes(h.swiftly)).toEqual([0]);
+    h.poller.pauseAll(); // the app leaves the foreground: a paused poll alone would be due a cadence after 0
+    h.poller.credentialsChanged('swiftly'); // then a new key is pasted before that poll's end lands
+    h.swiftly.release();
+    await settle();
+    [h.swiftly.hold, h.now] = [false, T0 + 5];
+    h.poller.resume();
+    await h.step(10);
+    expect(callTimes(h.swiftly)).toEqual([0, 5]); // the era check runs first: started over at 5, not 30
+  });
+});
+
 describe('LivePoller (mfix10 fix round 6): a floor-wait', () => {
   it('a floor-wait records nothing and leaves the last error as it was; its task is due when the floor ends, its failures kept', async () => {
     const h = new Harness();

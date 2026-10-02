@@ -306,3 +306,18 @@ describe('none provider (M4.9)', () => {
     expect(results.map((r) => !r.ok && r.error.kind)).toEqual(['no-key', 'no-key']);
   });
 });
+
+describe('Swiftly provider (mfix10 review of round 6): only a failure the abort caused is a floor-wait', () => {
+  it('a 503 that arrived before the abort is still a failure to share, not a floor-wait', async () => {
+    const caller = new AbortController();
+    const base = providerDeps(new FakeServer({}));
+    const status503 = { kind: 'http' as const, status: 503, message: 'api.goswift.ly answered HTTP 503' };
+    // The 503's status line came back; then the app left the foreground while the body was still being read.
+    const deps = { ...base, get: () => { caller.abort(); return Promise.resolve({ ok: false as const, error: status503 }); } };
+    const provider = createSwiftlyProvider(deps);
+    expect(await provider.fetchVehicles(caller.signal)).toEqual({ ok: false, error: status503 }); // the starter gets it as it came
+    advance(deps.clock, 5);
+    expect(await provider.fetchVehicles(signal())).toEqual({ ok: false, error: { ...status503, reused: true } }); // shared as a failure (R3 backs off), never a floor-wait
+  });
+});
+

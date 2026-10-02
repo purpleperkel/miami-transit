@@ -157,7 +157,7 @@ class SwiftlyProvider implements SwiftlyLiveProvider {
 
   /**
    * One request, metered against the quota before it is sent, its body mapped to a batch. A request that
-   * fails while its signal has aborted ended ABORTED (http.ts reads it as a cancelled timeout): it
+   * fails BECAUSE its signal aborted (no HTTP status came back first) ended ABORTED (http.ts reads it as a cancelled timeout): it
    * brought no answer, which is what a fetch sharing it is told (handOut: a floor-wait, U2).
    */
   private async download<T>(request: LiveRequest, signal: AbortSignal, map: (body: HttpBody) => LiveResult<T>): Promise<Downloaded<T>> {
@@ -165,7 +165,9 @@ class SwiftlyProvider implements SwiftlyLiveProvider {
     invariant(!signal.aborted, 'a download starts under a live runtime');
     this.deps.recordCall('swiftly');
     const body = await this.deps.get(request, signal);
-    const ended: Downloaded<T> = body.ok ? { result: map(body.value), aborted: false } : { result: body, aborted: signal.aborted };
+    // ABORTED only when the abort caused the failure: an HTTP status that arrived before it is an answer (a reused 503
+    // backs off, R3), whatever the abort did to the body read after it.
+    const ended: Downloaded<T> = body.ok ? { result: map(body.value), aborted: false } : { result: body, aborted: signal.aborted && body.error.kind !== 'http' };
     invariant(!ended.aborted || !ended.result.ok, 'only a failed request can have been aborted: an answer that arrived is an answer');
     return ended;
   }

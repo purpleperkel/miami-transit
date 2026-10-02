@@ -1,12 +1,13 @@
 import { useIsFocused } from 'expo-router';
 import { type Dispatch, type RefObject, type SetStateAction, useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, AppState } from 'react-native';
+import { AccessibilityInfo } from 'react-native';
 
 import type { TimetableOutcome } from '@/data/schedule-repo';
 import type { LiveBatch, LiveVehicle } from '@/domain/live/types';
 import { invariant } from '@/lib/invariant';
 import { detach } from '@/live/detach';
 
+import { useAppActive } from '../use-app-active';
 import { type MarkerLanes, NO_LANES } from './markerLanes';
 import { tickPlan } from './tickPlan';
 import { recordTickTime } from './tickTime';
@@ -120,18 +121,6 @@ export function useFrameTick(): FrameTick {
   const tickMs = tickPlan({ appActive, mapFocused, reduceMotion });
   invariant(tickMs >= 0, 'a tick period is never negative');
   return { tickMs, reduceMotion };
-}
-
-/** Whether the app is in the foreground (AppState 'active'), following every change. */
-function useAppActive(): boolean {
-  const [active, setActive] = useState(AppState.currentState === 'active');
-  invariant(typeof AppState.addEventListener === 'function', 'React Native provides AppState');
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', (state) => setActive(state === 'active'));
-    return () => subscription.remove();
-  }, []);
-  invariant(typeof active === 'boolean', 'the app is active or not');
-  return active;
 }
 
 /**

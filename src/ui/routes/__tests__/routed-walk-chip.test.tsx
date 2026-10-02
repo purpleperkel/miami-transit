@@ -6,7 +6,8 @@ import { act } from 'react-test-renderer';
 
 import { SCHEDULE_DB_NAME, ScheduleDbProvider } from '../../../data/schedule-db-provider';
 import fixture from '../../../domain/routes/__fixtures__/transitous-plan.json';
-import { type WalkCache, walkFor, type WalkStop } from '../../../domain/walk/walk-cache';
+import type { Itinerary, Leg } from '../../../domain/routes/transitous';
+import { mergeWalks, type WalkCache, walkFor, walkKey } from '../../../domain/walk/walk-cache';
 import { haversineMeters, type LatLon } from '../../../lib/geo';
 import { hurryShort } from '../../hurry/copy';
 import { UserLocationProvider } from '../../location/UserLocationProvider';
@@ -101,10 +102,13 @@ function southOfStart(metres: number): LatLon {
 
 /** The chips' walk from `rider` over `cache` (what the provider's useWalkTo gives): walkFor to each first-ride stop. */
 function walkFrom(rider: LatLon, cache: WalkCache | null): NonNullable<OptionContext['walk']> {
-  const stops = new Map(firstRideStops(fixtureItineraries()).map((stop) => [stop.stopId, stop]));
-  expect([...stops.keys()].sort()).toEqual(['813', '9512']);
-  expect(cache === null || cache.paths.size === stops.size).toBe(true);
-  return (stopId) => walkFor(cache, stops.get(stopId) as WalkStop, rider);
+  const stops = firstRideStops(fixtureItineraries());
+  expect(stops.map((stop) => stop.stopId).sort()).toEqual(['813', '9512']);
+  expect(cache === null || stops.every((stop) => cache.entries.has(walkKey(stop)))).toBe(true);
+  return (stop) => {
+    expect(stops.map(walkKey)).toContain(walkKey(stop));
+    return walkFor(cache, stop, rider);
+  };
 }
 
 /** Every option's chip, in arrival order, for `context`. */
@@ -120,7 +124,7 @@ function doubledCache(rider: LatLon, requestedAtS: number): WalkCache {
   const stops = firstRideStops(fixtureItineraries());
   expect(stops.length).toBe(2);
   expect(Number.isFinite(requestedAtS)).toBe(true);
-  return { origin: rider, requestedAtS, paths: new Map(stops.map((stop) => [stop.stopId, { distanceM: 2 * haversineMeters(rider, stop), costS: 1 }])) };
+  return mergeWalks(null, { origin: rider, requestedAtS, stops, paths: stops.map((stop) => ({ distanceM: 2 * haversineMeters(rider, stop), costS: 1 })) });
 }
 
 describe('the route chip off the plan start (mfix9)', () => {
@@ -141,6 +145,29 @@ describe('the route chip off the plan start (mfix9)', () => {
     expect(chips({ position: START, nowS: ASKED_AT_S, pace: PACE, walk: walkFrom(START, doubledCache(START, ASKED_AT_S)) })).toEqual(atStart);
     // Option 0 boards the 2:06 Mover after the 324 m Transitous routed for its first walk leg.
     expect(atStart[0]).toBe('Chill · 1 min spare');
+  });
+});
+
+/** Option 0 with its first walk split in two, the second half without a distance: no whole routed sum before the ride. */
+function partlyRoutedFirstWalk(): { readonly itinerary: Itinerary; readonly boarding: LatLon } {
+  const base = fixtureItineraries()[0] as Itinerary;
+  const [walk, ride, ...rest] = base.legs as [Leg, Leg, ...Leg[]];
+  const mid = { ...walk.to, stopId: null, latitude: (walk.from.latitude + walk.to.latitude) / 2, longitude: (walk.from.longitude + walk.to.longitude) / 2 };
+  const legs = [{ ...walk, to: mid, distanceM: 162 }, { ...walk, from: mid, distanceM: null }, ride, ...rest];
+  expect([walk.mode, walk.distanceM, ride.tripId === null]).toEqual(['WALK', 324, false]);
+  expect(haversineMeters(START, walk.from)).toBeLessThanOrEqual(CHIP_ROUTED_START_M);
+  return { itinerary: { ...base, legs }, boarding: ride.from };
+}
+
+describe('the route chip at the plan start (mfix9 fix round, arbiter Q4)', () => {
+  it('at the plan start a first walk missing a leg distance walks the boarding stop\'s routed walk', () => {
+    const { itinerary, boarding } = partlyRoutedFirstWalk();
+    const walk = walkFrom(START, doubledCache(START, ASKED_AT_S));
+    const [routed] = routeOptions([itinerary], FIXTURE_NETWORK, { position: START, nowS: ASKED_AT_S, pace: PACE, walk });
+    // Not the partial 162 m, nor the straight line x 1.3: walkFor's routed walk to the boarding stop (2x the straight line).
+    expect(routed?.verdict?.walkS).toBeCloseTo((2 * haversineMeters(START, boarding)) / PACE.walkMps, 9);
+    const [plain] = routeOptions([itinerary], FIXTURE_NETWORK, { position: START, nowS: ASKED_AT_S, pace: PACE });
+    expect(plain?.verdict?.walkS).toBeCloseTo((haversineMeters(START, boarding) * 1.3) / PACE.walkMps, 9);
   });
 });
 

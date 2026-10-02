@@ -22,14 +22,14 @@ import { transitousUserAgent } from '../routes/transitous';
  *   why the fixture's Riverwalk reads 292.7 m for a "duration" of 519 s (0.56 m/s). So it is kept as `costS`, and
  *   the app walks `distanceM` at the rider's own pace.
  *
- * Neither function throws on what it is handed: a request that cannot be made, or an answer that is not a list of
- * walks, is an Err.
+ * Neither function throws on what it is handed: a request that cannot be made, an answer read for a count of targets
+ * no request carries, or an answer that is not a list of walks, is an Err.
  */
 
 export const WALK_ROUTER_URL = 'https://api.transitous.org/api/v1/one-to-many';
 /** The server's maxOneToManySize: a request carries at most this many targets. */
 export const WALK_MAX_TARGETS = 128;
-/** The longest walk asked for, in the router's cost seconds (an hour on foot). */
+/** The router's cost budget in seconds (MOTIS's `max`): a target whose cheapest walk costs more answers {} (no walk). */
 export const WALK_MAX_S = 3600;
 /** How far (metres) a coordinate may lie from the street network and still be matched to it. */
 export const WALK_MATCH_M = 250;
@@ -88,42 +88,38 @@ function pointText(point: LatLon): string {
   return text;
 }
 
-/** The answer to a request with `n` targets: per target, in order, its WalkPath (null: no walk); an Err for anything else. */
+/** The keys a walk answers with: exactly these two (withDistance=true), or none at all ({}: no walk). */
+const WALK_KEYS = 'distance,duration';
+
+/**
+ * The answer to a request with `n` targets: per target, in order, its WalkPath (null: no walk); an Err for anything else.
+ * It reads each walk's DISTANCE (metres along the streets) and its COST (the router's `duration`, a preference score),
+ * never a time: the app walks the distance at the rider's own pace. Never throws, whatever `json` and `n` are.
+ */
 export function parseWalkTimes(json: unknown, n: number): Result<readonly (WalkPath | null)[], WalkClientError> {
-  invariant(Number.isSafeInteger(n) && n >= 1 && n <= WALK_MAX_TARGETS, `an answer is read for the 1 to ${WALK_MAX_TARGETS} targets asked for, got ${n}`);
-  if (!Array.isArray(json)) {
-    return err({ kind: 'malformed', message: `the body is ${json === null ? 'null' : typeof json}, not a list of walks` });
+  if (!Number.isSafeInteger(n) || n < 1 || n > WALK_MAX_TARGETS) {
+    return err({ kind: 'malformed', message: `an answer is read for the 1 to ${WALK_MAX_TARGETS} targets a request carries, got ${n}` });
+  }
+  if (!Array.isArray(json) || json.length !== n) {
+    return err({ kind: 'malformed', message: Array.isArray(json) ? `the body holds ${json.length} walks for ${n} targets` : `the body is ${json === null ? 'null' : typeof json}, not a list of walks` });
   }
   const entries: readonly unknown[] = json;
-  if (entries.length !== n) {
-    return err({ kind: 'malformed', message: `the body holds ${entries.length} walks for ${n} targets` });
-  }
   const paths: (WalkPath | null)[] = [];
   for (const [i, entry] of entries.entries()) {
-    const path = walkPathOf(entry, i);
-    if (!path.ok) {
-      return err({ kind: 'malformed', message: path.error });
+    const record = entry !== null && typeof entry === 'object' && !Array.isArray(entry) ? (entry as Readonly<Record<string, unknown>>) : null;
+    const keys = record === null ? null : Object.keys(record).sort().join(',');
+    const distance = keys === WALK_KEYS ? record?.distance : undefined;
+    const duration = keys === WALK_KEYS ? record?.duration : undefined;
+    if (keys === '') {
+      paths.push(null);
+    } else if (typeof distance === 'number' && typeof duration === 'number' && Number.isFinite(distance) && Number.isFinite(duration) && distance >= 0 && duration >= 0) {
+      paths.push({ distanceM: distance, costS: duration });
+    } else {
+      const got = record === null ? (Array.isArray(entry) ? 'a list' : String(entry)) : `{${keys ?? ''}} with distance ${String(record.distance)}, duration ${String(record.duration)}`;
+      return err({ kind: 'malformed', message: `walk ${i}: want {} or exactly a finite, non-negative {duration, distance}, got ${got}` });
     }
-    paths.push(path.value);
   }
-  invariant(paths.length === n, 'one walk, or none, per target asked for');
+  invariant(paths.every((path, i) => (path === null) === (Object.keys(entries[i] as object).length === 0)), 'exactly the {} entries are targets no walk reaches');
+  invariant(paths.length === n, `one walk, or none, for each of the ${n} targets, in order`);
   return ok(paths);
-}
-
-/** Entry `i`: {} is no walk (null); a finite, non-negative distance AND duration is a WalkPath; anything else says why not. */
-function walkPathOf(entry: unknown, i: number): Result<WalkPath | null, string> {
-  invariant(Number.isSafeInteger(i) && i >= 0 && i < WALK_MAX_TARGETS, `an entry answers one of at most ${WALK_MAX_TARGETS} targets, got index ${i}`);
-  const record = entry !== null && typeof entry === 'object' && !Array.isArray(entry) ? (entry as Readonly<Record<string, unknown>>) : null;
-  if (record === null) {
-    return err(`walk ${i}: want {} or {duration, distance}, got ${JSON.stringify(entry) ?? typeof entry}`);
-  }
-  if (Object.keys(record).length === 0) {
-    return ok(null);
-  }
-  const { distance, duration } = record;
-  if (typeof distance !== 'number' || typeof duration !== 'number' || !Number.isFinite(distance) || !Number.isFinite(duration) || distance < 0 || duration < 0) {
-    return err(`walk ${i}: want a finite, non-negative distance and duration, got distance ${String(distance)}, duration ${String(duration)}`);
-  }
-  invariant(Object.keys(record).length >= 2, 'a walk answers with its distance AND its routing cost (a duration alone is an Err)');
-  return ok({ distanceM: distance, costS: duration });
 }

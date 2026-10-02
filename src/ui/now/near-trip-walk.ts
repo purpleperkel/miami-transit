@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 
 import { useScheduleDb } from '@/data/schedule-db-provider';
 import type { Platform } from '@/domain/hurry/platform';
-import type { WalkEstimate } from '@/domain/walk/walk-cache';
+import type { WalkTo } from '@/domain/walk/walk-cache';
 import { invariant } from '@/lib/invariant';
 
 import { useWalkTo } from '../walk/RoutedWalkProvider';
@@ -18,13 +18,13 @@ import type { HomeContext } from './homeContext';
 
 const NO_PLATFORMS: readonly Platform[] = Object.freeze([]);
 
-export function useNearTripWalk(context: HomeContext): (stopId: string) => WalkEstimate {
+export function useNearTripWalk(context: HomeContext): WalkTo {
   const db = useScheduleDb();
   const repo = db.kind === 'ready' ? db.repo : null;
   const from = context.kind === 'nearTrip' ? context.card.trip.fromStationKey : null;
   const origin = useMemo(() => (repo === null || from === null ? NO_PLATFORMS : repo.platforms().filter((platform) => platform.stationKey === from)), [repo, from]);
   const walk = useWalkTo(origin);
   invariant(from === null || from.includes(':'), `a trip leaves from a station keyed mode:name, got "${from}"`);
-  invariant(origin.every((platform) => platform.stationKey === from), 'the bar walks only to its near trip\'s origin');
+  invariant(context.kind !== 'nearTrip' || repo === null || origin.length > 0, 'a near trip\'s origin has platforms to walk to (homeContext judged it near by one)');
   return walk;
 }

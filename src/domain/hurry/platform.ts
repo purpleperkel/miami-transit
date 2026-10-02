@@ -7,8 +7,9 @@ import { invariant } from '../../lib/invariant';
  * trains stop there: a rail platform serves one direction, but a Metromover stop can serve BOTH (stop 813
  * at Government Center lists 0 and 1), so `directionIds` is a list.
  *
- * `walkMeters` is the STRAIGHT-LINE (haversine) distance; the verdict applies the detour factor itself
- * (verdict.ts), so the walk is never padded twice. Pure.
+ * `walkMeters` is the STRAIGHT-LINE (haversine) distance, which picks the nearest platform. It is never padded here: a
+ * verdict walks the street-routed metres to that platform when the app knows them (mfix9, detour 1), else this straight
+ * line with the engine's own detour factor (verdict.ts). Pure.
  */
 
 export type Platform = {

@@ -6,9 +6,9 @@ import { invariant } from '../../lib/invariant';
  * first, each with its walking distance; without one, the order the stations came in (the list's
  * line-then-name order), identical on every call, with no distance.
  *
- * `walkingMeters` is the STRAIGHT-LINE distance to the station — the same walkMeters the hurry engine
- * takes (plan M7c.1), which applies its own detour factor to turn it into a walk time. Ties keep the
- * input order (a stable sort), so equal distances never reshuffle between calls.
+ * `walkingMeters` is the STRAIGHT-LINE distance to the station: it orders the list and is never a walk time
+ * (the hurry engine walks street-routed metres when the app knows them, mfix9, else the straight line with its
+ * own detour factor). Ties keep the input order (a stable sort), so equal distances never reshuffle between calls.
  */
 
 export type OrderedStation<S> = { readonly station: S; readonly walkingMeters: number | null };

@@ -90,3 +90,23 @@ describe('parseWalkTimes', () => {
     expect(parseWalkTimes([{}, { duration: 5 }], 2)).toEqual({ ok: false, error: { kind: 'malformed', message: expect.stringContaining('walk 1:') } });
   });
 });
+
+describe('parseWalkTimes never throws', () => {
+  it('reads an answer for a count of targets no request carries as an Err, never a throw', () => {
+    const counts = [0, -1, WALK_MAX_TARGETS + 1, 2.5, Number.NaN, Number.POSITIVE_INFINITY];
+    const read = counts.map((n) => parseWalkTimes([], n));
+    expect(read.map((r) => (r.ok ? 'ok' : r.error.kind))).toEqual(counts.map(() => 'malformed'));
+    expect(read.map((r) => (r.ok ? '' : r.error.message))).toEqual(counts.map((n) => `an answer is read for the 1 to 128 targets a request carries, got ${n}`));
+  });
+
+  it('refuses a walk with any key besides its distance and duration, and still reads {} as no walk', () => {
+    const extra = [{ duration: 519, distance: 292.7, geometry: 'kv}oC~dbiN' }, { distance: 292.7, duration: 519, steps: [] }, { error: 'no route' }];
+    const kinds = extra.map((entry) => parseWalkTimes([{}, entry], 2)).map((r) => (r.ok ? 'ok' : r.error.message));
+    expect(kinds).toEqual([
+      'walk 1: want {} or exactly a finite, non-negative {duration, distance}, got {distance,duration,geometry} with distance 292.7, duration 519',
+      'walk 1: want {} or exactly a finite, non-negative {duration, distance}, got {distance,duration,steps} with distance 292.7, duration 519',
+      'walk 1: want {} or exactly a finite, non-negative {duration, distance}, got {error} with distance undefined, duration undefined',
+    ]);
+    expect(parseWalkTimes([{}, { distance: 292.7, duration: 519 }], 2)).toEqual({ ok: true, value: [null, { distanceM: 292.7, costS: 519 }] });
+  });
+});

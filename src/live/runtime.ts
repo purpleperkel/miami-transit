@@ -206,8 +206,12 @@ export class LiveRuntime {
     this.emit();
   }
 
-  /** A bug surfaced by a detached task: kept in the state, so it shows in every build. */
-  private reportBug(message: string): void {
+  /**
+   * A bug surfaced by a detached task (detach.ts): kept in the state as internalError, so it shows in every build. The
+   * app's other detached work reports here too — the routed-walk runtime (src/ui/walk/RoutedWalkProvider.tsx) — so a
+   * bug has one channel.
+   */
+  reportBug(message: string): void {
     invariant(message.length > 0, 'a bug report says what broke');
     this.internalError = message;
     invariant(this.internalError === message, 'the latest bug is the one reported');

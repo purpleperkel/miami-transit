@@ -6,6 +6,7 @@ import { invariant } from '../../lib/invariant';
  * the app, the Mac scripts and the verify gate's plain-node calls all run this exact module.
  *
  *   walkS = walkMeters × detour / walkMps      jogS = walkMeters × detour / jogMps
+ *   (walkMeters: routed street metres with detour 1, or straight-line metres with the default detour — mfix9)
  *   slack(d) = d.epoch − now − boardBufferS     (time left for the walk, keeping a moment to board)
  *
  * Judging the first departure d1:
@@ -67,7 +68,10 @@ export type HurryVerdict = {
 export type HurryInput = {
   /** Now, epoch s. */
   readonly now: number;
-  /** Straight-line metres to the platform; the detour factor turns it into a walking distance. */
+  /**
+   * Metres to the platform: routed street metres (detour 1) or straight-line metres (× detour). mfix9: a verdict walks
+   * Transitous's street-routed distance when the app knows one, else the straight line with the default detour.
+   */
   readonly walkMeters: number;
   /** Sorted by epoch. */
   readonly departures: readonly HurryDeparture[];

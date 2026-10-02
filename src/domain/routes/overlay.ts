@@ -36,8 +36,9 @@ import type { ConnectionRisk, Itinerary, Leg } from './transitous';
  * may opt in to the ROUTED walk instead — the metres Transitous routed for the walk legs before the first
  * ride, with no detour, since they already follow the streets. Opted in without a routed distance (no walk
  * leg before the ride, or one without distanceM), the straight line stands. mfix9: a caller may instead hand in
- * the walk it resolved itself (a FirstLegWalk) — the route chip off the plan start, whose walk is Transitous's
- * one-to-many street walk from the rider to the boarding stop, or that walk's straight-line estimate.
+ * the walk it resolved itself (a FirstLegWalk) — the route chip whenever no whole routed first walk applies, whose walk
+ * is Transitous's one-to-many street walk from the rider to the boarding stop (routed metres, detour 1), or that walk's
+ * straight-line estimate (× the detour).
  */
 
 /** Transitous's trip id prefix: the service day, the trip's first departure, the feed. */
@@ -170,12 +171,24 @@ export function firstLegVerdict(itinerary: Itinerary, position: LatLon, now: num
     return null;
   }
   const stop: LatLon = { latitude: leg.from.latitude, longitude: leg.from.longitude };
-  const routed = walk === true ? routedWalkMeters(itinerary.legs.slice(0, first)) : null;
+  const routed = walk === true ? routedFirstWalkMeters(itinerary) : null;
   const walked = typeof walk === 'object' ? walk : routed === null ? { walkMeters: haversineMeters(position, stop) } : { walkMeters: routed, detour: 1 };
   const departure: HurryDeparture = { epoch: leg.from.epoch, live: leg.live, lineId: leg.routeShortName, headsign: leg.headsign };
   const verdict = hurryVerdict({ ...pace, now, ...walked, departures: [departure] });
   invariant(verdict.departure === null || verdict.departure.epoch === leg.from.epoch, 'the verdict is about the boarding departure of the first leg');
   return verdict;
+}
+
+/**
+ * mfix8's routed first walk: the metres Transitous routed for the walk legs before the itinerary's first ride; null when
+ * it rides nothing, has no walk leg before the ride, or one of them carries no distanceM (then no routed sum is whole).
+ */
+export function routedFirstWalkMeters(itinerary: Itinerary): number | null {
+  invariant(itinerary.legs.length > 0, 'an itinerary has legs');
+  const first = itinerary.legs.findIndex((leg) => leg.tripId !== null);
+  const meters = first < 0 ? null : routedWalkMeters(itinerary.legs.slice(0, first));
+  invariant(meters === null || itinerary.legs.slice(0, first).some((leg) => leg.mode === 'WALK'), 'a routed first walk is walked before a ride');
+  return meters;
 }
 
 /** The routed metres of the walk legs before the first ride; null with no walk leg, or one Transitous gave no distance. */

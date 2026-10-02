@@ -34,8 +34,8 @@ import { type OriginState, type PlanState, useChipPosition, useLiveOptions, useP
  * option's legs are open (the rider may be on that train) — and the hurry chips walk from the rider's freshest
  * fix. For "Route from here", whose plan starts at the station, that is the location module's whenever it has
  * one; for a plan from the rider's own location (mfix8), whose start is the one fix taken when the sheet opened,
- * it is the location module's once that is newer than the sheet's own. mfix9: off the itinerary's start, a chip
- * walking from the rider's fix walks the street-routed walk to its first ride's boarding stop (useChipWalk).
+ * it is the location module's once that is newer than the sheet's own. mfix9: a chip walking from the rider's fix walks
+ * the street-routed walk to its first ride's boarding stop (useChipWalk) whenever no whole routed first walk applies.
  *
  *   PlanScreen (schedule DB, location, Transitous, live runtime, clock) → PlanBody (props only)
  */
@@ -104,10 +104,10 @@ export function PlanScreen({ fromStation }: PlanScreenProps) {
 }
 
 /**
- * mfix9: the walk the chips take OFF the itinerary's start (route-options.ts OptionContext.walk). The first rides'
- * boarding stops are registered with the app's RoutedWalkProvider (useWalkTo) for EVERY plan while the rider has a
- * fix — "Route from here" and a plan from the rider's own location alike (mfix8 F2) — and never without one. Those
- * walks are measured from the rider's fix, so a chip takes them only while it walks from that very fix
+ * mfix9: the walk the chips take whenever no whole routed first walk applies (route-options.ts OptionContext.walk). The
+ * first rides' boarding stops are registered with the app's RoutedWalkProvider (useWalkTo) for EVERY plan while the
+ * rider has a fix — "Route from here" and a plan from the rider's own location alike (mfix8 F2) — and never without one.
+ * Those walks are measured from the rider's fix, so a chip takes them only while it walks from that very fix
  * (useChipPosition); one walking from the plan's start (no watch fix newer than the sheet's own) keeps the straight line.
  */
 function useChipWalk(itineraries: readonly Itinerary[], chipFrom: LatLon | null): OptionContext['walk'] | null {
@@ -116,7 +116,7 @@ function useChipWalk(itineraries: readonly Itinerary[], chipFrom: LatLon | null)
   const stops = useMemo(() => (located ? firstRideStops(itineraries) : NO_STOPS), [located, itineraries]);
   const walk = useWalkTo(stops);
   const fromRider = rider !== null && chipFrom !== null && rider.latitude === chipFrom.latitude && rider.longitude === chipFrom.longitude;
-  invariant(located || stops.length === 0, 'without a fix no boarding stop is asked for');
+  invariant(itineraries.every((itinerary) => itinerary.legs.length > 0), 'every itinerary has legs, so each has a start the chips can walk from');
   invariant(!located || chipFrom !== null, 'a located rider always has somewhere the chips walk from');
   return fromRider ? walk : null;
 }

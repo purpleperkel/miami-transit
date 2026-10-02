@@ -12,7 +12,8 @@ import type { FetchFn, FetchResponseLike } from '@/live/http';
  *
  *   a status outside 200–299                     → { kind: 'http', status }
  *   fetch or the body read rejects               → { kind: 'network' }
- *   the timer fired, or the provider cancelled   → { kind: 'timeout' }
+ *   the provider cancelled (it has gone)         → { kind: 'network', message: 'cancelled' }
+ *   the timer fired                              → { kind: 'timeout' }
  *   a 2xx body that is not JSON                  → { kind: 'decode' }
  */
 
@@ -54,8 +55,8 @@ function walkTimer(outer: AbortSignal): WalkTimer {
     controller.abort();
   }, WALK_TIMEOUT_MS);
   const forward = { handleEvent: () => controller.abort() };
+  invariant(typeof outer.addEventListener === 'function', 'the provider\'s signal can be followed, so its cancel reaches the exchange');
   outer.addEventListener('abort', forward);
-  invariant(!controller.signal.aborted, 'the exchange starts un-aborted');
   return {
     signal: controller.signal,
     timedOut: () => state.timedOut,
@@ -79,15 +80,18 @@ async function bodyJson(response: FetchResponseLike, host: string): Promise<Resu
   }
 }
 
-/** A rejected fetch or body read: our timer fired, or the provider cancelled → timeout; anything else → network. */
+/**
+ * A rejected fetch or body read: our timer fired → timeout; the provider cancelled → network 'cancelled' (nobody waits
+ * for the answer any more); anything else → network, with the reason.
+ */
 function failureOf(error: unknown, host: string, timer: WalkTimer, outer: AbortSignal): LiveError {
-  invariant(error !== undefined, 'a rejection carries a reason');
+  invariant(host.length > 0, 'a failure names the host that failed');
   const reason = error instanceof Error ? error.message : String(error);
   const failure: LiveError = timer.timedOut()
     ? { kind: 'timeout', message: `${host} did not answer within ${WALK_TIMEOUT_MS / 1000} s` }
     : outer.aborted
-      ? { kind: 'timeout', message: `the walk request to ${host} was cancelled before it finished` }
+      ? { kind: 'network', message: 'cancelled' }
       : { kind: 'network', message: `${host} could not be reached: ${reason}` };
-  invariant(failure.kind !== 'network' || !timer.signal.aborted, 'a network failure is never one our own abort caused');
+  invariant(!(timer.timedOut() || outer.aborted) || timer.signal.aborted, 'our timer and the provider\'s cancel both end the exchange through its own signal');
   return failure;
 }

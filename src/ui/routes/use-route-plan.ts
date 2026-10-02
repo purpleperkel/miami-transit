@@ -188,8 +188,8 @@ function replanIfLeft(watched: { current: Watched | null }, itineraries: readonl
  * accuracy: its latest fix may be older than the sheet's and off the plan's start by up to that much plus the jitter,
  * for a rider who has not moved (enough, past CHIP_ROUTED_START_M, to drop the routed walk). So the watch's fix wins only once it was taken AFTER the sheet's (mfix8). Without a
  * fix the chip walks from the plan's start. That is what lets route-options.ts keep the routed first walk while
- * the rider is within CHIP_ROUTED_START_M of the itinerary's start, and fall back to the straight line from the
- * rider once they have walked off.
+ * the rider is within CHIP_ROUTED_START_M of the itinerary's start, and walk from the rider once they have walked
+ * off: the street-routed walk to the boarding stop when the app knows one (mfix9), else the straight line.
  */
 export function useChipPosition(start: PlanOrigin | null): LatLon | null {
   const rider = useUserPosition();

@@ -1,3 +1,4 @@
+import { transitousUserAgent } from '../../../domain/routes/transitous';
 import type { FetchFn, HttpInit } from '../../../live/http';
 import { fetchWalkJson, WALK_TIMEOUT_MS, type WalkGet } from '../walk-fetch';
 
@@ -8,7 +9,7 @@ import { fetchWalkJson, WALK_TIMEOUT_MS, type WalkGet } from '../walk-fetch';
 
 const REQUEST: WalkGet = {
   url: 'https://api.transitous.org/api/v1/one-to-many?one=25.772024;-80.193508&many=25.769165;-80.192248&mode=WALK&max=3600&maxMatchingDistance=250&arriveBy=false&withDistance=true',
-  headers: { 'User-Agent': 'MiamiTransit/1.0.0 (+https://github.com/purpleperkel/miami-transit)' },
+  headers: { 'User-Agent': transitousUserAgent('1.0.0') },
 };
 
 /** A fetch that answers `status` with `body` (the bytes of its text), recording what it was asked with. */
@@ -49,7 +50,7 @@ describe('fetchWalkJson', () => {
     expect(outcomes.map((o) => (!o.ok && o.error.kind === 'http' ? o.error.status : null))).toEqual([429, 503, null, null]);
   });
 
-  it('gives up after WALK_TIMEOUT_MS, and when the provider cancels, as a timeout', async () => {
+  it('gives up after WALK_TIMEOUT_MS as a timeout, and when the provider cancels as a network failure "cancelled"', async () => {
     jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
     // expo/fetch rejects only when its signal aborts: a server that never answers.
     const slow = fetchWalkJson((_url, init) => new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('Aborted')))), REQUEST, new AbortController().signal);
@@ -58,6 +59,6 @@ describe('fetchWalkJson', () => {
     const cancelled = fetchWalkJson((_url, init) => new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('Aborted')))), REQUEST, provider.signal);
     provider.abort();
     expect(await slow).toEqual({ ok: false, error: { kind: 'timeout', message: 'api.transitous.org did not answer within 15 s' } });
-    expect(await cancelled).toEqual({ ok: false, error: { kind: 'timeout', message: 'the walk request to api.transitous.org was cancelled before it finished' } });
+    expect(await cancelled).toEqual({ ok: false, error: { kind: 'network', message: 'cancelled' } });
   });
 });

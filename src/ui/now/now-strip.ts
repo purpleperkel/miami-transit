@@ -91,7 +91,7 @@ export function nearTripText(card: TripCardModel, judged: TripVerdict, placement
   const walk = `~${minutes} min walk`;
   const status = [`${hurryShort(judged.verdict, judged.ctx)} · ${walk}`, `${inline} · ${walk}`].find((line) => [...line].length <= REGULAR_LINE_MAX_CHARS);
   invariant(status !== undefined, `some status line for ${judged.verdict.kind} fits ${REGULAR_LINE_MAX_CHARS} characters`);
-  const label = `${hurrySentence(judged.verdict, judged.ctx)} ${tripPhrase(card)}, ${walkPhrase(minutes, judged.walkSource ?? 'estimated')}. Opens the trip.`;
+  const label = `${hurrySentence(judged.verdict, judged.ctx)} ${tripPhrase(card)}, ${walkPhrase(minutes, judged.walkSource)}. Opens the trip.`;
   return { lines: placement === 'inline' ? [inline] : [card.toName, status], label };
 }
 

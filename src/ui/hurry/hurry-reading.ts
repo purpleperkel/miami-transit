@@ -8,7 +8,7 @@ import { providerConfig } from '../../domain/live/constants';
 import { mergeDepartures } from '../../domain/live/merge-departures';
 import type { LiveBatch, LivePrediction } from '../../domain/live/types';
 import type { Departure } from '../../domain/schedule/departures';
-import { type WalkEstimate, walkFor } from '../../domain/walk/walk-cache';
+import { walkFor, type WalkTo } from '../../domain/walk/walk-cache';
 import { isLatLon, type LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
 import type { Result } from '../../lib/result';
@@ -86,6 +86,7 @@ export type HurryBoard = {
   readonly directionId: number | null;
   /** "To Dadeland South", or null with no train to name. */
   readonly title: string | null;
+  /** Straight-line metres to the nearest platform serving the direction; the verdict walks the routed walk there when one is known. */
   readonly walkMeters: number;
   readonly verdict: HurryVerdict;
   /** Where the verdict's train time comes from: live, live but old, or scheduled. */
@@ -109,8 +110,8 @@ export type ReadingInput = {
   readonly batch: LiveBatch<LivePrediction> | null;
   readonly nowS: number;
   readonly pace: WalkingPace;
-  /** mfix9: the walk to a platform by its GTFS stop_id (useWalkTo); absent, the straight line with m7c's detour. */
-  readonly walk?: (stopId: string) => WalkEstimate;
+  /** mfix9: the walk to a platform (the sheet's useWalkTo); absent, the straight line with m7c's detour. */
+  readonly walk?: WalkTo;
 };
 
 const OPENING: HurryReading = Object.freeze({ kind: 'opening' });
@@ -179,7 +180,7 @@ function directionBoard(timetable: Timetable, directionId: number, position: Lat
 /** What a verdict walks to `platform`: the reading's walk (routed, or its estimate), else the straight line with m7c's detour. */
 function walkTo(platform: Platform, position: LatLon, inputs: BoardInputs): { readonly walkMeters: number; readonly detour: number } {
   invariant(isLatLon(position) && platform.stopId.length > 0, 'a walk runs from a real fix to a platform named by its GTFS stop_id');
-  const walk = inputs.walk === undefined ? walkFor(null, platform, position) : inputs.walk(platform.stopId);
+  const walk = inputs.walk === undefined ? walkFor(null, platform, position) : inputs.walk(platform);
   invariant(Number.isFinite(walk.walkMeters) && walk.walkMeters >= 0 && walk.detour >= 1, `the walk to ${platform.stopId} is a real distance with a detour of at least 1`);
   return { walkMeters: walk.walkMeters, detour: walk.detour };
 }

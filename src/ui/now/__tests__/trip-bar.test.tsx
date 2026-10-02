@@ -264,7 +264,7 @@ function everyVerdict(): TripVerdict[] {
   const departures = [[600], [450], [300, 1200], [100, 180], [1500, 1800], [150, 900], [100, 110, 120, 2000], [], [7200]];
   const walks = [[0, PACE.walkMps], [400, PACE.walkMps], [NEAR_TRIP_M, PACE.walkMps], [NEAR_TRIP_M, PACE_RANGE_MPS.min]] as const;
   const all = walks.flatMap(([walkMeters, walkMps]) =>
-    departures.map((epochs): TripVerdict => ({ verdict: hurryVerdict({ now: 0, walkMeters, walkMps, jogMps: walkMps * 2, departures: epochs.map((epoch) => ({ epoch, live: false, lineId: 'ORANGE', headsign: null })) }), ctx, walkMeters })),
+    departures.map((epochs): TripVerdict => ({ verdict: hurryVerdict({ now: 0, walkMeters, walkMps, jogMps: walkMps * 2, departures: epochs.map((epoch) => ({ epoch, live: false, lineId: 'ORANGE', headsign: null })) }), ctx, walkMeters, walkSource: 'estimated' })),
   );
   expect(new Set(all.map(({ verdict }) => verdict.kind))).toEqual(new Set<HurryVerdict['kind']>(['CHILL', 'JOG', 'NOT_WORTH_IT', 'MISSED', 'NO_SERVICE']));
   expect(Math.max(...all.map(({ verdict }) => Math.ceil(verdict.walkS / 60)))).toBeGreaterThan(100);

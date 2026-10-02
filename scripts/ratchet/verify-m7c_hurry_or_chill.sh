@@ -71,7 +71,7 @@ M7C_COPY_PHRASES=(
   'NOT_WORTH_IT reads Not worth it next in 3 min'
   'MISSED reads Missed next 2:26 chill'
   'NO_SERVICE reads No more trains tonight'
-  'inline JOG reads Jog 1 min'
+  'inline JOG reads Jog'
   'inline text is at most 14 characters'
   'VoiceOver sentence says live or scheduled'
 )
@@ -100,7 +100,7 @@ M7C_PHRASES=("${M7C_VERDICT_PHRASES[@]}" "${M7C_COPY_PHRASES[@]}" "${M7C_CARD_PH
 
 # The plan's copy (M7c.2) and the Now-strip example (M7c.3), byte-exact (U+00B7 middle dot).
 M7C_COPY_STRINGS=('Chill · 3 min to spare' 'Jog · makes the 2:14 with 1 min spare' 'Not worth it · next in 3 min'
-  'Missed · next 2:26 · chill' 'No more trains tonight' 'Jog · 1 min')
+  'Missed · next 2:26 · chill' 'No more trains tonight' 'Jog · 1 min spare')
 
 # This card's own modules and suites (the repo-wide gates run only once they exist).
 M7C_ARTIFACTS=(src/domain/hurry/verdict.ts src/domain/hurry/platform.ts src/domain/hurry/board.ts
@@ -265,7 +265,7 @@ NODE
 # copy_is <case> — ONE call of the SHIPPED src/ui/hurry/copy module, fed verdicts made by the SHIPPED
 # engine, under the repo's own jest (jest-expo/ios: the app's babel transform and `@/` resolution), via a
 # throwaway oracle test in the gitignored .cache (removed whether the check passes or fails). Cases:
-# chill jog not_worth_it missed no_service (the plan's five strings, byte-exact), inline_jog ("Jog · 1 min"),
+# chill jog not_worth_it missed no_service (the plan's five strings, byte-exact), inline_jog ("Jog"; mfix8 labelled copy: the inline verdict is the word alone),
 # inline_max14 (every verdict, a 2-hour CHILL and an all-missed board included), sentence (VoiceOver).
 copy_is() {
   local which="$1" dir out rc=0
@@ -304,7 +304,7 @@ const CASES: Record<string, () => void> = {
   not_worth_it: () => { const v = verdict(100, [100, 180]); kindIs(v, 'NOT_WORTH_IT'); same(hurryCopy(v, ctx), 'Not worth it · next in 3 min', 'hurryCopy(NOT_WORTH_IT, next 180 s away)'); },
   missed: () => { const v = verdict(400, [150, 900]); kindIs(v, 'MISSED'); same(hurryCopy(v, ctx), 'Missed · next 2:26 · chill', 'hurryCopy(MISSED, nested CHILL at 2:26)'); },
   no_service: () => { const v = verdict(400, []); kindIs(v, 'NO_SERVICE'); same(hurryCopy(v, ctx), 'No more trains tonight', 'hurryCopy(NO_SERVICE)'); },
-  inline_jog: () => { const v = verdict(400, [300, 1200]); kindIs(v, 'JOG'); same(hurryInline(v, ctx), 'Jog · 1 min', 'hurryInline(JOG, 77.4 s spare)'); },
+  inline_jog: () => { const v = verdict(400, [300, 1200]); kindIs(v, 'JOG'); same(hurryInline(v, ctx), 'Jog', 'hurryInline(JOG, 77.4 s spare)'); },
   inline_max14: () => {
     const wide = { now: 0, clock: () => '12:59' };
     for (const [name, v] of Object.entries(board())) {
@@ -668,7 +668,7 @@ case_pin src/ui/hurry/__tests__/copy.test.ts 'JOG reads Jog makes the 2:14 with 
 case_pin src/ui/hurry/__tests__/copy.test.ts 'NOT_WORTH_IT reads Not worth it next in 3 min'
 case_pin src/ui/hurry/__tests__/copy.test.ts 'MISSED reads Missed next 2:26 chill'
 case_pin src/ui/hurry/__tests__/copy.test.ts 'NO_SERVICE reads No more trains tonight'
-case_pin src/ui/hurry/__tests__/copy.test.ts 'inline JOG reads Jog 1 min'
+case_pin src/ui/hurry/__tests__/copy.test.ts 'inline JOG reads Jog'
 case_pin src/ui/hurry/__tests__/copy.test.ts 'inline text is at most 14 characters'
 case_pin src/ui/hurry/__tests__/copy.test.ts 'VoiceOver sentence says live or scheduled'
 # 36. HurryCard renders the hero through m5a's TText with variant 'hero', and its accessibilityLabel is the copy module's hurrySentence.
@@ -732,7 +732,7 @@ now_strip_calls_inline
 # 67. Named Now-strip test (anywhere under src/ui/now), asserting the plan's inline example literally.
 case_pin src/ui/now 'Now strip inline shows the hurry verdict'
 # 68. The Now-strip tests carry the inline example "Jog · 1 min".
-need_lits src/ui/now/__tests__ 'Jog · 1 min'
+need_lits src/ui/now/__tests__ 'Jog · 1 min spare'
 # 69. The station sheet header (m6b's route) reaches HurryCard and the hook.
 wired_into 'src/app/station/[stationKey].tsx' 'src/ui/hurry/HurryCard\.tsx$' 'src/ui/hurry/useHurryVerdict\.ts$'
 

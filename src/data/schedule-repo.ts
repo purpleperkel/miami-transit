@@ -22,6 +22,7 @@ import {
   readServiceDays,
   readShapePaths,
   readStations,
+  readTripDestinations,
   readStopVisits,
   readTripsAround,
   type StationListing,
@@ -95,6 +96,8 @@ export class ScheduleRepo {
   private network: RuntimeNetwork | null = null;
   /** Every station (44 on the 2026 feed), read on first use and kept. */
   private stationList: readonly StationListing[] | null = null;
+  /** trip_id → its destination station key (5,137 trips), read on first use and kept. */
+  private destinations: ReadonlyMap<string, string> | null = null;
 
   private constructor(db: SqlExecutor, meta: ScheduleMeta, bounds: ServiceCalendarBounds) {
     invariant(meta.schemaVersion === SCHEDULE_SCHEMA_VERSION, 'the repo reads only the schema it was written for');
@@ -240,6 +243,15 @@ export class ScheduleRepo {
     const departures = assembleDepartures(window, visits);
     invariant(departures.every((d) => d.epoch >= window.fromEpoch && d.epoch <= window.toEpoch), 'every departure is inside the window');
     return departures;
+  }
+
+  /** trip_id → the station key of the trip's last stop: where a vehicle on the map is going (mfix3 §5 vehicle taps). */
+  tripDestinations(): ReadonlyMap<string, string> {
+    const destinations = this.destinations ?? readTripDestinations(this.db);
+    this.destinations = destinations;
+    invariant(destinations.size > 0, 'the schedule DB has trips');
+    invariant(this.destinations === destinations, 'the destinations are read once, then kept');
+    return destinations;
   }
 
   private shapePaths(): ReadonlyMap<number, ShapePath> {

@@ -12,16 +12,17 @@ import { type DataStatus, dataStatus, statusConditions } from '../dataStatus';
 import { focusAfterTap, type MapFocus, mapEmphasis, NO_FOCUS } from './emphasis';
 import { useLayers } from './layers-store';
 import { type MapRegion, zoomBucket } from './mapGeometry';
+import { framesInLanes, markerLanes, NO_LANES } from './markerLanes';
 import type { TransitMapProps } from './TransitMap';
 import { useLineGeometry } from './use-line-geometry';
 import { useFrameTick, useVehicleFrames } from './useVehicleFrames';
 
 /**
- * The Map tab's wiring (plan M5.12): everything TransitMap, the status pill and the control stack
- * show, read from the app's contexts — the bundled schedule DB (useScheduleDb: lines, stations, the
- * timetable behind the scheduled vehicles), the live runtime (useLive: live vehicles and the chain's
- * status), the layers store, the Map tab's focus and Reduce Motion — so the components themselves
- * stay presentational.
+ * The Map tab's wiring (plan M5.12): everything TransitMap and the status pill show, read from the
+ * app's contexts — the bundled schedule DB (useScheduleDb: lines, stations, the timetable behind the
+ * scheduled vehicles, each trip's destination), the live runtime (useLive: live vehicles and the
+ * chain's status), the layers store, the Map tab's focus and Reduce Motion. The zoom bucket lives
+ * here, so each frame's markers are shifted into their line's lane here (mfix3 §3, markerLanes.ts).
  */
 
 export type LiveMap = {
@@ -36,8 +37,12 @@ export function useLiveMap(initialRegion: MapRegion): LiveMap {
   const repo = db.kind === 'ready' ? db.repo : null;
   const live = useLive().state;
   const { tickMs, reduceMotion } = useFrameTick();
-  const frames = useVehicleFrames(repo, live?.vehicles ?? null, tickMs);
+  // Markers take their lanes from the lines as drawn (markerLanes.ts), laid once per schedule DB.
+  const lanes = useMemo(() => (repo === null ? NO_LANES : markerLanes(repo.liveNetwork().tracks)), [repo]);
+  const frames = useVehicleFrames(repo, live?.vehicles ?? null, tickMs, Date.now, lanes);
   const [bucket, setBucket] = useState(() => zoomBucket(initialRegion.latitudeDelta));
+  const vehicles = useMemo(() => framesInLanes(frames.vehicles, bucket), [frames.vehicles, bucket]);
+  const tripDestinations = useMemo(() => repo?.tripDestinations(), [repo]);
   const [focus, setFocus] = useState<MapFocus>(NO_FOCUS);
   const [selectedStationKey, setSelectedStationKey] = useState<string | null>(null);
   const { layers } = useLayers();
@@ -60,13 +65,14 @@ export function useLiveMap(initialRegion: MapRegion): LiveMap {
     bucket,
     segments,
     stations,
-    vehicles: frames.vehicles,
+    vehicles,
     emphasis,
     selectedStationKey,
     onRegionChange: (region: MapRegion) => setBucket(zoomBucket(region.latitudeDelta)),
     ...handlers,
+    tripDestinations,
   };
-  invariant(map.vehicles === frames.vehicles, 'the map draws the latest frame');
+  invariant(map.vehicles.length === frames.vehicles.length, 'the map draws every vehicle of the latest frame, each in its lane');
   return { map, status, reduceMotion };
 }
 

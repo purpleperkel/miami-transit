@@ -3,7 +3,7 @@ import type { LineTrack, LiveLineId } from '../../domain/live/types';
 import type { Mode } from '../../domain/network/stations';
 import type { LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
-import { bucketMetresPerPoint, offsetPolylineBy, planeOf, toPlane, type Vec, type ZoomBucket } from './mapGeometry';
+import { bucketMetresPerPoint, offsetPolylineBy, type Plane, planeOf, toPlane, type Vec, type ZoomBucket } from './mapGeometry';
 
 /**
  * How the lines are laid out on the map (plan §4 "Lines"): each line is a casing under a stroke —
@@ -56,33 +56,56 @@ export function strokeWidthOf(lineId: LiveLineId): number {
 export function layoutTracks(tracks: readonly LineTrack[]): LaidTrack[] {
   invariant(tracks.length > 0 && tracks.every((track) => track.points.length >= 2), 'every track has at least one segment');
   const plane = planeOf(tracks.flatMap((track) => track.points));
-  const projected: ProjectedTrack[] = tracks.map((track) => ({
-    lineId: track.lineId,
-    mode: modeOfLine(track.lineId),
-    xy: track.points.map((point) => toPlane(plane, point)),
-  }));
-  const laid = tracks.map((track, t) => ({ lineId: track.lineId, points: track.points, lanes: track.points.map((_, i) => laneAt(projected, t, i)) }));
+  const projected = tracks.map((track) => projectTrack(plane, track));
+  const laid = tracks.map((track, t) => ({ lineId: track.lineId, points: track.points, lanes: track.points.map((_, i) => laneAt(projected, projected[t] as ProjectedTrack, i)) }));
   invariant(laid.every((track) => track.lanes.every(Number.isFinite)), 'every vertex has a lane');
   return laid;
 }
 
 /**
- * Vertex i of track t: which lines run alongside it there, and its lane among them. Lines are ranked
- * in catalog order; the lane is measured to the right of the first-ranked line's travel, as read off
- * that line's FIRST track near the vertex, so every line in the corridor shares one frame whichever
- * way each of its tracks runs.
+ * Other tracks laid against the DRAWN lines (mfix3 §3: the markers' lanes): each vertex of each track —
+ * a trip's shape — gets the lane its line is drawn in there, judged exactly as layoutTracks judges the
+ * lines' own vertices (same corridor radius, same ranking, the same first-ranked line's frame), so a
+ * vehicle on that shape sits on its line's drawn lane whichever way the shape runs.
  */
-function laneAt(tracks: readonly ProjectedTrack[], t: number, i: number): number {
-  const self = tracks[t];
-  invariant(self !== undefined && self.xy[i] !== undefined, `track ${t} has vertex ${i}`);
+export function lanesAlongLines(lines: readonly LineTrack[], tracks: readonly LineTrack[]): LaidTrack[] {
+  invariant(lines.length > 0 && lines.every((line) => line.points.length >= 2), 'the drawn lines each have a segment');
+  invariant(tracks.every((track) => track.points.length >= 2), 'every track has at least one segment');
+  const plane = planeOf(lines.flatMap((line) => line.points));
+  const corridor = lines.map((line) => projectTrack(plane, line));
+  return tracks.map((track) => {
+    const self = projectTrack(plane, track);
+    return { lineId: track.lineId, points: track.points, lanes: track.points.map((_, i) => laneAt(corridor, self, i)) };
+  });
+}
+
+function projectTrack(plane: Plane, track: LineTrack): ProjectedTrack {
+  invariant(track.points.length >= 2, `a ${track.lineId} track has a segment`);
+  const projected = { lineId: track.lineId, mode: modeOfLine(track.lineId), xy: track.points.map((point) => toPlane(plane, point)) };
+  invariant(projected.xy.length === track.points.length, 'every point is projected');
+  return projected;
+}
+
+/**
+ * Vertex i of track `self`: which lines of the corridor run alongside it there, and its lane among them.
+ * Lines are ranked in catalog order; the lane is measured to the right of the first-ranked line's
+ * travel, as read off that line's FIRST track near the vertex, so every line in the corridor shares
+ * one frame whichever way each of its tracks runs. A track always runs alongside itself: when the
+ * corridor has no track of its line there, its own direction stands in.
+ */
+function laneAt(corridor: readonly ProjectedTrack[], self: ProjectedTrack, i: number): number {
+  invariant(self.xy[i] !== undefined, `the track has vertex ${i}`);
   const here = self.xy[i] as Vec;
   const dir = directionAt(self.xy, i);
   const alongside = new Map<LineId, Vec>();
-  for (const other of tracks) {
+  for (const other of corridor) {
     const near = other.mode === self.mode && !alongside.has(other.lineId) ? segmentAlongside(other.xy, here, dir) : null;
     if (near !== null) {
       alongside.set(other.lineId, near);
     }
+  }
+  if (!alongside.has(self.lineId)) {
+    alongside.set(self.lineId, dir);
   }
   const lines = [...alongside.keys()].sort((a, b) => LINE_IDS.indexOf(a) - LINE_IDS.indexOf(b));
   invariant(lines.includes(self.lineId), 'a track runs alongside itself');

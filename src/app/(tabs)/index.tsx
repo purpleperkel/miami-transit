@@ -3,10 +3,10 @@ import type { Region } from 'react-native-maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { invariant } from '@/lib/invariant';
-import { MapControlStack } from '@/ui/map/MapControlStack';
 import { StatusPill } from '@/ui/map/StatusPill';
 import { TransitMap } from '@/ui/map/TransitMap';
 import { useLiveMap } from '@/ui/map/use-live-map';
+import { MIN_HIT_AREA_PT } from '@/ui/map/vehicleVisual';
 import { SPACING } from '@/ui/tokens';
 
 // Downtown Miami: Government Center sits roughly at the centre of the rail + Mover network.
@@ -19,7 +19,8 @@ const DOWNTOWN_MIAMI: Region = {
 
 /**
  * The Map tab (plan M5.12): the live map — lines, stations and vehicles moving along the track —
- * with the floating chrome over it: the status pill (top left) and the control stack (top right).
+ * with the floating chrome over it: the status pill (top left) and, drawn by TransitMap with the map's
+ * own interactions, the control stack (top right: layers, legend, locate-me) and the tap caption.
  * TransitMap draws react-native-maps' MapView; use-live-map.ts wires in the schedule DB, the live
  * runtime and the layers.
  */
@@ -35,12 +36,12 @@ export default function MapScreen() {
   );
   const { map, status, reduceMotion } = useLiveMap(DOWNTOWN_MIAMI);
   const insets = useSafeAreaInsets();
+  const chromeTop = insets.top + SPACING.xs;
   return (
     <View style={styles.screen}>
-      <TransitMap {...map} />
-      <View pointerEvents="box-none" style={[styles.chrome, { top: insets.top + SPACING.xs }]}>
+      <TransitMap {...map} controlsTopPt={chromeTop} />
+      <View pointerEvents="box-none" style={[styles.chrome, { top: chromeTop }]}>
         <View style={styles.pillSlot}>{status === null ? null : <StatusPill status={status} reduceMotion={reduceMotion} />}</View>
-        <MapControlStack />
       </View>
     </View>
   );
@@ -51,7 +52,8 @@ const styles = StyleSheet.create({
   chrome: {
     position: 'absolute',
     left: SPACING.md,
-    right: SPACING.md,
+    // Clear of the control stack's 44 pt column, which TransitMap floats at the top right.
+    right: SPACING.md + MIN_HIT_AREA_PT + SPACING.sm,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',

@@ -53,14 +53,16 @@ describe('vehicle frames (M5.10)', () => {
     expect(later.live?.ageS).toBe(9);
   });
 
-  it('a new fix 30 m behind holds the marker; 60 m behind snaps it back', () => {
-    const plan = planFrames(TIMETABLE, liveBatch('swiftly', [liveVehicle(pointAlongShape(SHAPE, 500), T)], T), T);
+  it('a new fix 30 m or 60 m behind holds the marker; 500 m behind jumps it back', () => {
+    const plan = planFrames(TIMETABLE, liveBatch('swiftly', [liveVehicle(pointAlongShape(SHAPE, 600), T)], T), T);
     const shown = framesAt(plan, T, NO_SHOWN).shown;
     const drawnAt = only(framesAt(plan, T, NO_SHOWN).frames).coordinate;
-    const behind = planFrames(TIMETABLE, liveBatch('swiftly', [liveVehicle(pointAlongShape(SHAPE, 470), T)], T), T);
+    const behind = planFrames(TIMETABLE, liveBatch('swiftly', [liveVehicle(pointAlongShape(SHAPE, 570), T)], T), T);
     expect(only(framesAt(behind, T, shown).frames).coordinate.longitude).toBeCloseTo(drawnAt.longitude, 9);
-    const farBehind = planFrames(TIMETABLE, liveBatch('swiftly', [liveVehicle(pointAlongShape(SHAPE, 440), T)], T), T);
-    expect(only(framesAt(farBehind, T, shown).frames).coordinate.longitude).toBeCloseTo(pointAlongShape(SHAPE, 440).longitude, 9);
+    const farBehind = planFrames(TIMETABLE, liveBatch('swiftly', [liveVehicle(pointAlongShape(SHAPE, 540), T)], T), T);
+    expect(only(framesAt(farBehind, T, shown).frames).coordinate.longitude).toBeCloseTo(drawnAt.longitude, 9);
+    const wayBehind = planFrames(TIMETABLE, liveBatch('swiftly', [liveVehicle(pointAlongShape(SHAPE, 100), T)], T), T);
+    expect(only(framesAt(wayBehind, T, shown).frames).coordinate.longitude).toBeCloseTo(pointAlongShape(SHAPE, 100).longitude, 9);
   });
 
   it('a live vehicle with no trip to follow is drawn at its fix', () => {

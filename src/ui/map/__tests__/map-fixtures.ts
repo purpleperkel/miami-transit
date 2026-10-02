@@ -26,6 +26,8 @@ export function frame(overrides: Partial<VehicleFrame> = {}): VehicleFrame {
     lineId: 'ORANGE',
     coordinate: { latitude: 25.7743, longitude: -80.1955 },
     bearing: 180,
+    lane: 0,
+    tripId: null,
     live: null,
     ...overrides,
   };
@@ -34,9 +36,9 @@ export function frame(overrides: Partial<VehicleFrame> = {}): VehicleFrame {
   return made;
 }
 
-/** A live frame from `provider`, `ageS` seconds old. */
+/** A live frame from `provider`, `ageS` seconds old: its feed header is that old too, and the fix lags it by 0 s (mfix3 §4). */
 export function liveFrame(provider: ProviderId, ageS: number): VehicleFrame {
-  const made = frame({ key: `live:${provider}-${ageS}`, source: 'live', live: { provider, ageS } });
+  const made = frame({ key: `live:${provider}-${ageS}`, source: 'live', live: { provider, ageS, feedAgeS: ageS, lagS: 0 } });
   expect(made.live?.ageS).toBe(ageS);
   expect(made.live?.provider).toBe(provider);
   return made;

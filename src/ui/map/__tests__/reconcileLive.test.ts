@@ -1,6 +1,15 @@
 import { tripProgressAt } from '@/domain/schedule/positions';
 
-import { PROJECTION_GRACE_S, placeOnShape, projectFix, reconcileLive, scheduleSecondAt, SNAP_DISTANCE_M, type TripTimetable } from '../reconcileLive';
+import {
+  JUMP_DISTANCE_M,
+  placeOnShape,
+  PROJECTION_MARGIN_S,
+  projectFix,
+  reconcileLive,
+  scheduleSecondAt,
+  SNAP_DISTANCE_M,
+  type TripTimetable,
+} from '../reconcileLive';
 import { THREE_STOPS, TRACK_POINTS, trackShape, trackShapeOf, trackTrip, WED } from './map-fixtures';
 
 /**
@@ -25,27 +34,32 @@ describe('reconcileLive (M5.10)', () => {
     expect(reconcileLive(530, fix, TIMETABLE, AT_500 + 4)).toMatchObject({ move: 'glide' });
   });
 
-  it('snaps at 50 m', () => {
+  it('a correction from 50 m eases in and from 500 m jumps', () => {
+    expect([SNAP_DISTANCE_M, JUMP_DISTANCE_M]).toEqual([50, 500]);
     const fix = { distM: 500, atS: AT_500 };
-    expect(reconcileLive(550, fix, TIMETABLE, AT_500)).toEqual({ distM: 500, move: 'snap' });
-    expect(reconcileLive(450, fix, TIMETABLE, AT_500)).toEqual({ distM: 500, move: 'snap' });
-    expect(reconcileLive(800, fix, TIMETABLE, AT_500)).toEqual({ distM: 500, move: 'snap' });
+    // Under 50 m the marker simply follows the projection; from 50 m forward it eases in (mfix3 §2).
     expect(reconcileLive(460, fix, TIMETABLE, AT_500)).toEqual({ distM: 500, move: 'glide' });
+    expect(reconcileLive(450, fix, TIMETABLE, AT_500)).toEqual({ distM: 500, move: 'ease' });
+    expect(reconcileLive(100.01, fix, TIMETABLE, AT_500)).toEqual({ distM: 500, move: 'ease' });
+    // Backward under 500 m it holds; 500 m or more either way, it jumps at once.
+    expect(reconcileLive(800, fix, TIMETABLE, AT_500)).toEqual({ distM: 800, move: 'hold' });
+    expect(reconcileLive(0, fix, TIMETABLE, AT_500)).toEqual({ distM: 500, move: 'snap' });
+    expect(reconcileLive(1000, fix, TIMETABLE, AT_500)).toEqual({ distM: 500, move: 'snap' });
   });
 
-  it('projection clamped to next stop + 20 s', () => {
-    expect(PROJECTION_GRACE_S).toBe(20);
+  it('projection clamped to the last stop reached by fetch + cadence + 30 s', () => {
+    expect(PROJECTION_MARGIN_S).toBe(30);
     const fix = { distM: 500, atS: AT_500 };
-    // Ten minutes without a new fix: the projection stops 20 s after the next stop's arrival (08:02:00),
-    // which is inside that stop's 30 s dwell — the train waits at the 1000 m stop.
-    expect(projectFix(fix, TIMETABLE, AT_500 + 600)).toBe(1000);
-    // With a 10 s dwell the clamp (08:02:20) lands 10 s out of the station, and no further.
-    const shortDwell = { ...TIMETABLE, trip: trackTrip([[28_800, 28_830, 0], [28_920, 28_930, 1000], [29_020, 29_050, 2000]]) };
-    const clamped = tripProgressAt(shortDwell.trip, 28_920 + PROJECTION_GRACE_S)?.distM ?? NaN;
-    expect(projectFix(fix, shortDwell, AT_500 + 600)).toBeCloseTo(clamped, 9);
-    expect(clamped).toBeGreaterThan(1000);
-    // Unclamped, ten minutes would carry it past every stop to the trip's end at 2000 m.
-    expect(clamped).toBeLessThan(2000);
+    // On time at 500 m at 08:01:15; the 1000 m stop is reached 45 s on (08:02:00), left at 08:02:30, 2000 m reached 165 s on.
+    // A clamp 60 s on reaches the 1000 m stop: ten minutes later the train still waits there, never mid-track.
+    expect(projectFix({ ...fix, untilS: AT_500 + 60 }, TIMETABLE, AT_500 + 600)).toBe(1000);
+    // A clamp 30 s on reaches no stop: the projection holds at the fix itself.
+    expect(projectFix({ ...fix, untilS: AT_500 + 30 }, TIMETABLE, AT_500 + 20)).toBe(500);
+    // A clamp 170 s on reaches the 2000 m stop, so the train runs on past the 1000 m stop's departure;
+    // 140 s on it does not, and the train waits at 1000 m.
+    expect(projectFix({ ...fix, untilS: AT_500 + 170 }, TIMETABLE, AT_500 + 100)).toBeCloseTo(1000 + (25 / 90) * 1000, 6);
+    expect(projectFix({ ...fix, untilS: AT_500 + 140 }, TIMETABLE, AT_500 + 100)).toBe(1000);
+    expect(tripProgressAt(TIMETABLE.trip, 28_875 + 100)?.state).toBe('moving');
   });
 });
 

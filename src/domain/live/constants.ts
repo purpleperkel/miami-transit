@@ -10,18 +10,30 @@ export type ProviderConfig = {
   readonly id: ProviderId;
   /** Seconds between polls while the app is open. Swiftly's binding docs say cache GTFS-rt ≥ 30 s. */
   readonly cadenceS: number;
-  /** Data at most this old is fresh: the pill reads Live and the mode's scheduled ghosts hide (merge rule 5). */
+  /**
+   * The FEED is live while its header timestamp is at most this old: the pill reads "Live", and a mode
+   * with a vehicle that is not stale hides its scheduled ghosts (merge rule 5). Older, the pill reads
+   * "Live · N min old" and every marker of the feed renders stale with it (arbiter ruling, mfix3 §4).
+   */
   readonly freshS: number;
-  /** A live vehicle older than this is dropped (merge rule 1). */
+  /**
+   * The drop limit (merge rule 1): a vehicle is dropped when its feed is older than this, or when it
+   * lags its own feed by more than this.
+   */
   readonly maxAgeS: number;
+  /** A vehicle is stale when it lags its own feed header by more than this (feed timestamp − its fix's). */
+  readonly lagStaleS: number;
   /** REST calls per calendar month on the plan we use, or null when the provider publishes none. */
   readonly monthlyQuota: number | null;
 };
 
 export const PROVIDER_CONFIG: Readonly<Record<ProviderId, ProviderConfig>> = Object.freeze({
-  swiftly: Object.freeze({ id: 'swiftly', cadenceS: 30, freshS: 75, maxAgeS: 150, monthlyQuota: null }),
-  // Transitland re-fetches the county feed about once a minute; the Free plan allows 10,000 calls a month.
-  transitland: Object.freeze({ id: 'transitland', cadenceS: 60, freshS: 150, maxAgeS: 210, monthlyQuota: 10_000 }),
+  swiftly: Object.freeze({ id: 'swiftly', cadenceS: 30, freshS: 75, maxAgeS: 150, lagStaleS: 60, monthlyQuota: null }),
+  // We poll Transitland once a minute, but it republishes its cached county feed only about every 2 min
+  // (header age at fetch 95 s, 121 s, 27 s — arbiter measurement 2026-10-01): a feed is live to 180 s
+  // (that republish + our poll). In-feed lag runs median 9 s, max 48 s, so 90 s behind its feed is stale.
+  // The Free plan allows 10,000 calls a month.
+  transitland: Object.freeze({ id: 'transitland', cadenceS: 60, freshS: 180, maxAgeS: 300, lagStaleS: 90, monthlyQuota: 10_000 }),
 });
 
 /** Every request is aborted after this long (§4 Polling: an 8 s abort on each request). */
@@ -67,7 +79,10 @@ export const TRUNK_LINE_OF_ROUTE: ReadonlyMap<string, TrunkLineId> = new Map([
 export function providerConfig(id: ProviderId): ProviderConfig {
   invariant((PROVIDER_IDS as readonly string[]).includes(id), `"${id}" is a realtime provider`);
   const config = PROVIDER_CONFIG[id];
-  invariant(config.id === id && config.freshS < config.maxAgeS && config.cadenceS <= BACKOFF_CAP_S, `${id}'s config is consistent`);
+  invariant(
+    config.id === id && config.lagStaleS < config.freshS && config.freshS < config.maxAgeS && config.cadenceS <= BACKOFF_CAP_S,
+    `${id}'s config is consistent`,
+  );
   return config;
 }
 

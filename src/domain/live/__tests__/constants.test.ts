@@ -20,13 +20,32 @@ const METRES_PER_DEGREE_LAT = (6_371_008.8 * Math.PI) / 180;
 
 describe('live constants (M4.1): the per-provider table', () => {
   it('swiftly 30/75/150: cadence 30 s, fresh ≤ 75 s, max age 150 s, no published quota', () => {
-    expect(providerConfig('swiftly')).toEqual({ id: 'swiftly', cadenceS: 30, freshS: 75, maxAgeS: 150, monthlyQuota: null });
+    expect(providerConfig('swiftly')).toEqual({ id: 'swiftly', cadenceS: 30, freshS: 75, maxAgeS: 150, lagStaleS: 60, monthlyQuota: null });
     expect(quotaSkipAt('swiftly')).toBeNull();
   });
 
-  it('transitland 60/150/210: cadence 60 s, fresh ≤ 150 s, max age 210 s, 10,000 calls a month', () => {
-    expect(providerConfig('transitland')).toEqual({ id: 'transitland', cadenceS: 60, freshS: 150, maxAgeS: 210, monthlyQuota: 10_000 });
+  it('transitland 60/180/300: cadence 60 s, fresh ≤ 180 s, max age 300 s, 10,000 calls a month', () => {
+    expect(providerConfig('transitland')).toEqual({ id: 'transitland', cadenceS: 60, freshS: 180, maxAgeS: 300, lagStaleS: 90, monthlyQuota: 10_000 });
     expect(quotaSkipAt('transitland')).toBe(9_500);
+  });
+});
+
+/**
+ * The relative staleness rule's numbers (arbiter ruling for mfix3 §4, 2026-10-01): a vehicle is stale
+ * past lagStaleS behind its own feed header; the feed reads Live while its header is at most freshS old;
+ * a vehicle is dropped when the feed is older than maxAgeS or the vehicle lags it by more than maxAgeS.
+ */
+describe('live constants (mfix3 §4): the relative staleness rule', () => {
+  it('transitland staleness lag 90 live 180 drop 300', () => {
+    const { lagStaleS, freshS, maxAgeS } = providerConfig('transitland');
+    expect([lagStaleS, freshS, maxAgeS]).toEqual([90, 180, 300]);
+    expect(lagStaleS < freshS && freshS < maxAgeS).toBe(true);
+  });
+
+  it('swiftly staleness lag 60 live 75 drop 150', () => {
+    const { lagStaleS, freshS, maxAgeS } = providerConfig('swiftly');
+    expect([lagStaleS, freshS, maxAgeS]).toEqual([60, 75, 150]);
+    expect(lagStaleS < freshS && freshS < maxAgeS).toBe(true);
   });
 });
 

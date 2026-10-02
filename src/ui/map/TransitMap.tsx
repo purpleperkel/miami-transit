@@ -1,27 +1,39 @@
-import { useMemo } from 'react';
-import { StyleSheet } from 'react-native';
-import MapView, { type MapPressEvent, type Region } from 'react-native-maps';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { StyleSheet, View } from 'react-native';
+import MapView, { type Region } from 'react-native-maps';
 
 import type { StationListing } from '@/data/schedule-queries';
 import type { LiveLineId } from '@/domain/live/types';
 import { invariant } from '@/lib/invariant';
 
 import type { ColorScheme } from '../colors';
+import { SPACING } from '../tokens';
 import { drawsLine, drawsStation, drawsVehicle, type MapEmphasis } from './emphasis';
 import type { LineSegment } from './lineLayout';
 import { LinePolylines } from './LinePolylines';
+import { MapCaption } from './MapCaption';
+import { MapControlStack } from './MapControlStack';
 import type { MapRegion, ZoomBucket } from './mapGeometry';
+import { MapLegend } from './MapLegend';
+import { captionText } from './mapTaps';
 import { StationMarker } from './StationMarker';
+import { useMapTaps } from './use-map-taps';
+import { type UserLocation, useUserLocation } from './use-user-location';
 import type { VehicleFrame } from './vehicleFrames';
 import { VehicleMarker } from './VehicleMarker';
+import { MIN_HIT_AREA_PT } from './vehicleVisual';
 
 /**
  * The map is the app (plan §4 "UX system", M5.12): full-bleed MapKit in `mutedStandard`, with points
  * of interest, buildings and pitch off, drawing the lines (LinePolylines), the stations
  * (StationMarker) and the moving vehicles (VehicleMarker) — each filtered and dimmed by the emphasis
- * (layers + focus). PRESENTATIONAL: every piece of data arrives as a prop; use-live-map.ts reads the
+ * (layers + focus). Every piece of schedule and live data arrives as a prop; use-live-map.ts reads the
  * schedule DB and the live context and wires them in. `pointsOfInterestFilter` is never set, because
  * it overrides `showsPointsOfInterests`.
+ *
+ * The map's own interactions live here too (mfix3 §5): a caption naming what a tap hit (use-map-taps),
+ * the floating control stack with the legend (ⓘ) and locate-me buttons, the legend sheet, and
+ * you-are-here — the blue dot once location is granted (use-user-location).
  */
 
 /** The four render props the plan fixes for the map (M5.12 A). */
@@ -39,6 +51,7 @@ export type TransitMapProps = {
   /** The lines at this zoom bucket, or null while the schedule DB is opening (or failed). */
   readonly segments: readonly LineSegment[] | null;
   readonly stations: readonly StationListing[];
+  /** Each vehicle as drawn: in its line's lane at this bucket (markerLanes.ts). */
   readonly vehicles: readonly VehicleFrame[];
   readonly emphasis: MapEmphasis;
   readonly selectedStationKey: string | null;
@@ -48,6 +61,10 @@ export type TransitMapProps = {
   readonly onVehiclePress: (vehicleKey: string, lineId: LiveLineId) => void;
   /** A tap on the map itself (not on a marker). */
   readonly onMapPress: () => void;
+  /** trip id → the station key of its last stop, so a tapped vehicle says where it is going; absent, it does not. */
+  readonly tripDestinations?: ReadonlyMap<string, string>;
+  /** How far below the top of the map the floating controls start (the safe-area inset and a margin); 0 when absent. */
+  readonly controlsTopPt?: number;
 };
 
 export function TransitMap(props: TransitMapProps) {
@@ -63,30 +80,66 @@ export function TransitMap(props: TransitMapProps) {
     .filter((vehicle) => drawsVehicle(emphasis, vehicle))
     .sort((a, b) => (a.source === b.source ? 0 : a.source === 'scheduled' ? -1 : 1));
   invariant(vehicles.length <= props.vehicles.length && stations.length <= props.stations.length, 'the emphasis only ever hides');
+  const mapRef = useRef<MapView>(null);
+  const { location, locate } = useUserLocation();
+  const taps = useMapTaps({ segments, bucket, onStationPress: props.onStationPress, onVehiclePress: props.onVehiclePress, onMapPress: props.onMapPress, location, locate, mapRef });
   return (
-    <MapView
-      testID="transit-map"
-      style={StyleSheet.absoluteFill}
-      initialRegion={props.initialRegion}
-      {...MAP_RENDER_PROPS}
-      onRegionChangeComplete={(region: Region) => props.onRegionChange(region)}
-      onPress={(event: MapPressEvent) => onMapTap(event, props.onMapPress)}>
-      {lines}
-      {stations.map((station) => (
-        <StationMarker key={station.stationKey} station={station} selected={station.stationKey === props.selectedStationKey} bucket={bucket} scheme={scheme} onPress={props.onStationPress} />
-      ))}
-      {vehicles.map((vehicle) => (
-        <VehicleMarker key={vehicle.key} vehicle={vehicle} scheme={scheme} onPress={props.onVehiclePress} />
-      ))}
-    </MapView>
+    <>
+      <MapView
+        ref={mapRef}
+        testID="transit-map"
+        style={StyleSheet.absoluteFill}
+        initialRegion={props.initialRegion}
+        {...MAP_RENDER_PROPS}
+        showsUserLocation={location.kind === 'granted'}
+        onRegionChangeComplete={(region: Region) => props.onRegionChange(region)}
+        onPress={taps.onMapPress}>
+        {lines}
+        {stations.map((station) => (
+          <StationMarker key={station.stationKey} station={station} selected={station.stationKey === props.selectedStationKey} bucket={bucket} scheme={scheme} onPress={taps.onStationPress} />
+        ))}
+        {vehicles.map((vehicle) => (
+          <VehicleMarker key={vehicle.key} vehicle={vehicle} scheme={scheme} onPress={taps.onVehiclePress} />
+        ))}
+      </MapView>
+      <MapChrome
+        props={props}
+        location={location}
+        caption={taps.caption === null ? null : captionText(taps.caption, { stations: props.stations, vehicles: props.vehicles, tripDestinations: props.tripDestinations })}
+        onLocate={taps.onLocate}
+        onDismiss={taps.dismiss}
+      />
+    </>
   );
 }
 
-/** A tap on the map: MapKit also reports taps that landed on a marker; only a tap on the map itself counts. */
-function onMapTap(event: MapPressEvent, onMapPress: () => void): void {
-  invariant(typeof onMapPress === 'function', 'a map tap has a handler');
-  invariant(event.nativeEvent !== undefined, 'a map tap carries its native event');
-  if (event.nativeEvent.action !== 'marker-press') {
-    onMapPress();
-  }
+type MapChromeProps = {
+  readonly props: TransitMapProps;
+  readonly location: UserLocation;
+  readonly caption: string | null;
+  readonly onLocate: () => void;
+  readonly onDismiss: () => void;
+};
+
+/** What floats over the map: the control stack (top right), the caption (below the status pill), and the legend sheet when open. */
+function MapChrome({ props, location, caption, onLocate, onDismiss }: MapChromeProps) {
+  const [legendOpen, setLegendOpen] = useState(false);
+  const openLegend = useCallback(() => setLegendOpen(true), []);
+  const closeLegend = useCallback(() => setLegendOpen(false), []);
+  const topPt = props.controlsTopPt ?? 0;
+  invariant(Number.isFinite(topPt) && topPt >= 0, 'the controls sit on the map');
+  invariant(caption === null || caption.length > 0, 'a caption says something');
+  return (
+    <>
+      <View pointerEvents="box-none" style={[styles.controls, { top: topPt }]}>
+        <MapControlStack onLegend={openLegend} onLocate={onLocate} />
+      </View>
+      {caption === null ? null : <MapCaption text={caption} topPt={topPt + MIN_HIT_AREA_PT + SPACING.xs} onDismiss={onDismiss} />}
+      {legendOpen ? <MapLegend scheme={props.scheme} location={location} onClose={closeLegend} /> : null}
+    </>
+  );
 }
+
+const styles = StyleSheet.create({
+  controls: { position: 'absolute', right: SPACING.md },
+});

@@ -130,6 +130,14 @@ const SHAPE_POINTS_SQL = 'SELECT shape_idx, seq, lat, lon, dist_m FROM shape_poi
 /** Every trip's line, through its stop pattern (the M2.10 derivation): what a live trip_id means (M4.9). */
 const TRIP_LINES_SQL = 'SELECT t.trip_id, p.line_id FROM trip AS t JOIN pattern AS p ON p.pattern_idx = t.pattern_idx ORDER BY t.trip_id';
 
+/** Every trip's destination: the station of its pattern's last stop (pattern.dest_station_idx) — what a vehicle tap names (mfix3 §5). */
+const TRIP_DESTINATIONS_SQL = `
+  SELECT t.trip_id, st.station_key
+  FROM trip AS t
+  JOIN pattern AS p ON p.pattern_idx = t.pattern_idx
+  JOIN station AS st ON st.station_idx = p.dest_station_idx
+  ORDER BY t.trip_id`;
+
 /** Every stop with its station: a live stop_id's station, and a station's stops (per-stop departures). */
 const STOP_STATIONS_SQL = `
   SELECT s.stop_id, st.station_key
@@ -288,6 +296,15 @@ export function readTripLines(db: SqlExecutor): ReadonlyMap<string, LineId> {
   invariant(lines.size === rows.length, 'trip ids are unique');
   invariant(lines.size > 0, 'the schedule DB has trips');
   return lines;
+}
+
+/** trip_id → the station key of the trip's last stop, for every trip in the schedule. */
+export function readTripDestinations(db: SqlExecutor): ReadonlyMap<string, string> {
+  const rows = db.all(TRIP_DESTINATIONS_SQL);
+  const destinations = new Map(rows.map((row) => [text(row, 'trip_id'), text(row, 'station_key')] as const));
+  invariant(destinations.size === rows.length, 'trip ids are unique');
+  invariant(destinations.size > 0, 'the schedule DB has trips, each running to a station');
+  return destinations;
 }
 
 /** stop_id → station key, and station key → its stop_ids (sorted), for every stop in the schedule. */

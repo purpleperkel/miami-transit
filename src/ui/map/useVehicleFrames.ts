@@ -7,6 +7,7 @@ import type { LiveBatch, LiveVehicle } from '@/domain/live/types';
 import { invariant } from '@/lib/invariant';
 import { detach } from '@/live/detach';
 
+import { type MarkerLanes, NO_LANES } from './markerLanes';
 import { tickPlan } from './tickPlan';
 import { recordTickTime } from './tickTime';
 import { type FramePlan, framesAt, NO_SHOWN, planFrames, SAMPLE_S, type ShownTracks, type VehicleFrame } from './vehicleFrames';
@@ -30,25 +31,33 @@ export type VehicleFrames = {
 
 const NO_FRAMES: VehicleFrames = Object.freeze({ vehicles: [], atS: null });
 
-type PlanHolder = { plan: FramePlan | null; source: TimetableSource | null; shown: ShownTracks };
+type PlanHolder = { plan: FramePlan | null; source: TimetableSource | null; lanes: MarkerLanes; shown: ShownTracks };
 
 /**
  * Every vehicle at the latest frame tick. `tickMs` 0 draws one frame and starts no timer. `source`,
- * `batch` and `clockMs` must keep their identity between renders (a new one restarts the timer).
+ * `batch`, `clockMs` and `lanes` must keep their identity between renders (a new one restarts the
+ * timer). `lanes` gives each frame its line's lane (markerLanes.ts; NO_LANES: every frame in lane 0).
  */
 export function useVehicleFrames(
   source: TimetableSource | null,
   batch: LiveBatch<LiveVehicle> | null,
   tickMs: number,
   clockMs: () => number = Date.now,
+  lanes: MarkerLanes = NO_LANES,
 ): VehicleFrames {
   invariant(Number.isFinite(tickMs) && tickMs >= 0, `a tick period is a non-negative number of ms, got ${tickMs}`);
-  invariant(typeof clockMs === 'function', 'frames are drawn against a clock');
-  const holder = useRef<PlanHolder>({ plan: null, source: null, shown: NO_SHOWN });
+  invariant(typeof clockMs === 'function' && typeof lanes.laneAt === 'function', 'frames are drawn against a clock, in lanes');
+  const holder = useRef<PlanHolder>({ plan: null, source: null, lanes, shown: NO_SHOWN });
   const [frames, setFrames] = useState<VehicleFrames>(NO_FRAMES);
-  useEffect(() => runFrames(() => setFrames(timedFrames(holder, source, batch, clockMs() / 1000)), tickMs), [source, batch, tickMs, clockMs]);
+  useEffect(
+    () => runFrames(() => setFrames(timedFrames(holder, { source, batch, lanes }, clockMs() / 1000)), tickMs),
+    [source, batch, tickMs, clockMs, lanes],
+  );
   return frames;
 }
+
+/** What a frame is drawn from: the timetable source, the live batch, and the marker lanes. */
+type FrameInputs = { readonly source: TimetableSource | null; readonly batch: LiveBatch<LiveVehicle> | null; readonly lanes: MarkerLanes };
 
 /** Draws one frame now, then one every `tickMs` (none for 0); returns the teardown. */
 function runFrames(draw: () => void, tickMs: number): () => void {
@@ -64,23 +73,25 @@ function runFrames(draw: () => void, tickMs: number): () => void {
 }
 
 /** One frame at `nowS` (nextFrames), its draw timed with performance.now() and recorded for Diagnostics. */
-function timedFrames(holder: RefObject<PlanHolder>, source: TimetableSource | null, batch: LiveBatch<LiveVehicle> | null, nowS: number): VehicleFrames {
+function timedFrames(holder: RefObject<PlanHolder>, inputs: FrameInputs, nowS: number): VehicleFrames {
   const startMs = performance.now();
   invariant(Number.isFinite(startMs), 'the frame timer reads a monotonic clock');
-  const frames = nextFrames(holder, source, batch, nowS);
+  const frames = nextFrames(holder, inputs, nowS);
   const durationMs = performance.now() - startMs;
   invariant(durationMs >= 0, 'a monotonic clock never runs backward');
   recordTickTime(durationMs);
   return frames;
 }
 
-/** One frame at `nowS`: the plan is remade when its span has passed, or the timetable or the live batch changed. */
-function nextFrames(holder: RefObject<PlanHolder>, source: TimetableSource | null, batch: LiveBatch<LiveVehicle> | null, nowS: number): VehicleFrames {
+/** One frame at `nowS`: the plan is remade when its span has passed, or the timetable, the live batch or the lanes changed. */
+function nextFrames(holder: RefObject<PlanHolder>, inputs: FrameInputs, nowS: number): VehicleFrames {
   invariant(Number.isFinite(nowS), 'a frame is drawn at an instant');
   const held = holder.current;
-  if (held.plan === null || held.source !== source || held.plan.batch !== batch || nowS < held.plan.fromS || nowS > held.plan.toS) {
-    held.plan = makePlan(source, batch, Math.floor(nowS));
+  const { source, batch, lanes } = inputs;
+  if (held.plan === null || held.source !== source || held.lanes !== lanes || held.plan.batch !== batch || nowS < held.plan.fromS || nowS > held.plan.toS) {
+    held.plan = makePlan(inputs, Math.floor(nowS));
     held.source = source;
+    held.lanes = lanes;
   }
   const drawn = framesAt(held.plan, nowS, held.shown);
   held.shown = drawn.shown;
@@ -89,10 +100,10 @@ function nextFrames(holder: RefObject<PlanHolder>, source: TimetableSource | nul
 }
 
 /** The plan for [fromS, fromS + SAMPLE_S]: the one timetable read of the span, then the merge. */
-function makePlan(source: TimetableSource | null, batch: LiveBatch<LiveVehicle> | null, fromS: number): FramePlan {
+function makePlan({ source, batch, lanes }: FrameInputs, fromS: number): FramePlan {
   invariant(Number.isSafeInteger(fromS), 'a sample starts on a whole second');
   const outcome = source === null ? null : source.timetableAround(fromS, fromS + SAMPLE_S);
-  const plan = planFrames(outcome !== null && outcome.kind === 'timetable' ? { days: outcome.days, shapes: outcome.shapes } : null, batch, fromS);
+  const plan = planFrames(outcome !== null && outcome.kind === 'timetable' ? { days: outcome.days, shapes: outcome.shapes } : null, batch, fromS, lanes);
   invariant(plan.fromS === fromS && plan.toS === fromS + SAMPLE_S, 'the plan covers one sample span');
   return plan;
 }

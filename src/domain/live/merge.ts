@@ -3,14 +3,16 @@ import { invariant } from '../../lib/invariant';
 import { linesOfRoute } from '../lines/line-catalog';
 import type { Mode } from '../network/stations';
 import type { ScheduledVehicle } from '../schedule/positions';
-import { MATCH_RADIUS_M, MIAMI_BOUNDS, providerConfig } from './constants';
+import { MATCH_RADIUS_M, MIAMI_BOUNDS } from './constants';
+import { isDroppedSighting, isStaleSighting, sightingOf } from './staleness';
 import { type LiveBatch, type LiveVehicle, TRUNK_LINE_IDS } from './types';
 
 /**
  * Plan M4.6 / §4 merge rules 1–5: the vehicles the map shows, from the timetable's scheduled
  * vehicles (M3.5) and the live provider's batch. Pure; thresholds are per provider (§3).
- *   1. Drop live vehicles older than the provider's maximum age (Swiftly 150 s, Transitland 210 s)
- *      or outside the Miami bounding box.
+ *   1. Drop live vehicles past the provider's max age — the feed older than maxAgeS, or the vehicle
+ *      lagging its feed by more than maxAgeS (Swiftly 150 s, Transitland 300 s; staleness.ts) — or
+ *      outside the Miami bounding box.
  *   2. Match live to scheduled by trip_id; otherwise greedily by line and distance — the closest
  *      remaining same-line pair first, at most 800 m apart. A trunk vehicle (RAIL_TRUNK / MM_TRUNK,
  *      line unknown) may pair with a scheduled vehicle of either line on its route.
@@ -18,8 +20,8 @@ import { type LiveBatch, type LiveVehicle, TRUNK_LINE_IDS } from './types';
  *      ghost turning live keeps its marker).
  *   4. An unmatched live vehicle is still shown (key `live:<vehicle id>`).
  *   5. Unmatched scheduled vehicles ("ghosts") of a mode whose live feed is fresh are hidden. A mode's
- *      feed is fresh when its newest kept live vehicle is at most the provider's fresh age (Swiftly
- *      75 s, Transitland 150 s) — judged per mode, because the county's Mover positions are
+ *      feed is fresh when one of its kept live vehicles is not stale (staleness.ts: the feed live, the
+ *      vehicle within lagStaleS of it) — judged per mode, because the county's Mover positions are
  *      intermittent while rail is live (§1), and a rail-only feed must not erase the Mover.
  * Rule 6 (predictions) is merge-departures.ts.
  */
@@ -62,7 +64,7 @@ export function mergeVehicles(scheduled: readonly ScheduledVehicle[], live: Live
   invariant(new Set(scheduled.map((s) => s.vehicleKey)).size === scheduled.length, 'scheduled vehicle keys are unique');
   const kept = keepLive(live, nowS);
   const matches = matchVehicles(scheduled, kept.vehicles);
-  const freshModes = live === null ? [] : MODES.filter((mode) => kept.vehicles.some((v) => v.mode === mode && nowS - v.timestamp <= providerConfig(live.provider).freshS));
+  const freshModes = live === null ? [] : MODES.filter((mode) => kept.vehicles.some((v) => v.mode === mode && !isStaleSighting(sightingOf(live.provider, live, v.timestamp, nowS))));
   const matchedLive = new Map(matches.map((m) => [m.live.vehicleId, m]));
   const matchedGhosts = new Set(matches.map((m) => m.scheduled.vehicleKey));
   const vehicles: MergedVehicle[] = kept.vehicles.map((v) => liveVehicle(v, matchedLive.get(v.vehicleId) ?? null, nowS));
@@ -82,18 +84,25 @@ export function mergeVehicles(scheduled: readonly ScheduledVehicle[], live: Live
   return { vehicles, freshModes, dropped: { tooOld: kept.tooOld, outOfBounds: kept.outOfBounds }, hiddenGhosts };
 }
 
-/** Rule 1: the batch's vehicles no older than the provider's max age and inside the Miami box. */
+/** Rule 1: the batch's vehicles not past the provider's max age (staleness.ts) and inside the Miami box. */
 function keepLive(live: LiveBatch<LiveVehicle> | null, nowS: number): { vehicles: LiveVehicle[]; tooOld: number; outOfBounds: number } {
   invariant(Number.isFinite(nowS), 'ages are measured at an instant');
   if (live === null) {
     return { vehicles: [], tooOld: 0, outOfBounds: 0 };
   }
-  const { maxAgeS } = providerConfig(live.provider);
-  const tooOld = live.items.filter((v) => nowS - v.timestamp > maxAgeS);
-  const outOfBounds = live.items.filter((v) => nowS - v.timestamp <= maxAgeS && !inMiami(v.position));
-  const vehicles = live.items.filter((v) => nowS - v.timestamp <= maxAgeS && inMiami(v.position));
+  const tooOld = live.items.filter((v) => pastMaxAge(live, v, nowS));
+  const outOfBounds = live.items.filter((v) => !pastMaxAge(live, v, nowS) && !inMiami(v.position));
+  const vehicles = live.items.filter((v) => !pastMaxAge(live, v, nowS) && inMiami(v.position));
   invariant(vehicles.length + tooOld.length + outOfBounds.length === live.items.length, 'every live vehicle is kept or counted');
   return { vehicles, tooOld: tooOld.length, outOfBounds: outOfBounds.length };
+}
+
+/** Rule 1's age test: the vehicle's feed is past the max age, or the vehicle lags it by more (staleness.ts). */
+function pastMaxAge(batch: LiveBatch<LiveVehicle>, vehicle: LiveVehicle, nowS: number): boolean {
+  invariant(batch.items.includes(vehicle), 'the vehicle belongs to the batch it is judged in');
+  const sighting = sightingOf(batch.provider, batch, vehicle.timestamp, nowS);
+  invariant(sighting.provider === batch.provider, 'a vehicle is judged by its own provider');
+  return isDroppedSighting(sighting);
 }
 
 function inMiami(point: LatLon): boolean {

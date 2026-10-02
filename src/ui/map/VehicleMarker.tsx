@@ -46,13 +46,7 @@ function VehicleMarkerView({ vehicle, scheme, onPress }: VehicleMarkerProps) {
         style={[styles.centred, { width: visual.hitPt, height: visual.hitPt }]}>
         <View testID={`vehicle-body-${vehicle.key}`} style={[styles.centred, { opacity: visual.opacity }]}>
           {visual.octant === null ? null : <Nose visual={visual} />}
-          <View style={bodyStyle(visual)}>
-            {visual.letter === null ? null : (
-              <Text allowFontScaling={false} style={[styles.letter, { color: visual.letterColor }]}>
-                {visual.letter}
-              </Text>
-            )}
-          </View>
+          <VehicleBody visual={visual} />
         </View>
         {visual.stale ? <ClockBadge testID={`vehicle-stale-badge-${vehicle.key}`} /> : null}
       </View>
@@ -76,6 +70,21 @@ function markerLook(vehicle: VehicleFrame, scheme: ColorScheme): { readonly visu
   const label = vehicleLabel({ lineId: vehicle.lineId, source: vehicle.source, staleAgeS, octant: visual.octant });
   invariant(visual.key.includes(vehicle.key) && label.length > 0, 'the look names its vehicle, and VoiceOver has words for it');
   return { visual, label };
+}
+
+/** A vehicle's body as its visual draws it: the square or dot, its ring, and a train's letter (the map legend draws the same). */
+export function VehicleBody({ visual }: { readonly visual: VehicleVisual }) {
+  invariant(visual.letter === null || visual.letter.length === 1, 'a letter bullet is one letter');
+  invariant(visual.sizePt > 0, 'a body has a size');
+  return (
+    <View style={bodyStyle(visual)}>
+      {visual.letter === null ? null : (
+        <Text allowFontScaling={false} style={[styles.letter, { color: visual.letterColor }]}>
+          {visual.letter}
+        </Text>
+      )}
+    </View>
+  );
 }
 
 function bodyStyle(visual: VehicleVisual) {
@@ -107,7 +116,7 @@ function Nose({ visual }: { readonly visual: VehicleVisual }) {
 }
 
 /** The stale badge: a clock on a white disc at the body's top right. */
-function ClockBadge({ testID }: { readonly testID: string }) {
+export function ClockBadge({ testID }: { readonly testID: string }) {
   invariant(testID.length > 0, 'the badge is identifiable');
   invariant(BADGE_SYMBOL_PT < BADGE_PT, 'the clock fits its disc');
   return (

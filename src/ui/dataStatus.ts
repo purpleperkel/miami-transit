@@ -1,7 +1,7 @@
 import type { SFSymbol } from 'expo-symbols';
 
 import { type ExpiryState, type ServiceEnds, scheduleExpiry } from '../domain/expiry/expiry';
-import { providerConfig } from '../domain/live/constants';
+import { feedIsLive, feedTimeOf } from '../domain/live/staleness';
 import type { LiveBatch, LiveVehicle } from '../domain/live/types';
 import type { CapabilityStatus } from '../live/poller';
 import { invariant } from '../lib/invariant';
@@ -16,9 +16,10 @@ import { minutesOld } from './a11y';
  *
  *   expired    the bundled schedule has run out (the mode that ends first is past its end, M3.7)
  *   offline    the live provider cannot be reached: its latest poll failed on the network or timed out
- *   stale      live vehicles, but the newest is older than its provider's fresh threshold (§3:
- *              Swiftly 75 s, Transitland 150 s) — "Live · 2 min old"
- *   live       live vehicles within that threshold
+ *   stale      live vehicles, but their FEED's header is older than its provider's freshS (the
+ *              relative rule, src/domain/live/staleness.ts: Swiftly 75 s, Transitland 180 s) —
+ *              "Live · 3 min old"; every marker of that feed renders stale with it
+ *   live       live vehicles whose feed header is within that limit
  *   expiring   the schedule ends within 14 days (M3.7 warn/urgent) — "Scheduled · ends in N days"
  *   scheduled  nothing else holds: the map shows the timetable alone
  */
@@ -78,23 +79,26 @@ export function statusConditions(inputs: StatusInputs): StatusCondition[] {
   if (lastError !== null && (lastError.kind === 'network' || lastError.kind === 'timeout')) {
     conditions.push({ kind: 'offline' });
   }
-  const ageS = newestAgeS(inputs.vehicles, inputs.nowS);
+  const ageS = feedAgeS(inputs.vehicles, inputs.nowS);
   if (ageS !== null && inputs.vehicles !== null) {
-    conditions.push(ageS > providerConfig(inputs.vehicles.provider).freshS ? { kind: 'stale', ageS } : { kind: 'live' });
+    conditions.push(feedIsLive(inputs.vehicles.provider, ageS) ? { kind: 'live' } : { kind: 'stale', ageS });
   }
   invariant(conditions.filter((c) => c.kind === 'stale' || c.kind === 'live').length <= 1, 'the live data is stale or fresh, not both');
   return conditions;
 }
 
-/** The age of the newest live vehicle in the batch, or null when there is none. */
-function newestAgeS(batch: LiveBatch<LiveVehicle> | null, nowS: number): number | null {
+/**
+ * How old the vehicles' feed is at `nowS` — its header's age (a batch without a header timestamp is
+ * timed by its fetch, staleness.ts) — or null when there are no live vehicles to judge.
+ */
+function feedAgeS(batch: LiveBatch<LiveVehicle> | null, nowS: number): number | null {
   invariant(Number.isFinite(nowS), 'an age is measured at an instant');
   if (batch === null || batch.items.length === 0) {
     return null;
   }
-  const newest = Math.max(...batch.items.map((vehicle) => vehicle.timestamp));
-  invariant(Number.isFinite(newest), 'every live vehicle has a timestamp');
-  return Math.max(0, nowS - newest);
+  const ageS = Math.max(0, nowS - feedTimeOf(batch));
+  invariant(Number.isFinite(ageS) && ageS >= 0, 'a feed age is a non-negative number of seconds');
+  return ageS;
 }
 
 /** What the pill shows for a status: an SF Symbol AND a word (never colour alone, §4), and whether the icon pulses. */

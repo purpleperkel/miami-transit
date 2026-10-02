@@ -61,13 +61,14 @@ describe('Data & Settings (M8b.1): the provider status row', () => {
     expect(screen.textOf('provider-status-swiftly')).toBe('Off · no key');
   });
 
-  it('data older than the fresh threshold (150 s) reads Stale, with its age', async () => {
+  it('data older than the fresh threshold (180 s) reads Stale, with its age', async () => {
     const server = new FakeServer({ [TL_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES } });
     const rig = await liveRig({ keychain: { 'live.key.transitland': FAKE_KEY }, fetch: server.fetch });
     await poll(rig, true, PROVIDER_CONFIG.transitland.freshS + 1);
     expect(rig.latest().vehicles?.fetchedAt).toBe(OCT_1_NOON_S);
     const screen = await renderSettings(rig);
-    expect(screen.textOf('provider-status-transitland')).toBe('Stale · updated 2 min ago · 1.3 KB per poll');
+    expect(PROVIDER_CONFIG.transitland.freshS).toBe(180);
+    expect(screen.textOf('provider-status-transitland')).toBe('Stale · updated 3 min ago · 1.3 KB per poll');
   });
 
   it('Failing after 3 failed polls, and not before', async () => {

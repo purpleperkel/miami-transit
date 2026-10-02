@@ -59,6 +59,8 @@ type Row = {
   readonly expected: readonly string[];
   readonly dropped?: VehicleMerge['dropped'];
   readonly positions?: Readonly<Record<string, LatLon>>;
+  /** How old the feed header is at the merge (default 0: each vehicle's age is then its lag behind the feed). */
+  readonly feedAgeS?: number;
 };
 
 const NOTHING_DROPPED = { tooOld: 0, outOfBounds: 0 };
@@ -70,8 +72,10 @@ const RULES: readonly Row[] = [
     expected: ['20261001:B-G1 scheduled - GREEN', '20261001:B-M1 scheduled - MM_INNER'] },
   { name: 'rule 1: max age — a vehicle 180 s old is dropped past Swiftly\'s 150 s', provider: 'swiftly', ghosts: [G1], trains: [train('r1', FAR_NORTH, { ageS: 180 })],
     expected: ['20261001:B-G1 scheduled - GREEN'], dropped: { tooOld: 1, outOfBounds: 0 } },
-  { name: 'rule 1: max age — the same 180 s old vehicle is kept within Transitland\'s 210 s', provider: 'transitland', ghosts: [G1], trains: [train('r1', FAR_NORTH, { ageS: 180 })],
+  { name: 'rule 1: max age — the same vehicle 180 s behind its feed is kept within Transitland\'s 300 s', provider: 'transitland', ghosts: [G1], trains: [train('r1', FAR_NORTH, { ageS: 180 })],
     expected: ['20261001:B-G1 scheduled - GREEN', 'live:r1 live - GREEN'] },
+  { name: 'rule 1: max age — a feed whose header is past Transitland\'s 300 s drops even its newest vehicle', provider: 'transitland', ghosts: [G1], trains: [train('r1', FAR_NORTH, { ageS: 301 })],
+    feedAgeS: 301, expected: ['20261001:B-G1 scheduled - GREEN'], dropped: { tooOld: 1, outOfBounds: 0 } },
   { name: 'rule 1: max age — exactly 150 s old is still kept on Swiftly', provider: 'swiftly', ghosts: [], trains: [train('r1', FAR_NORTH, { ageS: 150 })],
     expected: ['live:r1 live - GREEN'] },
   { name: 'rule 1: bounding box — a 0,0 fix is dropped even with a matching trip', provider: 'swiftly', ghosts: [G1], trains: [train('r9', { latitude: 0, longitude: 0 }, { tripId: 'T-G1' })],
@@ -99,8 +103,10 @@ const RULES: readonly Row[] = [
     expected: ['20261001:B-G1 live trip GREEN', '20261001:B-M1 scheduled - MM_INNER'] },
   { name: 'rule 5: a stale feed keeps the ghosts — rail 100 s old on Swiftly (fresh ≤ 75 s)', provider: 'swiftly', ghosts: [G1, O1], trains: [train('r2', GOVERNMENT_CENTER, { tripId: 'T-G1', ageS: 100 })],
     expected: ['20261001:B-G1 live trip GREEN', '20261001:B-O1 scheduled - ORANGE'] },
-  { name: 'rule 5: Transitland is fresh up to 150 s — rail 100 s old hides the ghosts', provider: 'transitland', ghosts: [G1, O1], trains: [train('r2', GOVERNMENT_CENTER, { tripId: 'T-G1', ageS: 100 })],
+  { name: 'rule 5: Transitland is fresh while a vehicle lags its feed by at most 90 s — rail 90 s behind hides the ghosts', provider: 'transitland', ghosts: [G1, O1], trains: [train('r2', GOVERNMENT_CENTER, { tripId: 'T-G1', ageS: 90 })],
     expected: ['20261001:B-G1 live trip GREEN'] },
+  { name: 'rule 5: a Transitland feed 120 s old with rail 10 s behind it is fresh and hides the ghosts', provider: 'transitland', ghosts: [G1, O1], trains: [train('r2', GOVERNMENT_CENTER, { tripId: 'T-G1', ageS: 130 })],
+    feedAgeS: 120, expected: ['20261001:B-G1 live trip GREEN'] },
 ];
 
 function summary(vehicle: MergedVehicle): string {
@@ -110,16 +116,17 @@ function summary(vehicle: MergedVehicle): string {
   return text;
 }
 
-function batch(provider: ProviderId, trains: readonly LiveVehicle[]): LiveBatch<LiveVehicle> {
-  const made: LiveBatch<LiveVehicle> = { provider, items: trains, feedTimestamp: NOW, fetchedAt: NOW, bytes: 1_000, dropped: {} };
+/** A batch fetched at NOW whose feed header is `feedAgeS` old (a provider serving its cached feed). */
+function batch(provider: ProviderId, trains: readonly LiveVehicle[], feedAgeS = 0): LiveBatch<LiveVehicle> {
+  const made: LiveBatch<LiveVehicle> = { provider, items: trains, feedTimestamp: NOW - feedAgeS, fetchedAt: NOW, bytes: 1_000, dropped: {} };
   expect(made.items).toBe(trains);
   expect(made.provider).toBe(provider);
   return made;
 }
 
 describe('vehicle merge (M4.6): the §4 merge rules as one table', () => {
-  it.each(RULES)('$name', ({ provider, ghosts, trains, expected, dropped, positions }) => {
-    const merged = mergeVehicles(ghosts, provider === null ? null : batch(provider, trains), NOW);
+  it.each(RULES)('$name', ({ provider, ghosts, trains, expected, dropped, positions, feedAgeS }) => {
+    const merged = mergeVehicles(ghosts, provider === null ? null : batch(provider, trains, feedAgeS), NOW);
     expect(merged.vehicles.map(summary)).toEqual(expected);
     expect(merged.dropped).toEqual(dropped ?? NOTHING_DROPPED);
     for (const [key, position] of Object.entries(positions ?? {})) {

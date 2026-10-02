@@ -60,6 +60,14 @@ async function expectStale(vehicle: VehicleFrame, stale: boolean): Promise<void>
   expect(badge).toBe(stale);
 }
 
+/** A Transitland frame whose feed is 10 s old and whose fix lags that feed by `lagS`. */
+function lagging(lagS: number): VehicleFrame {
+  const made = frame({ key: `live:lag-${lagS}`, source: 'live', live: { provider: 'transitland', ageS: 10 + lagS, feedAgeS: 10, lagS } });
+  expect(made.live?.lagS).toBe(lagS);
+  expect(made.source).toBe('live');
+  return made;
+}
+
 describe('VehicleMarker heading (M5.9)', () => {
   it('bearingOctant(359) is 0', () => {
     expect(bearingOctant(359)).toBe(0);
@@ -112,6 +120,7 @@ describe('VehicleMarker (M5.9)', () => {
   });
 });
 
+// Ages here are the feed header's age with the fix 0 s behind it (liveFrame), except where a lag is named (mfix3 §4).
 describe('VehicleMarker staleness (M5.9; §3 fresh thresholds)', () => {
   it('swiftly at 75 s is not stale', async () => {
     expect(PROVIDER_CONFIG.swiftly.freshS).toBe(75);
@@ -129,13 +138,18 @@ describe('VehicleMarker staleness (M5.9; §3 fresh thresholds)', () => {
   });
 
   it('transitland at 150 s is not stale', async () => {
-    expect(PROVIDER_CONFIG.transitland.freshS).toBe(150);
-    await expectStale(liveFrame('transitland', PROVIDER_CONFIG.transitland.freshS), false);
+    expect(PROVIDER_CONFIG.transitland.freshS).toBeGreaterThan(150);
+    await expectStale(liveFrame('transitland', 150), false);
   });
 
-  it('transitland stale above 150 s', async () => {
-    expect(PROVIDER_CONFIG.transitland.freshS).toBe(150);
-    await expectStale(liveFrame('transitland', PROVIDER_CONFIG.transitland.freshS + 1), true);
+  it('transitland stale above a 180 s old feed or 90 s behind it', async () => {
+    expect([PROVIDER_CONFIG.transitland.freshS, PROVIDER_CONFIG.transitland.lagStaleS]).toEqual([180, 90]);
+    await expectStale(liveFrame('transitland', 180), false);
+    await expectStale(liveFrame('transitland', 181), true);
+    // A fresh feed (10 s old) with the fix lagging it: 90 s behind is solid, 91 s behind is stale.
+    await expectStale(lagging(90), false);
+    await expectStale(lagging(91), true);
+    expect(lagging(91).live?.feedAgeS).toBe(10);
   });
 
   it('a stale vehicle says how old it is', async () => {

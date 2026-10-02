@@ -1,5 +1,5 @@
-import { providerConfig } from '../../domain/live/constants';
-import type { LiveLineId, ProviderId } from '../../domain/live/types';
+import { isStaleSighting, type Sighting } from '../../domain/live/staleness';
+import type { LiveLineId } from '../../domain/live/types';
 import type { Mode } from '../../domain/network/stations';
 import { invariant } from '../../lib/invariant';
 import { COLOR_SCHEMES, type ColorScheme, lineColors, MAP_LAND } from '../colors';
@@ -92,12 +92,21 @@ export function bearingOctant(bearing: number): Octant {
   return octant;
 }
 
-/** A live fix is STALE when it is older than its provider's fresh threshold (§3: Swiftly 75 s, Transitland 150 s). */
-export function isStale(provider: ProviderId, ageS: number): boolean {
-  invariant(Number.isFinite(ageS) && ageS >= 0, `a fix's age is a non-negative number of seconds, got ${ageS}`);
-  const { freshS } = providerConfig(provider);
-  invariant(freshS > 0, `${provider} has a fresh threshold`);
-  return ageS > freshS;
+/**
+ * A live fix as a marker draws it: its provider, its age on our clock (what VoiceOver reads), and how it
+ * stands against its own feed — the feed header's age and the fix's lag behind it (staleness.ts).
+ */
+export type LiveSighting = Sighting & { readonly ageS: number };
+
+/**
+ * A live fix is STALE by the relative rule (src/domain/live/staleness.ts): its feed is older than the
+ * provider's freshS (Swiftly 75 s, Transitland 180 s), or it lags that feed by more than lagStaleS
+ * (Swiftly 60 s, Transitland 90 s). The pill reads the same feed age, so pill and markers agree.
+ */
+export function isStale(live: LiveSighting): boolean {
+  invariant(Number.isFinite(live.ageS) && live.ageS >= 0, `a fix's age is a non-negative number of seconds, got ${live.ageS}`);
+  invariant(live.feedAgeS >= 0 && live.lagS >= 0, 'a sighting measures non-negative ages');
+  return isStaleSighting(live);
 }
 
 /** Rail vehicles are 24 pt rounded squares carrying a letter; Mover vehicles are 16 pt dots (plan §4 "Vehicles"). */
@@ -118,8 +127,8 @@ export type VehicleVisualInput = {
   readonly lineId: LiveLineId;
   /** live = drawn at a live fix (solid); scheduled = a timetable position (hollow). */
   readonly source: 'live' | 'scheduled';
-  /** The live fix's provider and age; null for a scheduled vehicle. */
-  readonly live: { readonly provider: ProviderId; readonly ageS: number } | null;
+  /** The live fix against its feed; null for a scheduled vehicle. */
+  readonly live: LiveSighting | null;
   readonly bearing: number | null;
   readonly scheme: ColorScheme;
 };
@@ -146,14 +155,15 @@ export type VehicleVisual = {
  * How a vehicle marker looks (plan §4 "Vehicles", M5.9). LIVE is SOLID: filled with the line's
  * stroke, ringed in its casing, the letter in its badge text. SCHEDULED is HOLLOW: land-filled,
  * ringed and lettered in the line's ink (the casing on light land, the stroke on dark land, whichever
- * carries the contrast). A STALE live vehicle is drawn at half opacity with a clock badge.
+ * carries the contrast). A STALE live vehicle (isStale: the relative rule) is drawn at half opacity with a
+ * clock badge.
  */
 export function vehicleVisual(input: VehicleVisualInput): VehicleVisual {
   invariant((input.source === 'live') === (input.live !== null), 'a live vehicle carries its fix age, and only a live one does');
   const colors = lineColors(input.lineId, input.scheme);
   const hollow = input.source === 'scheduled';
   const ink = input.scheme === 'light' ? colors.casing : colors.stroke;
-  const stale = input.live !== null && isStale(input.live.provider, input.live.ageS);
+  const stale = input.live !== null && isStale(input.live);
   const octant = input.bearing === null ? null : bearingOctant(input.bearing);
   const rail = input.mode === 'rail';
   const visual: VehicleVisual = {

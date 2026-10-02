@@ -34,9 +34,9 @@ nodetest_real() {
     END { print n + 0 }')
   [ "$hits" -ge 1 ] \
     || { echo "$out" | tail -15; echo "ratchet: no passing test named /$pattern/i in $file"; return 1; }
-  echo "$out" | grep -qE "^# fail 0" \
+  echo "$out" | _qgrep -E "^# fail 0" \
     || { echo "$out" | tail -15; echo "ratchet: failures in $file (/$pattern/i)"; return 1; }
-  echo "$out" | grep -qF "ratchet-db-open: $REAL_DB" \
+  echo "$out" | _qgrep -F "ratchet-db-open: $REAL_DB" \
     || { echo "$out" | sed -n '/ratchet-db-open:/p'; echo "ratchet: /$pattern/i in $file never queried $REAL_DB — acceptance must run on the real DB, in place"; return 1; }
 }
 

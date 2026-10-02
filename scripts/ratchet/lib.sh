@@ -3,6 +3,12 @@
 # Every helper fails LOUD with a named reason; a silent pass-with-nothing-run is the exact
 # false green these scripts exist to prevent.
 set -euo pipefail
+
+# _qgrep <grep args> — use INSTEAD of `grep -q` on the right of a pipe. Under `set -o pipefail`, grep -q exits at
+# its first match; a producer still writing (output larger than the pipe buffer, ~16–64 KB) then dies of SIGPIPE
+# (141) and the whole pipeline FAILS although it matched (found by the m6b builder on gate 22, 2026-10-01).
+# _qgrep reads all its input, discards it, and returns grep's own 0/1.
+_qgrep() { grep "$@" >/dev/null; }
 # AUTHORING RULE: never write a top-level gate as `cmd && gate`. Under set -e, a failure on the
 # LEFT of && does not stop the script, so the gate is silently skipped (false green). Put each
 # gate on its own line, or end a chain with `|| { echo "ratchet: <why>"; return 1; }`.
@@ -85,7 +91,7 @@ _nodetest_count() { # stdin: TAP. $1 = lowercase ERE ('' = any), $2 = the file p
 _nodetest_clean() { # stdin: TAP. fails unless 0 fail, 0 skipped, 0 todo, 0 cancelled
   local out; out=$(cat)
   for k in fail skipped todo cancelled; do
-    echo "$out" | grep -qE "^# $k 0$" || { echo "$out" | tail -15; echo "ratchet: '# $k' is not 0 — failing/skipped/todo tests are forbidden"; return 1; }
+    echo "$out" | _qgrep -E "^# $k 0$" || { echo "$out" | tail -15; echo "ratchet: '# $k' is not 0 — failing/skipped/todo tests are forbidden"; return 1; }
   done
 }
 
@@ -142,5 +148,5 @@ full_gate() {
 ios_export() {
   local out
   out=$(npx expo export --platform ios --output-dir .cache/export 2>&1) || { echo "$out" | tail -30; return 1; }
-  echo "$out" | grep -q "Exported: .cache/export" || { echo "$out" | tail -10; echo "ratchet: expo export did not report success"; return 1; }
+  echo "$out" | _qgrep "Exported: .cache/export" || { echo "$out" | tail -10; echo "ratchet: expo export did not report success"; return 1; }
 }

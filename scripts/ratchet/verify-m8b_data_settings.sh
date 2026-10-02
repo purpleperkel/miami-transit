@@ -646,12 +646,12 @@ ORACLE
   out=$(local_bin jest --ci --rootDir "$PWD" --roots "$dir" --testMatch '**/*.oracle.test.tsx' 2>&1) || rc=$?
   rm -rf "$dir"
   if [ "$rc" -ne 0 ]; then
-    if echo "$out" | grep -q "ratchet-oracle:"; then echo "$out" | grep -m1 "ratchet-oracle:" | sed -e 's/^ *//'
-    elif echo "$out" | grep -qE '●|Exceeded timeout|Cannot find module|SyntaxError'; then echo "$out" | grep -E -A6 '●|Exceeded timeout|Cannot find module|SyntaxError' | grep -vE '^ +at ' | head -24
+    if echo "$out" | _qgrep "ratchet-oracle:"; then echo "$out" | grep -m1 "ratchet-oracle:" | sed -e 's/^ *//'
+    elif echo "$out" | _qgrep -E '●|Exceeded timeout|Cannot find module|SyntaxError'; then echo "$out" | grep -E -A6 '●|Exceeded timeout|Cannot find module|SyntaxError' | grep -vE '^ +at ' | head -24
     else echo "$out" | tail -30; fi
     echo "ratchet: data_oracle '$check' failed on the real screen"; return 1
   fi
-  echo "$out" | grep -qE "Tests: +1 passed, 1 total" \
+  echo "$out" | _qgrep -E "Tests: +1 passed, 1 total" \
     || { echo "$out" | tail -15; echo "ratchet: the '$check' oracle did not run"; return 1; }
   echo "ratchet: data_oracle '$check' passed on the real screen"
 }

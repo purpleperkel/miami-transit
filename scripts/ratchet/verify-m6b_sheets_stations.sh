@@ -476,7 +476,7 @@ nodetest_real_case() {
   grep -qF "ratchet-db-open: $db" <<<"$out" \
     || { grep -F 'ratchet-db-open:' <<<"$out" || echo '(no DB was queried)'; echo "ratchet: /$pat/i in $file never queried $db — selector acceptance runs on the real schedule DB, in place"; return 1; }
   [ -z "$table" ] && return 0
-  grep -F "ratchet-db-sql: $db :: " <<<"$out" | grep -qiE "(^|[^a-z0-9_])${table}([^a-z0-9_]|$)" \
+  grep -F "ratchet-db-sql: $db :: " <<<"$out" | _qgrep -iE "(^|[^a-z0-9_])${table}([^a-z0-9_]|$)" \
     || { grep -F "ratchet-db-sql: $db :: " <<<"$out" | sed 's/^.* :: /  sql: /' | sort -u | head -12; echo "ratchet: /$pat/i in $file: no SQL on $db names the $table table — the acceptance values must come from the real schedule, not hardcoded"; return 1; }
 }
 

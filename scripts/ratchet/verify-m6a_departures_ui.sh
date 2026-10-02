@@ -42,10 +42,10 @@ EOF
   out=$(local_bin jest --ci --rootDir "$PWD" --roots "$dir" --testMatch '**/*.oracle.test.ts' 2>&1) || rc=$?
   rm -rf "$dir"
   if [ "$rc" -ne 0 ]; then
-    if echo "$out" | grep -q "ratchet-oracle:"; then echo "$out" | grep -m1 "ratchet-oracle:"; else echo "$out" | tail -25; fi
+    if echo "$out" | _qgrep "ratchet-oracle:"; then echo "$out" | grep -m1 "ratchet-oracle:"; else echo "$out" | tail -25; fi
     echo "ratchet: $call in $module is not '$want'"; return 1
   fi
-  echo "$out" | grep -qE "Tests: +1 passed, 1 total" \
+  echo "$out" | _qgrep -E "Tests: +1 passed, 1 total" \
     || { echo "$out" | tail -15; echo "ratchet: the oracle for $call did not run"; return 1; }
   echo "ratchet: oracle $call = '$want'"
 }
@@ -82,7 +82,7 @@ EOF
   calls=$(wc -l < "$dir/calls" | tr -d ' ')
   rm -rf "$dir"
   [ "$rc" -eq 0 ] || { echo "$out" | tail -25; echo "ratchet: tests matching /$pat/ are red in $file"; return 1; }
-  echo "$out" | grep -qE "Tests: +([0-9]+ skipped, )?[1-9][0-9]* passed" \
+  echo "$out" | _qgrep -E "Tests: +([0-9]+ skipped, )?[1-9][0-9]* passed" \
     || { echo "$out" | tail -15; echo "ratchet: no jest test passed in $file (-t '$pat')"; return 1; }
   [ "$calls" -ge 1 ] \
     || { echo "ratchet: /$pat/ passed but never called $merge — the live merge must go through m4a's merge, not a type-only import or a UI re-implementation"; return 1; }
@@ -126,7 +126,7 @@ m6_primitives_suite() {
   listed=$(local_bin jest --ci --listTests src/ui/primitives 2>&1) \
     || { echo "$listed" | tail -15; echo "ratchet: jest --listTests src/ui/primitives failed"; return 1; }
   for f in LineBadge MinutesLabel FreshnessIndicator; do
-    echo "$listed" | grep -qE "/src/ui/primitives/__tests__/$f\.test\.tsx$" \
+    echo "$listed" | _qgrep -E "/src/ui/primitives/__tests__/$f\.test\.tsx$" \
       || { echo "ratchet: jest does not collect src/ui/primitives/__tests__/$f.test.tsx — plan V would never run it"; return 1; }
   done
   jest_nonempty src/ui/primitives

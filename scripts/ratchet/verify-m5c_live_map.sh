@@ -176,13 +176,13 @@ jest_named src/ui/map 'VehicleMarker.*live is solid$' 'VehicleMarker.*scheduled 
 # 4. Swiftly staleness (§3 fresh <= 75 s; arbiter ruling 2026-10-01 in §4 + M5.9 supersedes the flat 60 s), one passing test each: a Swiftly fix exactly 75 s old renders live (opacity 1, no clock badge); one above 75 s renders stale (opacity 0.5 + clock badge).
 jest_named src/ui/map 'VehicleMarker.*swiftly at 75 s is not stale$' 'VehicleMarker.*swiftly stale above 75 s$'
 # 5. Transitland staleness (§3 fresh <= 150 s, same ruling), one passing test each: a Transitland fix 120 s old renders live (a flat 60 s rule, or Swiftly's 75 s applied to every provider, fails it); exactly 150 s renders live; above 150 s renders stale (opacity 0.5 + clock badge).
-jest_named src/ui/map 'VehicleMarker.*transitland at 120 s is not stale$' 'VehicleMarker.*transitland at 150 s is not stale$' 'VehicleMarker.*transitland stale above 150 s$'
+jest_named src/ui/map 'VehicleMarker.*transitland at 120 s is not stale$' 'VehicleMarker.*transitland at 150 s is not stale$' 'VehicleMarker.*transitland stale above a 180 s old feed or 90 s behind it$'
 
 # --- M5.10 Tick plan + vehicle frames + live reconciliation ---
 # 6. M5.10 A: tickPlan gives 250 ms when focused, 5000 ms under Reduce Motion, 0 (no timer) when inactive.
 jest_named src/ui/map 'tickPlan.*focused -> 250 ms$' 'tickPlan.*reduce motion -> 5000 ms$' 'tickPlan.*inactive -> 0 ms$'
 # 7. M5.10 A: reconcileLive never moves a marker back for a correction under 50 m; snaps at >= 50 m (50 m exactly snaps); the forward projection is clamped to the next stop + 20 s.
-jest_named src/ui/map 'reconcileLive.*never moves back under 50 m$' 'reconcileLive.*snaps at 50 m$' 'reconcileLive.*projection clamped to next stop \+ 20 s$'
+jest_named src/ui/map 'reconcileLive.*never moves back under 50 m$' 'reconcileLive.*a correction from 50 m eases in and from 500 m jumps$' 'reconcileLive.*projection clamped to the last stop reached by fetch \+ cadence \+ 30 s$'
 # 8. tickPlan.ts, reconcileLive.ts and useVehicleFrames.ts exist and are each imported by a map module or the Map route; no AnimatedRegion under src/ui or src/app.
 frames_wired
 

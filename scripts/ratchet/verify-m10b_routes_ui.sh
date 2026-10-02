@@ -519,10 +519,10 @@ EOF
   out=$(local_bin jest --ci --rootDir "$PWD" --roots "$dir" --testMatch '**/*.oracle.test.ts' 2>&1) || rc=$?
   rm -rf "$dir"
   if [ "$rc" -ne 0 ]; then
-    if echo "$out" | grep -q "ratchet-oracle:"; then echo "$out" | grep -m1 "ratchet-oracle:"; else echo "$out" | tail -25; fi
+    if echo "$out" | _qgrep "ratchet-oracle:"; then echo "$out" | grep -m1 "ratchet-oracle:"; else echo "$out" | tail -25; fi
     echo "ratchet: leg-actions $check contract is not met"; return 1
   fi
-  echo "$out" | grep -qE "Tests: +1 passed, 1 total" \
+  echo "$out" | _qgrep -E "Tests: +1 passed, 1 total" \
     || { echo "$out" | tail -15; echo "ratchet: the $check oracle did not run"; return 1; }
   echo "ratchet: leg-actions $check contract holds on the real module"
 }
@@ -623,10 +623,10 @@ EOF
   out=$(local_bin jest --ci --rootDir "$PWD" --roots "$dir" --testMatch '**/*.oracle.test.ts' 2>&1) || rc=$?
   rm -rf "$dir"
   if [ "$rc" -ne 0 ]; then
-    if echo "$out" | grep -q "ratchet-oracle:"; then echo "$out" | grep -m1 "ratchet-oracle:"; else echo "$out" | tail -25; fi
+    if echo "$out" | _qgrep "ratchet-oracle:"; then echo "$out" | grep -m1 "ratchet-oracle:"; else echo "$out" | tail -25; fi
     echo "ratchet: recent places do not survive a reload through expo-sqlite/kv-store"; return 1
   fi
-  echo "$out" | grep -qE "Tests: +1 passed, 1 total" \
+  echo "$out" | _qgrep -E "Tests: +1 passed, 1 total" \
     || { echo "$out" | tail -15; echo "ratchet: the recents oracle did not run"; return 1; }
   echo "ratchet: recent places survive a reload through expo-sqlite/kv-store (newest first, no duplicates)"
 }

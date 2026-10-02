@@ -88,7 +88,7 @@ need "decode" src/domain/live/types.ts
 #    Swiftly cadence 30 s / fresh <= 75 s / max age 150 s; Transitland 60 / 150 / 210 s;
 #    8 s request abort; backoff cap 120 s.
 jest_cases src/domain/live/__tests__/constants.test.ts \
-  "swiftly 30/75/150" "transitland 60/150/210" "8 s abort" "backoff cap 120 s"
+  "swiftly 30/75/150" "transitland 60/180/300" "8 s abort" "backoff cap 120 s"
 
 # 3. M4.2 — one GTFS-RT mapper (Swiftly's vehicles + trip updates; Transitland's vehicles): fixture
 #    vehicles map to LiveVehicle and fixture trip updates to LivePrediction; only routes

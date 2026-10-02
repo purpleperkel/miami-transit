@@ -582,11 +582,11 @@ function mockScheduleCopy() {
 function mockNoUserDbFile(): never { throw new Error('ratchet-oracle: the user DB is opened through UserDbProvider open=, never a file'); }
 function mockKvStore() { return jest.requireActual(require('node:path').join(process.cwd(), 'src/ui/settings/__tests__/native-fakes')).kvStoreModule(); }
 function mockAsk() { return Promise.resolve({ granted: true, status: 'granted' }); }
-function mockCurrent() { return Promise.resolve({ coords: mockStart ?? mockFix ?? undefined, timestamp: Date.now() }); }
+function mockCurrent() { return Promise.resolve({ coords: mockStart ?? mockFix ?? undefined, timestamp: Date.now() - 1000 }); }
 /** The one watch: each fix the oracle pushes reaches it; remove() ends it. */
 function mockWatch(_o: unknown, onFix: (f: { coords: Fix }) => void) {
   mockWatchers.push(onFix);
-  if (mockFix !== null) onFix({ coords: mockFix });
+  if (mockFix !== null) onFix({ coords: mockFix, timestamp: Date.now() } as never);
   return Promise.resolve({ remove: () => { const i = mockWatchers.indexOf(onFix); if (i >= 0) mockWatchers.splice(i, 1); } });
 }
 const { act } = require('react-test-renderer');
@@ -671,7 +671,7 @@ const nowS = () => Date.now() / 1000;
 /** The fake clock stepped `seconds` times by 1 s, each step in its own act (the repo's act() trap). */
 async function step(seconds: number) { for (let i = 0; i < seconds; i += 1) await act(async () => { await jest.advanceTimersByTimeAsync(1000); }); }
 async function stepUntil(atS: number) { await step(Math.max(0, Math.ceil(atS - nowS()))); }
-async function fix(p: { latitude: number; longitude: number }) { mockFix = p; await act(async () => { [...mockWatchers].forEach((w) => w({ coords: p })); }); }
+async function fix(p: { latitude: number; longitude: number }) { mockFix = p; await act(async () => { [...mockWatchers].forEach((w) => w({ coords: p, timestamp: Date.now() } as never)); }); }
 function fakeClock() {
   jest.useFakeTimers({ now: Date.parse('2026-09-30T08:00:00-04:00'), doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
   if (Date.now() !== Date.parse('2026-09-30T08:00:00-04:00')) fail('premise: the fake clock drives Date.now');

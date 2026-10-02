@@ -32,22 +32,15 @@ console.log("export metadata lists a db asset");
 ' || return 1
 }
 
-# 1. M1.14: the probe-DB generator exists, writes with node:sqlite (R4: a node:sqlite DB must open in expo-sqlite), and runs (never downloads tsx).
-need_file scripts/probe/make-probe-db.ts
-need "node:sqlite" scripts/probe/make-probe-db.ts
-npx --no tsx scripts/probe/make-probe-db.ts
-
-# 2. M1.14: the generated assets/db/probe.db opens read-only in node:sqlite and a table in it holds exactly 1000 rows.
-need_file assets/db/probe.db
-node -e '
-const { DatabaseSync } = require("node:sqlite");
-const db = new DatabaseSync("assets/db/probe.db", { readOnly: true });
-const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = ? AND name NOT LIKE ?").all("table", "sqlite_%");
-const counts = tables.map((t) => [t.name, db.prepare("SELECT COUNT(*) AS n FROM \"" + t.name + "\"").get().n]);
-db.close();
-if (!counts.some(([, n]) => n === 1000)) { console.error("ratchet: no table in assets/db/probe.db has exactly 1000 rows: " + JSON.stringify(counts)); process.exit(1); }
-console.log("probe.db row counts: " + JSON.stringify(counts));
-'
+# 1-2. SUPERSEDED 2026-10-02 (arbiter): M1.14's probe DB (scripts/probe/make-probe-db.ts -> assets/db/probe.db,
+# 1000 rows) was RETIRED by M3.8 in 3c3debd ("probe DB retired"), when the real schedule DB provider replaced it.
+# m3b's gate 9 now requires its ABSENCE, so these two gates could never pass again; this card's verify had been red
+# since 3c3debd and was not re-run until mfix9's scan-scope sweep (mistake.reverified_by_file_not_by_scan_scope).
+# The guarantee they gave (a node:sqlite DB opens in expo-sqlite, R4) is carried by the real schedule.db: m3b and
+# M1.19 (R4 retired on Jamie's phone, 13:02 2026-10-01). Retirement itself is checked here so the supersession holds:
+[ ! -e assets/db/probe.db ] && [ ! -e scripts/probe/make-probe-db.ts ] && need_file assets/db/schedule.db \
+  || { echo "ratchet: M3.8 retired the probe DB; schedule.db must be the bundled DB"; exit 1; }
+echo "ratchet: the M1.14 probe DB is retired (M3.8); schedule.db is the bundled DB"
 
 # 3. M1.14: metro.config.js registers the db asset extension and a FRESH iOS export's metadata lists a db asset (the plan's V check).
 need_file metro.config.js

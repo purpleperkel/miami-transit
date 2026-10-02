@@ -34,7 +34,7 @@ function spyOpenURL(): jest.SpyInstance<Promise<void>, [url: string]> {
 describe('StationSheetFooter: walk directions (M6.4)', () => {
   it('walk directions open Apple Maps with dirflg=w to the station', async () => {
     const openURL = spyOpenURL().mockResolvedValue(undefined);
-    const tree = await renderPrimitive(<StationSheetFooter coordinate={GOVERNMENT_CENTER} />);
+    const tree = await renderPrimitive(<StationSheetFooter stationKey="rail:government-ctr" coordinate={GOVERNMENT_CENTER} />);
     expect(hostsByTestID(tree.root, 'station-walk-directions')[0]?.props.accessibilityLabel).toBe('Walk directions');
     await press(tree, 'station-walk-directions');
     expect(openURL.mock.calls).toEqual([[WALK_URL]]);
@@ -42,7 +42,7 @@ describe('StationSheetFooter: walk directions (M6.4)', () => {
 
   it('openURL resolving undefined counts as opened', async () => {
     const openURL = spyOpenURL().mockResolvedValue(undefined);
-    const tree = await renderPrimitive(<StationSheetFooter coordinate={GOVERNMENT_CENTER} />);
+    const tree = await renderPrimitive(<StationSheetFooter stationKey="rail:government-ctr" coordinate={GOVERNMENT_CENTER} />);
     await press(tree, 'station-walk-directions');
     expect(openURL).toHaveBeenCalledTimes(1);
     expect(hostsByTestID(tree.root, 'station-walk-failed')).toHaveLength(0);
@@ -50,7 +50,7 @@ describe('StationSheetFooter: walk directions (M6.4)', () => {
 
   it('openURL rejecting shows the failure', async () => {
     const openURL = spyOpenURL().mockRejectedValue(new Error('Unable to open URL'));
-    const tree = await renderPrimitive(<StationSheetFooter coordinate={GOVERNMENT_CENTER} />);
+    const tree = await renderPrimitive(<StationSheetFooter stationKey="rail:government-ctr" coordinate={GOVERNMENT_CENTER} />);
     await press(tree, 'station-walk-directions');
     expect(openURL.mock.calls).toEqual([[WALK_URL], [WEB_WALK_URL]]);
     const failure = hostsByTestID(tree.root, 'station-walk-failed');
@@ -60,7 +60,7 @@ describe('StationSheetFooter: walk directions (M6.4)', () => {
 
   it('a refused app URL falls back to the web host without a failure, and a later success clears an old failure', async () => {
     const openURL = spyOpenURL().mockRejectedValueOnce(new Error('no maps://')).mockResolvedValueOnce(undefined);
-    const tree = await renderPrimitive(<StationSheetFooter coordinate={GOVERNMENT_CENTER} />);
+    const tree = await renderPrimitive(<StationSheetFooter stationKey="rail:government-ctr" coordinate={GOVERNMENT_CENTER} />);
     await press(tree, 'station-walk-directions');
     expect(openURL.mock.calls).toEqual([[WALK_URL], [WEB_WALK_URL]]);
     expect(hostsByTestID(tree.root, 'station-walk-failed')).toHaveLength(0);

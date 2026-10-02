@@ -25,6 +25,23 @@ export function openStationSheet(stationKey: string): void {
   router.navigate({ pathname: STATION_SHEET_PATH, params: { stationKey } });
 }
 
+/** The route options sheet (src/app/plan.tsx, M10b): the map's Directions button, the station sheet, the Trips tab. */
+export const PLAN_PATH = '/plan';
+
+/** Where a plan starts: the rider's location (no param), or a station ("Route from here"). */
+export type PlanParams = { readonly fromStation?: string };
+
+/** Opens the route options sheet, from the rider's location or from `params.fromStation`. */
+export function openPlanSheet(params: PlanParams = {}): void {
+  invariant(params.fromStation === undefined || params.fromStation.includes(':'), `a plan starts at a station keyed mode:name, got "${params.fromStation}"`);
+  invariant(typeof router.push === 'function', 'expo-router pushes');
+  if (params.fromStation === undefined) {
+    router.push(PLAN_PATH);
+  } else {
+    router.push({ pathname: PLAN_PATH, params: { fromStation: params.fromStation } });
+  }
+}
+
 /** Opens (or retargets) the vehicle sheet. */
 export function openVehicleSheet(vehicleKey: string): void {
   invariant(vehicleKey.includes(':'), `a vehicle key reads day:block or live:id, got "${vehicleKey}"`);

@@ -6,7 +6,9 @@ import { PlatformColor, Pressable, StyleSheet } from 'react-native';
 import { invariant } from '@/lib/invariant';
 
 import { MIN_HIT_AREA_PT } from './vehicleVisual';
+import { copy } from '../copy';
 import { Glass } from '../primitives/Glass';
+import { openPlanSheet } from '../sheets';
 
 /** The Layers sheet's route (src/app/layers.tsx, a formSheet over the map). */
 export const LAYERS_ROUTE = '/layers';
@@ -21,15 +23,17 @@ export type MapControlStackProps = {
 
 /**
  * The map's floating control stack (plan §4: glass only on floating chrome, M5.11; mfix3 §5). It holds
- * the Layers button, which opens the Layers sheet — the one way to reach the sheet the plan names no
- * other door for — and, when the map gives their actions, the legend (ⓘ) and locate-me buttons. Each
- * button is a 44 pt square.
+ * the Directions button, which opens the route options sheet from where the rider is (M10b); the Layers
+ * button, which opens the Layers sheet — the one way to reach the sheet the plan names no other door
+ * for — and, when the map gives their actions, the legend (ⓘ) and locate-me buttons. Each button is a
+ * 44 pt square.
  */
 export function MapControlStack({ onLegend, onLocate }: MapControlStackProps) {
   invariant(LAYERS_ROUTE.startsWith('/'), 'the Layers sheet has an absolute route');
   invariant(MIN_HIT_AREA_PT === 44, 'controls are 44 pt squares');
   return (
     <Glass style={styles.stack}>
+      <ControlButton id="directions" symbol="arrow.triangle.turn.up.right.diamond" label={copy.directions} hint={copy.directionsHint} onPress={() => openPlanSheet()} />
       <ControlButton id="layers" symbol="square.3.layers.3d" label="Layers" hint="Choose what the map shows" onPress={() => router.push(LAYERS_ROUTE)} />
       {onLegend === undefined ? null : <ControlButton id="legend" symbol="info.circle" label="Map legend" hint="What the markers mean" onPress={onLegend} />}
       {onLocate === undefined ? null : <ControlButton id="locate" symbol="location" label="Show my location" hint="Centres the map on you" onPress={onLocate} />}

@@ -1,18 +1,19 @@
-import { SymbolView } from 'expo-symbols';
 import { useCallback, useState } from 'react';
-import { Linking, PlatformColor, Pressable, StyleSheet, View } from 'react-native';
+import { Linking, PlatformColor, StyleSheet, View } from 'react-native';
 
 import { openAppleMaps } from '@/domain/handoff/apple-maps';
 import { isLatLon, type LatLon } from '@/lib/geo';
 import { invariant } from '@/lib/invariant';
 
 import { copy } from '../copy';
+import { ActionButton } from '../primitives/ActionButton';
 import { TText } from '../primitives/TText';
-import { RADIUS, SPACING } from '../tokens';
-
-const WALK_ICON_PT = 17;
+import { openPlanSheet } from '../sheets';
+import { SPACING } from '../tokens';
 
 export type StationSheetFooterProps = {
+  /** The station the sheet is about: where "Route from here" starts. */
+  readonly stationKey: string;
   /** Where walk directions lead: the station's coordinate. */
   readonly coordinate: LatLon;
 };
@@ -20,30 +21,24 @@ export type StationSheetFooterProps = {
 /**
  * The station sheet's actions (plan M6.4): walk directions to the station, handed to Apple Maps
  * through the one URL builder (src/domain/handoff/apple-maps.ts, M7.6) — the Maps app first, its web
- * host if the system refuses that. Saving a trip (m7b) and "Route from here" (m10b) join this row.
+ * host if the system refuses that — and "Route from here" (M10b), which opens the route options sheet
+ * starting at this station. Saving a trip (m7b) joins this row.
  *
  * The handoff rule (M1.19): Linking.openURL resolving — with undefined, as React Native's
  * Promise<void> does — means Apple Maps opened; only a rejection (of both URLs) is a failure, and the
  * footer then says so under the button.
  */
-export function StationSheetFooter({ coordinate }: StationSheetFooterProps) {
+export function StationSheetFooter({ stationKey, coordinate }: StationSheetFooterProps) {
   invariant(isLatLon(coordinate), 'walk directions lead to a real coordinate');
+  invariant(stationKey.includes(':'), `a route starts at a station keyed mode:name, got "${stationKey}"`);
   const [failure, setFailure] = useState<string | null>(null);
   const onWalk = useCallback(() => walkTo(coordinate, setFailure), [coordinate]);
-  invariant(failure === null || failure.startsWith(copy.mapsFailed), 'a failure is said in the app\'s words');
+  const onRoute = useCallback(() => openPlanSheet({ fromStation: stationKey }), [stationKey]);
   return (
     <View testID="station-sheet-footer" style={styles.footer}>
       <View style={styles.actions}>
-        <Pressable
-          testID="station-walk-directions"
-          accessibilityRole="button"
-          accessibilityLabel={copy.walkDirections}
-          accessibilityHint={copy.walkDirectionsHint}
-          onPress={onWalk}
-          style={({ pressed }) => [styles.action, pressed ? styles.pressed : null]}>
-          <SymbolView name="figure.walk" size={WALK_ICON_PT} tintColor={PlatformColor('label')} />
-          <TText variant="headline">{copy.walkDirections}</TText>
-        </Pressable>
+        <ActionButton testID="station-walk-directions" symbol="figure.walk" label={copy.walkDirections} hint={copy.walkDirectionsHint} onPress={onWalk} />
+        <ActionButton testID="station-route-from-here" symbol="arrow.triangle.turn.up.right.diamond" label={copy.routeFromHere} hint={copy.routeFromHereHint} onPress={onRoute} />
       </View>
       {failure === null ? null : (
         <TText testID="station-walk-failed" variant="footnote" accessibilityLiveRegion="polite" style={styles.failure}>
@@ -67,15 +62,5 @@ function walkTo(coordinate: LatLon, report: (failure: string | null) => void): v
 const styles = StyleSheet.create({
   footer: { gap: SPACING.xs },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.xs },
-  action: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.xs,
-    minHeight: 44,
-    paddingHorizontal: SPACING.md,
-    borderRadius: RADIUS.md,
-    backgroundColor: PlatformColor('secondarySystemGroupedBackground'),
-  },
-  pressed: { opacity: 0.6 },
   failure: { color: PlatformColor('systemRed') },
 });

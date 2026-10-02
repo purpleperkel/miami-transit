@@ -21,8 +21,8 @@ import { useStationPredictions } from './use-station-predictions';
  * The station sheet (plan M6.4), a native formSheet over the map or the Stations list: the station's
  * name as the sheet's title, its lines and system (StationSheetHeader, with m7c's verdict slot), one
  * DirectionGroup per direction — the timetable with the station's live predictions merged in — and
- * the walk-directions footer. This open sheet is the ONLY place the app watches a station's live
- * predictions (use-station-predictions.ts).
+ * the footer (walk directions, "Route from here"). Live predictions are watched only while a sheet that
+ * shows them is open — this one, hurry or chill, the route options sheet (use-station-predictions.ts).
  *
  *   StationSheet (schedule DB, live predictions, clock) → StationSheetView (props only, rendered in tests)
  */
@@ -94,7 +94,7 @@ export function StationSheetView({ db, model, predictions, nowS, verdict }: Stat
           <DirectionGroup key={group.directionId} title={group.title} departures={group.departures} predictions={predictions} window={model.window} nowS={nowS} maxRows={SHEET_MAX_ROWS} />
         ))
       )}
-      <StationSheetFooter coordinate={model.station.coordinate} />
+      <StationSheetFooter stationKey={model.station.stationKey} coordinate={model.station.coordinate} />
     </ScrollView>
   );
 }

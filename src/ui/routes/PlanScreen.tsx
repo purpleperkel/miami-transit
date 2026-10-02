@@ -1,0 +1,189 @@
+import { useCallback, useMemo, useState } from 'react';
+import { ActivityIndicator, PlatformColor, ScrollView, StyleSheet, View } from 'react-native';
+
+import type { StationListing } from '@/data/schedule-queries';
+import { useScheduleDb } from '@/data/schedule-db-provider';
+import type { Itinerary } from '@/domain/routes/transitous';
+import { invariant } from '@/lib/invariant';
+
+import { useNowS } from '../clock';
+import { copy } from '../copy';
+import { TText } from '../primitives/TText';
+import { readWalkingPace } from '../settings/walking-pace';
+import { SPACING } from '../tokens';
+import { ItineraryDetail } from './ItineraryDetail';
+import { PlanDestination } from './PlanDestination';
+import { PlanUnavailable } from './PlanUnavailable';
+import { appPlanClient } from './plan-client';
+import { readRecentPlaces, type RecentPlace, recordRecentPlace } from './recent-places';
+import { NO_ROUTE_NETWORK, type OptionContext, type PlaceNames, routeClock, type RouteNetwork, type RouteOption } from './route-options';
+import { RouteOptionsList, RoutesAttribution } from './RouteOptionsList';
+import { type OriginState, type PlanState, useLiveOptions, usePlanOrigin, usePlanRequest, useServiceBases } from './use-route-plan';
+
+/**
+ * Plan M10b.1–M10b.2: the route options sheet (src/app/plan.tsx, titled "Route options"). From the
+ * rider's location — or the station whose sheet said "Route from here" — to a place, an address or a
+ * station: Transitous's options, corrected by live predictions, earliest arrival first, each with its
+ * hurry chip; a tapped option opens its legs here in the sheet, with walking directions one tap away.
+ * When Transitous cannot answer, Apple Maps can ("Open in Apple Maps"). The credits sit at the bottom.
+ *
+ *   PlanScreen (schedule DB, location, Transitous, live runtime, clock) → PlanBody (props only)
+ */
+
+/** The hurry chips count down with this tick. */
+export const PLAN_TICK_MS = 15_000;
+
+const NO_ITINERARIES: readonly Itinerary[] = Object.freeze([]);
+const NO_STATIONS: readonly StationListing[] = Object.freeze([]);
+
+export type PlanScreenProps = {
+  /** The station a plan starts at ("Route from here"), or null for the rider's location. */
+  readonly fromStation: string | null;
+};
+
+export function PlanScreen({ fromStation }: PlanScreenProps) {
+  const db = useScheduleDb();
+  const repo = db.kind === 'ready' ? db.repo : null;
+  const stations = useMemo(() => (repo === null ? null : repo.stations()), [repo]);
+  const network = useMemo<RouteNetwork>(() => (repo === null ? NO_ROUTE_NETWORK : repo.liveNetwork()), [repo]);
+  const origin = usePlanOrigin(fromStation, stations);
+  const from = origin.kind === 'ready' ? origin.origin.coordinate : null;
+  const [destination, setDestination] = useState<RecentPlace | null>(null);
+  const [recents, setRecents] = useState<readonly RecentPlace[]>(() => readRecentPlaces());
+  const [notice, setNotice] = useState<string | null>(null);
+  const plan = usePlanRequest(appPlanClient(), from, destination, wallClockMs);
+  const nowS = useNowS(PLAN_TICK_MS);
+  const { walkMps, jogMps } = readWalkingPace();
+  const context = useMemo<OptionContext>(() => ({ position: from, nowS, pace: { walkMps, jogMps } }), [from, nowS, walkMps, jogMps]);
+  const options = useLiveOptions(plan.kind === 'ok' ? plan.itineraries : NO_ITINERARIES, network, context);
+  const bases = useServiceBases(repo, nowS);
+  const choose = useCallback((place: RecentPlace) => choosePlace(place, setDestination, setRecents, setNotice), []);
+  const clear = useCallback(() => setDestination(null), []);
+  const names = useMemo(() => placeNames(origin, destination, stations ?? NO_STATIONS), [origin, destination, stations]);
+  invariant(fromStation === null || fromStation.includes(':'), `a plan starts at a station keyed mode:name, got "${fromStation}"`);
+  invariant(plan.kind === 'idle' || destination !== null, 'a plan is asked only for a destination');
+  return (
+    <ScrollView testID="plan-sheet" contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" style={styles.sheet} contentContainerStyle={styles.content}>
+      <View style={styles.from}>
+        <TText variant="footnote" tone="secondary">
+          {copy.routeFrom}
+        </TText>
+        <TText testID="plan-from" variant="headline">
+          {originText(origin)}
+        </TText>
+      </View>
+      <PlanDestination destination={destination} recents={recents} stations={stations ?? NO_STATIONS} onChoose={choose} onClear={clear} />
+      {notice === null ? null : (
+        <TText testID="plan-notice" variant="footnote" tone="secondary">
+          {notice}
+        </TText>
+      )}
+      <PlanBody origin={origin} destination={destination} plan={plan} options={options} network={network} names={names} clock={routeClock(bases, nowS)} nowS={nowS} />
+      <RoutesAttribution />
+    </ScrollView>
+  );
+}
+
+function wallClockMs(): number {
+  const nowMs = Date.now();
+  invariant(Number.isFinite(nowMs), 'the wall clock reads an instant');
+  invariant(nowMs > 0, 'the wall clock is past the epoch');
+  return nowMs;
+}
+
+/** A chosen destination: plan it, and put it first in the recent places (saying so if it could not be saved). */
+function choosePlace(
+  place: RecentPlace,
+  setDestination: (place: RecentPlace) => void,
+  setRecents: (places: readonly RecentPlace[]) => void,
+  setNotice: (notice: string | null) => void,
+): void {
+  invariant(place.name.length > 0, 'a destination is named');
+  invariant(typeof setDestination === 'function', 'the choice reaches the sheet');
+  setDestination(place);
+  const saved = recordRecentPlace(place);
+  setNotice(saved.ok ? null : `${copy.recentNotSaved}: ${saved.error.message}`);
+  if (saved.ok) {
+    setRecents(saved.value);
+  }
+}
+
+/** The From line: the start's name, or what is happening instead. */
+function originText(origin: OriginState): string {
+  invariant(origin.kind !== 'failed' || origin.message.length > 0, 'a failed start says why');
+  const text = origin.kind === 'ready' ? origin.origin.name : origin.kind === 'locating' ? copy.findingYou : copy.yourLocation;
+  invariant(text.length > 0, 'the From line says something');
+  return text;
+}
+
+/** What the legs call the trip's ends, and the stations by key. */
+function placeNames(origin: OriginState, destination: RecentPlace | null, stations: readonly StationListing[]): PlaceNames {
+  invariant(stations.every((station) => station.name.length > 0), 'every station is named');
+  const names: PlaceNames = {
+    origin: origin.kind === 'ready' ? origin.origin.name : copy.yourLocation,
+    destination: destination === null ? copy.routeTo : destination.name,
+    stations: new Map(stations.map((station) => [station.stationKey, station.name])),
+  };
+  invariant(names.stations.size <= stations.length, 'each station is named once');
+  return names;
+}
+
+type PlanBodyProps = {
+  readonly origin: OriginState;
+  readonly destination: RecentPlace | null;
+  readonly plan: PlanState;
+  readonly options: readonly RouteOption[];
+  readonly network: RouteNetwork;
+  readonly names: PlaceNames;
+  readonly clock: (epoch: number) => string;
+  readonly nowS: number;
+};
+
+/** The option whose legs are open: by its id within the one answer it belongs to (a new answer closes it). */
+type Selection = { readonly itineraries: readonly Itinerary[]; readonly id: number };
+
+/** Under the fields: nothing yet, a wait, the options (or one option's legs), or Apple Maps instead. */
+export function PlanBody({ origin, destination, plan, options, network, names, clock, nowS }: PlanBodyProps) {
+  const [selected, setSelected] = useState<Selection | null>(null);
+  const answer = plan.kind === 'ok' ? plan.itineraries : null;
+  const open = selected !== null && selected.itineraries === answer ? options.find((option) => option.id === selected.id) : undefined;
+  invariant(destination !== null || plan.kind === 'idle', 'options are for a destination');
+  invariant(Number.isFinite(nowS), 'the body is drawn at an instant');
+  if (destination === null) {
+    return null;
+  }
+  if (origin.kind === 'failed') {
+    return <PlanUnavailable reason={origin.message} destination={destination} />;
+  }
+  if (plan.kind === 'unavailable' || (plan.kind === 'ok' && options.length === 0)) {
+    return <PlanUnavailable reason={plan.kind === 'unavailable' ? plan.reason : copy.noRoutes} destination={destination} />;
+  }
+  if (origin.kind === 'locating' || answer === null) {
+    return <Waiting text={origin.kind === 'locating' ? copy.findingYou : copy.findingRoutes} />;
+  }
+  return open === undefined ? (
+    <RouteOptionsList options={options} clock={clock} nowS={nowS} onSelect={(id) => setSelected({ itineraries: answer, id })} />
+  ) : (
+    <ItineraryDetail option={open} network={network} names={names} clock={clock} onBack={() => setSelected(null)} />
+  );
+}
+
+function Waiting({ text }: { readonly text: string }) {
+  invariant(text.length > 0, 'a wait says what it waits for');
+  invariant(text.endsWith('…'), 'a wait reads as ongoing');
+  return (
+    <View testID="plan-waiting" style={styles.waiting}>
+      <ActivityIndicator />
+      <TText variant="subhead" tone="secondary">
+        {text}
+      </TText>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  sheet: { backgroundColor: PlatformColor('systemGroupedBackground') },
+  content: { padding: SPACING.md, gap: SPACING.md },
+  from: { gap: SPACING.xxs },
+  waiting: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs, paddingVertical: SPACING.md },
+});

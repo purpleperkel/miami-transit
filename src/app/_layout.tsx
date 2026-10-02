@@ -47,6 +47,15 @@ const VEHICLE_SHEET_OPTIONS = {
   sheetGrabberVisible: true,
   sheetLargestUndimmedDetentIndex: 0,
 } as const;
+// The route options sheet (M10b) rises over the map, the station sheet or the Trips tab; it opens tall,
+// since it holds a search field and a list, and its title is fixed: the options and their legs show inside.
+const PLAN_OPTIONS = {
+  headerShown: true,
+  title: 'Route options',
+  presentation: 'formSheet',
+  sheetAllowedDetents: [0.75, 1] as number[],
+  sheetGrabberVisible: true,
+} as const;
 
 /**
  * The root: the bundled schedule DB (M3.8) is opened once, here, for every screen, and the live
@@ -64,6 +73,7 @@ export default function RootLayout() {
           <Stack.Screen name="layers" options={LAYERS_OPTIONS} />
           <Stack.Screen name="station/[stationKey]" options={STATION_SHEET_OPTIONS} />
           <Stack.Screen name="vehicle/[vehicleKey]" options={VEHICLE_SHEET_OPTIONS} />
+          <Stack.Screen name="plan" options={PLAN_OPTIONS} />
         </Stack>
       </LiveDataProvider>
     </ScheduleDbProvider>

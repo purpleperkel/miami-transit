@@ -91,3 +91,17 @@ function toDeparture(day: ServiceDay, visit: StopVisit): Departure {
     note,
   };
 }
+
+/** The earliest departure in each direction, in direction order (the Stations list's "next per direction", R7). */
+export function firstPerDirection(departures: readonly Departure[]): Departure[] {
+  invariant(departures.every((d, i) => i === 0 || departures[i - 1]!.epoch <= d.epoch), 'departures come in time order');
+  const first = new Map<number, Departure>();
+  for (const departure of departures) {
+    if (!first.has(departure.directionId)) {
+      first.set(departure.directionId, departure);
+    }
+  }
+  const picked = [...first.values()].sort((a, b) => a.directionId - b.directionId);
+  invariant(new Set(picked.map((d) => d.directionId)).size === picked.length, 'one departure per direction');
+  return picked;
+}

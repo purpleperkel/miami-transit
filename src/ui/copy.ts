@@ -9,6 +9,8 @@ import { invariant } from '../lib/invariant';
 
 const CANCELED = 'Canceled';
 const UNSCHEDULED_TRAIN = 'Unscheduled train';
+/** A Stations row with nothing scheduled within the list's 3-hour horizon (station-list.ts NEXT_DEPARTURE_HORIZON_S). */
+const NOTHING_SOON = 'No departures in the next 3 hours';
 
 /** "6 min": a whole number of minutes, as departure rows and countdowns show it. */
 function minutes(count: number): string {
@@ -53,6 +55,50 @@ function departureLabel(parts: DepartureLabelParts): string {
   return label;
 }
 
+/** Names as one phrase: "A", "A and B", "A, B and C" (or "or" for alternatives). */
+function joined(names: readonly string[], conjunction: 'and' | 'or'): string {
+  invariant(names.length > 0 && names.every((name) => name.trim().length > 0), 'a phrase joins at least one name');
+  const last = names[names.length - 1] as string;
+  const phrase = names.length === 1 ? last : `${names.slice(0, -1).join(', ')} ${conjunction} ${last}`;
+  invariant(names.every((name) => phrase.includes(name)), 'the phrase keeps every name');
+  return phrase;
+}
+
+/** A direction's heading on the station sheet: "To Dadeland South", "To Palmetto or Miami International Airport". */
+function toward(destinations: readonly string[]): string {
+  invariant(destinations.length > 0, 'a direction goes somewhere');
+  invariant(new Set(destinations).size === destinations.length, 'each destination is named once');
+  return `To ${joined(destinations, 'or')}`;
+}
+
+/** The lines a station's strip draws, for VoiceOver: "Green Line and Orange Line" (never colour alone, §4). */
+function lineNames(names: readonly string[]): string {
+  invariant(names.length > 0, 'a strip draws at least one line');
+  const phrase = joined(names, 'and');
+  invariant(phrase.length > 0, 'the strip has words');
+  return phrase;
+}
+
+export type StationRowLabelParts = {
+  /** "Government Center, Metrorail". */
+  readonly station: string;
+  /** "Green Line and Orange Line". */
+  readonly lines: string;
+  /** "350 m", or null without a location. */
+  readonly distance: string | null;
+  /** Each direction's next departure: "Dadeland South, 4 min". */
+  readonly departures: readonly string[];
+};
+
+/** VoiceOver's sentence for one Stations row: every fact it shows, in words. */
+function stationRowLabel(parts: StationRowLabelParts): string {
+  invariant(parts.station.length > 0 && parts.lines.length > 0, 'a row names its station and lines');
+  const leaving = parts.departures.length === 0 ? [NOTHING_SOON] : parts.departures.map((d) => `next to ${d}`);
+  const label = [parts.station, parts.lines, parts.distance === null ? null : `${parts.distance} away`, ...leaving].filter((part) => part !== null).join('; ');
+  invariant(label.startsWith(parts.station), 'the sentence starts with the station');
+  return label;
+}
+
 export const copy = Object.freeze({
   /** A departure due within the half minute, or leaving right now. */
   now: 'Now',
@@ -65,4 +111,32 @@ export const copy = Object.freeze({
   minutes,
   leaveIn,
   departureLabel,
+  toward,
+  lineNames,
+  stationRowLabel,
+  /** A Stations row whose directions have nothing scheduled within the list's 3-hour horizon. */
+  nothingSoon: NOTHING_SOON,
+  /** The station sheet footer's Apple Maps walking handoff. */
+  walkDirections: 'Walk directions',
+  walkDirectionsHint: 'Opens Apple Maps with walking directions to this station',
+  /** Apple Maps would not open (both the app URL and its web fallback were refused). */
+  mapsFailed: 'Apple Maps did not open',
+  unknownStation: 'This station is not in the timetable',
+  unknownStationMessage: 'It may be from an older timetable than the one this app carries.',
+  /** A sheet waiting for the bundled schedule DB to open, or finding it broken. */
+  scheduleOpening: 'Opening the schedule',
+  sheetOpeningMessage: 'The times appear in a moment.',
+  sheetUnavailable: 'Times unavailable',
+  timetableExpired: 'The timetable has run out. Update the app for new times.',
+  timetableNotStarted: 'The timetable does not start yet.',
+  /** Location is off or refused, so the list keeps its line order. */
+  noLocation: 'Location is off, so stations are listed in line order.',
+  /** The vehicle sheet. */
+  nextStops: 'Next stops',
+  scheduledTimes: 'Scheduled times',
+  notRunning: 'This vehicle is not running now',
+  notInTimetable: 'This vehicle is not in the timetable, so its stops are unknown',
+  follow: 'Follow',
+  following: 'Following',
+  followHint: 'Keeps the map centered on this vehicle until you move the map',
 });

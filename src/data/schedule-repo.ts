@@ -6,8 +6,19 @@ import {
   type TimeWindow,
   windowFrom,
 } from '../domain/gtfs/service-day';
-import { assembleDepartures, type Departure } from '../domain/schedule/departures';
-import { MAX_LAYOVER_S, type ScheduledVehicle, scheduledVehicles, type ServiceDayTrips, type ShapePath } from '../domain/schedule/positions';
+import { assembleDepartures, type Departure, firstPerDirection, type ServiceDayVisits } from '../domain/schedule/departures';
+import { LINE_IDS, type LineId } from '../domain/lines/line-catalog';
+import { type NextStop, nextStops } from '../domain/schedule/next-stops';
+import type { Mode } from '../domain/network/stations';
+import {
+  blockPlacementAt,
+  MAX_LAYOVER_S,
+  type ScheduledVehicle,
+  scheduledVehicles,
+  type ServiceDayTrips,
+  type ShapePath,
+  vehicleBlocks,
+} from '../domain/schedule/positions';
 import { assembleRides, judgeRides, type RidesOutcome } from '../domain/schedule/rides';
 import { dropBeatenRides } from '../domain/trips/trip-rides';
 import { invariant } from '../lib/invariant';
@@ -18,12 +29,15 @@ import {
   findStation,
   readCalendarBounds,
   readMeta,
+  readNextDepartures,
   readRideCandidates,
   readServiceDays,
   readShapePaths,
+  readStationLines,
   readStations,
   readTripDestinations,
   readStopVisits,
+  readTripRun,
   readTripsAround,
   type StationListing,
   type StationRef,
@@ -86,6 +100,30 @@ export type TimetableOutcome =
     }
   | CalendarGap;
 
+/** Each station's next scheduled departure per direction (R7), or why the calendar has none. */
+export type NextDeparturesOutcome =
+  | {
+      readonly kind: 'next-departures';
+      /** station key -> its earliest departure in each direction inside the window, in direction order; a station with none is absent. */
+      readonly byStation: ReadonlyMap<string, readonly Departure[]>;
+    }
+  | CalendarGap;
+
+/** A vehicle's next stops by the timetable (M6.6), the vehicle is not out at that instant, or why the calendar has none. */
+export type NextStopsOutcome =
+  | {
+      readonly kind: 'next-stops';
+      readonly vehicleKey: string;
+      readonly lineId: LineId;
+      readonly mode: Mode;
+      /** Where its current trip ends. */
+      readonly destination: string;
+      /** At most MAX_NEXT_STOPS, in time order, all ahead of the vehicle. */
+      readonly stops: readonly NextStop[];
+    }
+  | { readonly kind: 'not-running'; readonly vehicleKey: string }
+  | CalendarGap;
+
 export class ScheduleRepo {
   readonly meta: ScheduleMeta;
   private readonly db: SqlExecutor;
@@ -98,6 +136,8 @@ export class ScheduleRepo {
   private stationList: readonly StationListing[] | null = null;
   /** trip_id → its destination station key (5,137 trips), read on first use and kept. */
   private destinations: ReadonlyMap<string, string> | null = null;
+  /** Every station's lines, read on first use and kept. */
+  private lineMap: ReadonlyMap<string, readonly LineId[]> | null = null;
 
   private constructor(db: SqlExecutor, meta: ScheduleMeta, bounds: ServiceCalendarBounds) {
     invariant(meta.schemaVersion === SCHEDULE_SCHEMA_VERSION, 'the repo reads only the schema it was written for');
@@ -252,6 +292,70 @@ export class ScheduleRepo {
     invariant(destinations.size > 0, 'the schedule DB has trips');
     invariant(this.destinations === destinations, 'the destinations are read once, then kept');
     return destinations;
+  }
+
+  /** station key -> every line stopping there, in line order (the line strips, M6.5). */
+  stationLines(): ReadonlyMap<string, readonly LineId[]> {
+    const lines = this.lineMap ?? readStationLines(this.db);
+    this.lineMap = lines;
+    invariant(lines.size > 0, 'the schedule DB has stations served by lines');
+    invariant(this.lineMap === lines, 'the station lines are read once, then kept');
+    return lines;
+  }
+
+  /**
+   * Every station's next scheduled departure in each direction during `window` (R7: the Stations list,
+   * schedule only, ONE statement per running service day for the whole list), or why the calendar has none.
+   */
+  nextDepartures(window: TimeWindow): NextDeparturesOutcome {
+    invariant(window.fromEpoch <= window.toEpoch, 'nextDepartures needs an ordered window');
+    const resolution = this.serviceDays(window);
+    if (resolution.kind !== 'active') {
+      return resolution;
+    }
+    const daysByStation = new Map<string, ServiceDayVisits[]>();
+    for (const day of resolution.days) {
+      for (const { stationKey, visit } of readNextDepartures(this.db, day, daySeconds(day, window))) {
+        const days = daysByStation.get(stationKey) ?? [];
+        const last = days[days.length - 1];
+        if (last !== undefined && last.day === day) {
+          days[days.length - 1] = { day, visits: [...last.visits, visit] };
+        } else {
+          days.push({ day, visits: [visit] });
+        }
+        daysByStation.set(stationKey, days);
+      }
+    }
+    const byStation = new Map([...daysByStation].map(([key, days]) => [key, firstPerDirection(assembleDepartures(window, days))] as const));
+    invariant([...byStation.values()].every((list) => list.length > 0), 'a listed station has a departure');
+    return { kind: 'next-departures', byStation };
+  }
+
+  /**
+   * The vehicle's next stops at `epoch` by the timetable (M6.6): its block's trip at that instant (the
+   * same placement the map draws), then up to three stops ahead, continuing onto the trip its car runs
+   * next (next_trip_idx). A vehicle not out at `epoch` (or a key the timetable does not know) is not-running.
+   */
+  nextStops(vehicleKey: string, epoch: number): NextStopsOutcome {
+    invariant(vehicleKey.length > 0, 'nextStops needs a vehicle key');
+    const timetable = this.timetableAround(epoch, epoch);
+    if (timetable.kind !== 'timetable') {
+      return timetable;
+    }
+    const block = vehicleBlocks(timetable.days).find((candidate) => candidate.vehicleKey === vehicleKey);
+    const placed = block === undefined ? null : blockPlacementAt(block.trips, epoch - block.baseEpoch);
+    if (block === undefined || placed === null) {
+      return { kind: 'not-running', vehicleKey };
+    }
+    const current = readTripRun(this.db, placed.trip.tripIdx);
+    invariant(current !== null, `the timetable's trip ${placed.trip.tripId} has its stops`);
+    const following = current.nextTripIdx === null ? null : readTripRun(this.db, current.nextTripIdx);
+    invariant(current.nextTripIdx === null || following !== null, `trip ${placed.trip.tripId} links to a trip the schedule has`);
+    const stops = nextStops({ baseEpoch: block.baseEpoch, s: epoch - block.baseEpoch, state: placed.state, current, following });
+    const lineId = LINE_IDS.find((id) => id === placed.trip.lineId);
+    invariant(lineId !== undefined, `trip ${placed.trip.tripId} runs a catalog line`);
+    const destination = current.stops[current.stops.length - 1]?.name ?? '';
+    return { kind: 'next-stops', vehicleKey, lineId, mode: placed.trip.mode, destination, stops };
   }
 
   private shapePaths(): ReadonlyMap<number, ShapePath> {

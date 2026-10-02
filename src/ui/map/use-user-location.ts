@@ -1,10 +1,12 @@
 import * as Location from 'expo-location';
 import { useCallback, useEffect, useState } from 'react';
 
-import type { LatLon } from '@/lib/geo';
+import { isLatLon, type LatLon } from '@/lib/geo';
 import { invariant } from '@/lib/invariant';
 import { err, ok, type Result } from '@/lib/result';
 import { detach } from '@/live/detach';
+
+import { copy } from '../copy';
 
 /**
  * You-are-here (mfix3 §5): the map's blue dot and its locate-me button, through the app's existing
@@ -15,6 +17,11 @@ import { detach } from '@/live/detach';
  * automatic expo-location mock resolves undefined), or a failed request — a rejection is turned into an
  * err(...) value whose message the map shows, never swallowed. Denied means no blue dot, and one line
  * of explanation in the map legend.
+ *
+ * The Stations list (m6b R7: nearest first, with walking distances) follows the position through the
+ * same ask: useUserPosition watches it at Balanced accuracy once granted, a new fix every
+ * WATCH_DISTANCE_M — enough to keep "350 m" honest without running GPS hard — and otherwise says why
+ * there is none. ONE location module for the app: the map's blue dot and the list's distances agree.
  */
 
 export type UserLocation =
@@ -124,4 +131,94 @@ function report(life: { readonly mounted: boolean }, set: (location: UserLocatio
   if (life.mounted) {
     set(next);
   }
+}
+
+/** The position watch reports a new fix after the rider has moved this far. */
+export const WATCH_DISTANCE_M = 50;
+
+/** The rider's position as a list follows it. */
+export type UserPosition = {
+  /** The latest fix, or null before one arrives (or without permission). */
+  readonly coordinate: LatLon | null;
+  /** Why there is no fix (location off, refused or failed), or null. */
+  readonly note: string | null;
+};
+
+const WAITING: UserPosition = Object.freeze({ coordinate: null, note: null });
+
+type Unwatch = { remove(): void };
+/** One screen's watch: whether the screen has gone, and the expo-location subscription once it starts. */
+type Watch = { stopped: boolean; subscription: Unwatch | null };
+
+/** The rider's position, watched while the calling screen is mounted (the Stations list). */
+export function useUserPosition(): UserPosition {
+  const [position, setPosition] = useState<UserPosition>(WAITING);
+  useEffect(() => startWatch(setPosition), []);
+  invariant(position.coordinate === null || isLatLon(position.coordinate), 'a fix is a real coordinate');
+  invariant(position.coordinate === null || position.note === null, 'a fix carries no excuse');
+  return position;
+}
+
+/** Starts the permission ask and the watch; returns the teardown, which also stops a watch that starts late. */
+function startWatch(publish: (position: UserPosition) => void): () => void {
+  invariant(typeof publish === 'function', 'the watch publishes to the screen');
+  const watch: Watch = { stopped: false, subscription: null };
+  const report = reporter(watch, publish);
+  detach(
+    watchPosition(report).then((subscription) => adopt(watch, subscription)),
+    (message) => report(unlocated(message)),
+  );
+  invariant(watch.subscription === null, 'the watch starts asynchronously');
+  return () => {
+    watch.stopped = true;
+    watch.subscription?.remove();
+  };
+}
+
+/** Publishes a position only while the screen is still there. */
+function reporter(watch: Watch, publish: (position: UserPosition) => void): (position: UserPosition) => void {
+  invariant(typeof publish === 'function', 'a reporter publishes somewhere');
+  invariant(!watch.stopped, 'a reporter is made for a running watch');
+  return (position) => (watch.stopped ? undefined : publish(position));
+}
+
+/** Keeps the started watch, or removes it at once when the screen has already gone. */
+function adopt(watch: Watch, subscription: Unwatch | null): void {
+  invariant(watch.subscription === null, 'a watch is adopted once');
+  invariant(subscription === null || typeof subscription.remove === 'function', 'a watch can be stopped');
+  if (subscription !== null && watch.stopped) {
+    subscription.remove();
+  } else {
+    watch.subscription = subscription;
+  }
+}
+
+/** Asks (as the map does), then watches the position; null, after reporting why, without a grant. */
+async function watchPosition(report: (position: UserPosition) => void): Promise<Unwatch | null> {
+  invariant(typeof report === 'function', 'the watch reports its fixes');
+  const grant = await askForLocation();
+  if (!grant.ok) {
+    report(unlocated(grant.error.kind === 'failed' ? grant.error.message : null));
+    return null;
+  }
+  const options = { accuracy: Location.Accuracy.Balanced, distanceInterval: WATCH_DISTANCE_M };
+  const subscription = await Location.watchPositionAsync(options, (fix) => report(fixed(positionOf(fix))), (reason) => report(unlocated(reason)));
+  invariant(typeof subscription.remove === 'function', 'expo-location returns a removable watch');
+  return subscription;
+}
+
+/** A watched fix as the list's position: the coordinate, or why the fix had none. */
+function fixed(position: Result<LatLon, string>): UserPosition {
+  const next = position.ok ? { coordinate: position.value, note: null } : unlocated(position.error);
+  invariant(next.coordinate === null || isLatLon(next.coordinate), 'a fix is a real coordinate');
+  invariant((next.coordinate === null) !== (next.note === null), 'a position has a fix or an excuse, not both');
+  return next;
+}
+
+/** No position: location is off, with the problem (when there was one) in brackets. */
+function unlocated(problem: string | null): UserPosition {
+  invariant(problem === null || typeof problem === 'string', 'a problem is a message or nothing');
+  const note = problem === null || problem.trim().length === 0 ? copy.noLocation : `${copy.noLocation} (${problem})`;
+  invariant(note.startsWith(copy.noLocation), 'the note says location is off first');
+  return { coordinate: null, note };
 }

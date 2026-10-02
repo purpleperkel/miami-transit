@@ -26,6 +26,27 @@ const LAYERS_OPTIONS = {
   sheetGrabberVisible: true,
   sheetLargestUndimmedDetentIndex: 0,
 } as const;
+// The station sheet (M6.4) opens at half height over the map, which stays bright and usable under it
+// (M6.7), and pulls up to full height. Its native title is the station's name (StationSheet sets it);
+// "Station" shows only while the schedule opens.
+const STATION_SHEET_OPTIONS = {
+  headerShown: true,
+  title: 'Station',
+  presentation: 'formSheet',
+  sheetAllowedDetents: [0.5, 1] as number[],
+  sheetGrabberVisible: true,
+  sheetLargestUndimmedDetentIndex: 0,
+} as const;
+// The vehicle sheet (M6.6) rests low, so a followed vehicle stays in view in the middle of the map
+// above it; it pulls up for its stops. Its native title is the vehicle's line (VehicleSheet sets it).
+const VEHICLE_SHEET_OPTIONS = {
+  headerShown: true,
+  title: 'Vehicle',
+  presentation: 'formSheet',
+  sheetAllowedDetents: [0.35, 0.7] as number[],
+  sheetGrabberVisible: true,
+  sheetLargestUndimmedDetentIndex: 0,
+} as const;
 
 /**
  * The root: the bundled schedule DB (M3.8) is opened once, here, for every screen, and the live
@@ -41,6 +62,8 @@ export default function RootLayout() {
           <Stack.Screen name="data" options={DATA_OPTIONS} />
           <Stack.Screen name="diagnostics" options={DIAGNOSTICS_OPTIONS} />
           <Stack.Screen name="layers" options={LAYERS_OPTIONS} />
+          <Stack.Screen name="station/[stationKey]" options={STATION_SHEET_OPTIONS} />
+          <Stack.Screen name="vehicle/[vehicleKey]" options={VEHICLE_SHEET_OPTIONS} />
         </Stack>
       </LiveDataProvider>
     </ScheduleDbProvider>

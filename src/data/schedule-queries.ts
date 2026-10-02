@@ -3,6 +3,7 @@ import { LINE_IDS, type LineId } from '../domain/lines/line-catalog';
 import type { LineTrack } from '../domain/live/types';
 import type { Mode } from '../domain/network/stations';
 import type { StopVisit } from '../domain/schedule/departures';
+import type { RunStop, TripRun } from '../domain/schedule/next-stops';
 import type { ScheduledTrip, ShapePath, TripStop } from '../domain/schedule/positions';
 import type { RideCandidate } from '../domain/schedule/rides';
 import { isLatLon, type LatLon } from '../lib/geo';
@@ -152,6 +153,50 @@ const LINE_TRACKS_SQL = `
 
 /** Every station: rail before the Mover, each mode in name order (station_key breaks a tie). */
 const STATIONS_SQL = 'SELECT station_key, name, mode, lat, lon FROM station ORDER BY mode, name, station_key';
+
+/** Every line stopping at each station (any pattern, terminating or not), in the catalog's line order. */
+const STATION_LINES_SQL = `
+  SELECT DISTINCT x.station_key, p.line_id, l.sort
+  FROM pattern_stop AS ps
+  JOIN pattern AS p ON p.pattern_idx = ps.pattern_idx
+  JOIN line AS l ON l.line_id = p.line_id
+  JOIN stop AS s ON s.stop_idx = ps.stop_idx
+  JOIN station AS x ON x.station_idx = s.station_idx
+  ORDER BY x.station_key, l.sort`;
+
+/**
+ * Every station's FIRST departure in each direction on one service day, departing in [from_s, to_s]
+ * (R7: the Stations list's inline next departures, one statement for the whole list). Trips are
+ * narrowed by the trip_by_service_start index (start_s <= to_s, end_s >= from_s); a trip's last stop is
+ * not a departure. Ties on dep_s go to the lower trip_idx, so the pick is the same on every run.
+ */
+const NEXT_DEPARTURES_SQL = `
+  SELECT station_key, trip_idx, trip_id, seq, last_seq, dep_s, stop_id, line_id, direction_id, dest_station_key, dest_name, note
+  FROM (
+    SELECT x.station_key, t.trip_idx, t.trip_id, st.seq, p.stop_count - 1 AS last_seq, st.dep_s, s.stop_id, p.line_id,
+           p.direction_id, d.station_key AS dest_station_key, d.name AS dest_name, t.note,
+           ROW_NUMBER() OVER (PARTITION BY x.station_idx, p.direction_id ORDER BY st.dep_s, t.trip_idx) AS pick
+    FROM trip AS t
+    JOIN service_day_active AS a ON a.service_idx = t.service_idx AND a.date = :date
+    JOIN pattern AS p ON p.pattern_idx = t.pattern_idx
+    JOIN station AS d ON d.station_idx = p.dest_station_idx
+    JOIN stop_time AS st ON st.trip_idx = t.trip_idx
+    JOIN stop AS s ON s.stop_idx = st.stop_idx
+    JOIN station AS x ON x.station_idx = s.station_idx
+    WHERE t.start_s <= :to_s AND t.end_s >= :from_s AND st.dep_s BETWEEN :from_s AND :to_s AND st.seq < p.stop_count - 1
+  )
+  WHERE pick = 1
+  ORDER BY station_key, direction_id`;
+
+/** One trip's stops in order, each at its station, and the trip its car runs next (next_trip_idx). */
+const TRIP_RUN_SQL = `
+  SELECT st.seq, x.station_key, x.name, st.arr_s, st.dep_s, t.next_trip_idx
+  FROM trip AS t
+  JOIN stop_time AS st ON st.trip_idx = t.trip_idx
+  JOIN stop AS s ON s.stop_idx = st.stop_idx
+  JOIN station AS x ON x.station_idx = s.station_idx
+  WHERE t.trip_idx = :trip_idx
+  ORDER BY st.seq`;
 
 /** line.mode as the schema stores it (scripts/gtfs/schema.ts MODE_CODES: rail 0, mover 1). */
 const MODES_BY_CODE: ReadonlyMap<number, Mode> = new Map<number, Mode>([
@@ -344,6 +389,43 @@ export function readStations(db: SqlExecutor): StationListing[] {
   invariant(stations.length > 0, 'the schedule DB has stations');
   invariant(new Set(stations.map((station) => station.stationKey)).size === stations.length, 'station keys are unique');
   return stations;
+}
+
+/** station key -> every line stopping there, in line order (the Stations list's line strips, M6.5). */
+export function readStationLines(db: SqlExecutor): ReadonlyMap<string, readonly LineId[]> {
+  const lines = new Map<string, LineId[]>();
+  for (const row of db.all(STATION_LINES_SQL)) {
+    const key = text(row, 'station_key');
+    lines.set(key, [...(lines.get(key) ?? []), lineId(row)]);
+  }
+  invariant(lines.size > 0, 'the schedule DB has stations served by lines');
+  invariant([...lines.values()].every((ids) => new Set(ids).size === ids.length), 'each line is listed once per station');
+  return lines;
+}
+
+/** One station's first departure per direction on one service day, inside `seconds` (terminating visits excluded). */
+export type StationVisit = { readonly stationKey: string; readonly visit: StopVisit };
+
+/** Every station's first departure in each direction on one service day, departing inside `seconds`. */
+export function readNextDepartures(db: SqlExecutor, day: ServiceDay, seconds: DaySeconds): StationVisit[] {
+  invariant(seconds.fromS <= seconds.toS, 'the day window is ordered');
+  const rows = db.all(NEXT_DEPARTURES_SQL, { date: day.date, from_s: seconds.fromS, to_s: seconds.toS });
+  const visits = rows.map((row) => ({ stationKey: text(row, 'station_key'), visit: toStopVisit(row) }));
+  invariant(visits.every(({ visit }) => visit.seq < visit.lastSeq && visit.depS >= seconds.fromS && visit.depS <= seconds.toS), 'each is a departure inside the window');
+  return visits;
+}
+
+/** One trip's stops in order and the trip its car runs next, or null when the schedule has no such trip. */
+export function readTripRun(db: SqlExecutor, tripIdx: number): TripRun | null {
+  invariant(Number.isSafeInteger(tripIdx) && tripIdx >= 0, `a trip is indexed, got ${tripIdx}`);
+  const rows = db.all(TRIP_RUN_SQL, { trip_idx: tripIdx });
+  if (rows.length === 0) {
+    return null;
+  }
+  const next = (rows[0] as SqlRow).next_trip_idx ?? null;
+  invariant(next === null || (typeof next === 'number' && Number.isSafeInteger(next)), 'next_trip_idx is a trip index or null');
+  const stops = rows.map((row): RunStop => ({ seq: int(row, 'seq'), stationKey: text(row, 'station_key'), name: text(row, 'name'), arrS: int(row, 'arr_s'), depS: int(row, 'dep_s') }));
+  return { tripIdx, stops, nextTripIdx: next };
 }
 
 function toStationListing(row: SqlRow): StationListing {

@@ -10,7 +10,8 @@ import { buildStations } from '@/domain/network/stations';
 import { DataVersionAccessory } from '../diagnostics/DataVersionAccessory';
 import { EmptyState } from '../primitives/EmptyState';
 import { renderPrimitive, unmountAll } from '../primitives/__tests__/render-primitive';
-import { StationsScreen, StationsView } from '../stations/StationsScreen';
+import { stationList, type StationList } from '../stations/station-list';
+import { StationsScreen, StationsView, type StationsViewProps } from '../stations/StationsScreen';
 import { appRoutes, childLayout, elementsOf, textOf } from './app-tree';
 
 /**
@@ -30,6 +31,27 @@ function realStations(): StationListing[] {
   const stations = built.ok ? built.value.stations : [];
   expect(stations).toHaveLength(44);
   return stations.map((s) => ({ stationKey: s.key, name: s.name, mode: s.mode, coordinate: { latitude: s.latitude, longitude: s.longitude } }));
+}
+
+/**
+ * The Stations list over those stations. Each row's line strip and next departures come from the
+ * schedule DB (station-list-real.test.ts proves them on the real one); here every rail station gets the
+ * Green strip, every Mover station the Inner Loop's, and nothing is departing.
+ */
+function listOf(stations: readonly StationListing[]): StationList {
+  const lines = new Map(stations.map((s) => [s.stationKey, s.mode === 'rail' ? (['GREEN'] as const) : (['MM_INNER'] as const)]));
+  const list = stationList({ stations: () => stations, stationLines: () => lines, nextDepartures: () => ({ kind: 'next-departures', byStation: new Map() }) }, 1_790_769_600);
+  expect(list.sections.map((section) => section.title)).toEqual(['Metrorail', 'Metromover']);
+  expect(list.gap).toBeNull();
+  return list;
+}
+
+/** StationsView's props for `state`: 08:00 Wednesday, no location (the list keeps its line order), taps ignored. */
+function viewProps(state: StationsViewProps['state']): StationsViewProps {
+  const props: StationsViewProps = { state, nowS: 1_790_769_600, location: { coordinate: null, note: null }, onOpen: jest.fn() };
+  expect(props.location.coordinate).toBeNull();
+  expect(typeof props.onOpen).toBe('function');
+  return props;
 }
 
 describe('the tab shell (M5.5)', () => {
@@ -67,20 +89,22 @@ describe('the tab screens (M5.5)', () => {
 
   it('Stations renders one row per station', async () => {
     const stations = realStations();
-    const tree = await renderPrimitive(<StationsView state={{ kind: 'ready', stations }} />);
-    const rows = tree.root.findAll((node) => typeof node.type === 'string' && String(node.props.testID).startsWith('station-row-'));
+    // Two sections, Metrorail then Metromover, each in the order the DB lists them.
+    const listed = [...stations.filter((s) => s.mode === 'rail'), ...stations.filter((s) => s.mode === 'mover')];
+    const tree = await renderPrimitive(<StationsView {...viewProps({ kind: 'ready', list: listOf(stations) })} />);
+    const rows = tree.root.findAll((node) => typeof node.type === 'string' && /^station-row-(rail|mover):[a-z0-9-]+$/.test(String(node.props.testID)));
     expect(rows).toHaveLength(stations.length);
-    expect(rows.map((row) => row.props.testID)).toEqual(stations.map((station) => `station-row-${station.stationKey}`));
-    expect(rows.map((row) => row.props.accessibilityLabel)).toEqual(
-      stations.map((station) => `${station.name}, ${station.mode === 'rail' ? 'Metrorail' : 'Metromover'}`),
+    expect(rows.map((row) => row.props.testID)).toEqual(listed.map((station) => `station-row-${station.stationKey}`));
+    expect(rows.map((row) => String(row.props.accessibilityLabel).split(';')[0])).toEqual(
+      listed.map((station) => `${station.name}, ${station.mode === 'rail' ? 'Metrorail' : 'Metromover'}`),
     );
   });
 
   it('the Stations route renders the screen that reads the schedule DB; until it opens, the list says so', async () => {
     expect(StationsRoute().type).toBe(StationsScreen);
-    const opening = await renderPrimitive(<StationsView state={{ kind: 'opening' }} />);
+    const opening = await renderPrimitive(<StationsView {...viewProps({ kind: 'opening' })} />);
     expect(opening.root.findByType(EmptyState).props.title).toBe('Opening the schedule');
-    const failed = await renderPrimitive(<StationsView state={{ kind: 'failed', message: 'the schedule DB did not open: disk full' }} />);
+    const failed = await renderPrimitive(<StationsView {...viewProps({ kind: 'failed', message: 'the schedule DB did not open: disk full' })} />);
     expect(failed.root.findByType(EmptyState).props.message).toBe('the schedule DB did not open: disk full');
     expect(failed.root.findAll((node) => String(node.props.testID).startsWith('station-row-'))).toHaveLength(0);
   });

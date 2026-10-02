@@ -9,6 +9,7 @@ import { useLive } from '@/live/live-context';
 
 import type { ColorScheme } from '../colors';
 import { type DataStatus, dataStatus, statusConditions } from '../dataStatus';
+import { openStationSheet, openVehicleSheet } from '../sheets';
 import { focusAfterTap, type MapFocus, mapEmphasis, NO_FOCUS } from './emphasis';
 import { useLayers } from './layers-store';
 import { type MapRegion, zoomBucket } from './mapGeometry';
@@ -80,15 +81,28 @@ type MapHandlers = Pick<TransitMapProps, 'onStationPress' | 'onVehiclePress' | '
 
 /**
  * Taps: a vehicle puts its line in focus (again: out of focus), a station is selected (again:
- * deselected), the map itself clears both. Stable handlers, so markers do not re-render for them.
+ * deselected), the map itself clears both. A station or vehicle tap also opens its sheet (M6.4, M6.6).
+ * Stable handlers, so markers do not re-render for them.
  */
 function useMapHandlers(
   setFocus: (update: (focus: MapFocus) => MapFocus) => void,
   setSelected: (update: (key: string | null) => string | null) => void,
 ): MapHandlers {
   invariant(typeof setFocus === 'function' && typeof setSelected === 'function', 'taps change the focus and the selection');
-  const onVehiclePress = useCallback((_vehicleKey: string, lineId: LiveLineId) => setFocus((focus) => focusAfterTap(focus, lineId)), [setFocus]);
-  const onStationPress = useCallback((stationKey: string) => setSelected((key) => (key === stationKey ? null : stationKey)), [setSelected]);
+  const onVehiclePress = useCallback(
+    (vehicleKey: string, lineId: LiveLineId) => {
+      setFocus((focus) => focusAfterTap(focus, lineId));
+      openVehicleSheet(vehicleKey);
+    },
+    [setFocus],
+  );
+  const onStationPress = useCallback(
+    (stationKey: string) => {
+      setSelected((key) => (key === stationKey ? null : stationKey));
+      openStationSheet(stationKey);
+    },
+    [setSelected],
+  );
   const onMapPress = useCallback(() => {
     setFocus(() => NO_FOCUS);
     setSelected(() => null);

@@ -9,6 +9,7 @@ import { invariant } from '@/lib/invariant';
 import type { ColorScheme } from '../colors';
 import { SPACING } from '../tokens';
 import { drawsLine, drawsStation, drawsVehicle, type MapEmphasis } from './emphasis';
+import { useFollowCamera } from './follow';
 import type { LineSegment } from './lineLayout';
 import { LinePolylines } from './LinePolylines';
 import { MapCaption } from './MapCaption';
@@ -33,7 +34,9 @@ import { MIN_HIT_AREA_PT } from './vehicleVisual';
  *
  * The map's own interactions live here too (mfix3 §5): a caption naming what a tap hit (use-map-taps),
  * the floating control stack with the legend (ⓘ) and locate-me buttons, the legend sheet, and
- * you-are-here — the blue dot once location is granted (use-user-location).
+ * you-are-here — the blue dot once location is granted (use-user-location). Every marker tap still
+ * reaches the caller's handler (use-live-map opens the station / vehicle sheet, M6.4 / M6.6), and the
+ * camera follows the vehicle the vehicle sheet asked for (follow.ts) until the rider moves the map.
  */
 
 /** The four render props the plan fixes for the map (M5.12 A). */
@@ -80,9 +83,18 @@ export function TransitMap(props: TransitMapProps) {
     .filter((vehicle) => drawsVehicle(emphasis, vehicle))
     .sort((a, b) => (a.source === b.source ? 0 : a.source === 'scheduled' ? -1 : 1));
   invariant(vehicles.length <= props.vehicles.length && stations.length <= props.stations.length, 'the emphasis only ever hides');
+  // ONE MapView ref: locate-me (mfix3 §5) and follow mode (M6.6) both move this camera.
   const mapRef = useRef<MapView>(null);
   const { location, locate } = useUserLocation();
   const taps = useMapTaps({ segments, bucket, onStationPress: props.onStationPress, onVehiclePress: props.onVehiclePress, onMapPress: props.onMapPress, location, locate, mapRef });
+  // Follow mode: the camera glides to the followed vehicle each frame; the rider's own gesture — a pan, a
+  // double-tap zoom, or locate-me, which moves the camera elsewhere — ends it.
+  const { onUserGesture } = useFollowCamera(mapRef, vehicles);
+  const { onLocate: locateMe } = taps;
+  const onLocate = useCallback(() => {
+    onUserGesture();
+    locateMe();
+  }, [onUserGesture, locateMe]);
   return (
     <>
       <MapView
@@ -93,6 +105,8 @@ export function TransitMap(props: TransitMapProps) {
         {...MAP_RENDER_PROPS}
         showsUserLocation={location.kind === 'granted'}
         onRegionChangeComplete={(region: Region) => props.onRegionChange(region)}
+        onPanDrag={onUserGesture}
+        onDoublePress={onUserGesture}
         onPress={taps.onMapPress}>
         {lines}
         {stations.map((station) => (
@@ -106,7 +120,7 @@ export function TransitMap(props: TransitMapProps) {
         props={props}
         location={location}
         caption={taps.caption === null ? null : captionText(taps.caption, { stations: props.stations, vehicles: props.vehicles, tripDestinations: props.tripDestinations })}
-        onLocate={taps.onLocate}
+        onLocate={onLocate}
         onDismiss={taps.dismiss}
       />
     </>

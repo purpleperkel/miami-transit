@@ -1,4 +1,4 @@
-import { NOW_UNDER_MS, formatClockFromServiceSec, formatMinutes } from '../format';
+import { NOW_UNDER_MS, formatClockFromServiceSec, formatDistance, formatMinutes } from '../format';
 
 /** M6.1 format: minutes to a departure and service-day clock times, by arithmetic alone. */
 
@@ -43,5 +43,17 @@ describe('formatClockFromServiceSec', () => {
   it('a non-finite service time is a broken contract', () => {
     expect(() => formatClockFromServiceSec(Number.NaN)).toThrow('finite');
     expect(() => formatClockFromServiceSec(Number.NEGATIVE_INFINITY)).toThrow('finite');
+  });
+});
+
+describe('formatDistance (R7)', () => {
+  it('metres to the nearest 10 under a kilometre', () => {
+    expect([formatDistance(0), formatDistance(4), formatDistance(347), formatDistance(994)]).toEqual(['0 m', '0 m', '350 m', '990 m']);
+    expect(formatDistance(995)).toBe('1.0 km');
+  });
+
+  it('kilometres to one decimal, whole from 10 km', () => {
+    expect([formatDistance(1234), formatDistance(9949), formatDistance(10_000), formatDistance(24_600)]).toEqual(['1.2 km', '9.9 km', '10 km', '25 km']);
+    expect(() => formatDistance(-1)).toThrow('non-negative');
   });
 });

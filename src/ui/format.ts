@@ -42,3 +42,18 @@ export function formatClockFromServiceSec(serviceSec: number): string {
   invariant(hour24 >= 0 && hour24 < 24 && minute >= 0 && minute < 60, `${serviceSec} s lands on a clock time`);
   return `${hour12}:${String(minute).padStart(2, '0')} ${hour24 < 12 ? 'AM' : 'PM'}`;
 }
+
+const METRES_PER_KM = 1000;
+
+/**
+ * A walking distance as a row shows it: metres to the nearest 10 under a kilometre ("350 m"),
+ * then kilometres to one decimal ("1.2 km"), whole from 10 km ("12 km").
+ */
+export function formatDistance(meters: number): string {
+  invariant(Number.isFinite(meters) && meters >= 0, `a distance is a non-negative number of metres, got ${meters}`);
+  const roundedM = Math.round(meters / 10) * 10;
+  const km = meters / METRES_PER_KM;
+  const text = roundedM < METRES_PER_KM ? `${roundedM} m` : km < 10 ? `${km.toFixed(1)} km` : `${Math.round(km)} km`;
+  invariant(/^\d+(\.\d)? k?m$/.test(text), `"${text}" reads as metres or kilometres`);
+  return text;
+}

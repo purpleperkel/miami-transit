@@ -101,3 +101,16 @@ describe('the Layers sheet (M5.12)', () => {
     expect(isRealLabel(options.title, routeNames(routes))).toBe(true);
   });
 });
+
+describe('the station and vehicle sheets (M6.4, M6.6)', () => {
+  it('both open as native formSheets that leave the map usable at their smallest height', () => {
+    const routes = appRoutes();
+    const screens = rootStack().screens;
+    expect(pushedRoutes(routes)).toEqual(expect.arrayContaining(['station/[stationKey]', 'vehicle/[vehicleKey]']));
+    for (const [route, title] of [['station/[stationKey]', 'Station'], ['vehicle/[vehicleKey]', 'Vehicle']] as const) {
+      const options = optionsOf(screens, route);
+      expect([route, options.presentation, options.title, options.headerShown]).toEqual([route, 'formSheet', title, true]);
+      expect([route, options.sheetLargestUndimmedDetentIndex, (options.sheetAllowedDetents as number[]).length]).toEqual([route, 0, 2]);
+    }
+  });
+});

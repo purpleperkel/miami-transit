@@ -55,7 +55,9 @@ import { readSwiftlyWifiOnly } from './swiftly-wifi';
  * unlock downloads afresh. A wall-clock correction while the app is open neither shortens nor
  * stretches the floor. The floor remembers each request by its URL AND key (fix round 4, S3): a new
  * key or a new agency is a new request, and going back to an old one within 30 s repeats nothing.
- * A credentials change aborts the provider's requests still out under the old ones (poller.ts, S4).
+ * A credentials change aborts the provider's requests still out under the old ones (poller.ts, S4),
+ * and leaving the foreground aborts every request in flight, to every provider (fix round 5, T1:
+ * poller.ts pauseAll): a request frozen through a lock would end only after the unlock.
  *
  * LIFECYCLE: constructing a runtime does nothing observable. `start()` makes a fresh poller, loads
  * the keys and begins publishing; `stop()` aborts the poller's requests and publishing stops. A
@@ -181,9 +183,9 @@ export class LiveRuntime {
   start(): void {
     invariant(!this.isStarted(), 'the runtime is started once at a time');
     this.watch?.start(); // first: the gate reads the watch whenever the poller asks for standings
-    const poller = new LivePoller({
+    const poller: LivePoller = new LivePoller({
       providers: this.providers,
-      standings: () => this.standings(),
+      standings: () => this.standings(poller), // read only after construction, by the poller itself
       nowS: this.nowS,
       onChange: () => this.emit(),
       onBug: (message) => this.reportBug(message),
@@ -232,10 +234,15 @@ export class LiveRuntime {
    * The app left the foreground (inactive or background: use-live-polling.ts has stopped the heartbeat).
    * The floor clock marks the moment, so the phone's sleep while the app is away counts toward
    * Swiftly's 30 s floor when it returns (resume). Leaving again while away keeps the first mark.
+   * Every poll in flight is aborted (mfix10 fix round 5, T1: poller.ts pauseAll): on a lock it would be
+   * frozen with the app's JavaScript and end only after the unlock. The aborted polls leave no trace,
+   * the chain's failures stay as they were, and their tasks start over, so the first poll back is
+   * fresh unless Swiftly's floor (on the floor clock, sleep counted) still holds its request back.
    */
   pause(): void {
     const [started, floorMs] = [this.isStarted(), this.floorClock.now()];
     this.floorClock.background();
+    this.poller?.pauseAll();
     invariant(this.floorClock.now() >= floorMs, 'leaving the foreground never moves the floor clock back: only a return counts the time away');
     invariant(this.isStarted() === started, 'leaving the foreground starts and stops nothing (the binding stops the heartbeat)');
   }
@@ -398,15 +405,18 @@ export class LiveRuntime {
     }
   }
 
-  /** Every provider's standing for the chain: key present (a gated Swiftly stands as key-less), capabilities, calls this month. */
-  private standings(): Standings {
+  /**
+   * Every provider's standing for the chain `asker` resolves: key present (a gated Swiftly stands as
+   * key-less), capabilities, calls this month. Only the running poller asks: one from before a stop()
+   * (React may run an effect twice) is disposed and silent.
+   */
+  private standings(asker: LivePoller): Standings {
     invariant(this.poller !== null, 'the chain takes standings only while the runtime runs');
+    invariant(asker === this.poller, 'only the running poller takes standings: a poller from before a stop() is disposed and asks nothing');
     invariant(this.hold === null, 'the poller is held while the runtime holds, so the chain never resolves on a held gate');
     const nowS = this.nowS();
     const gated = this.swiftlyGated();
-    const standings = { swiftly: this.standing('swiftly', nowS, gated), transitland: this.standing('transitland', nowS, false) };
-    invariant(!gated || !isOnWifi(this.watch === null ? null : this.watch.reading()), 'a gated Swiftly means the phone is off Wi-Fi at this very tick: the gate is never read from a cache');
-    return standings;
+    return { swiftly: this.standing('swiftly', nowS, gated), transitland: this.standing('transitland', nowS, false) };
   }
 
   private standing(provider: ProviderId, nowS: number, gated: boolean): ProviderStanding {

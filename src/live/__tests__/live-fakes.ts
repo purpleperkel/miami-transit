@@ -1,4 +1,4 @@
-import type { NetworkState } from 'expo-network';
+import type { NetworkState, NetworkStateType } from 'expo-network';
 
 import type { RuntimeNetwork } from '../../data/live-network';
 import { LIVE_TRIP_UPDATES_FIXTURE_BYTES, LIVE_VEHICLES_FIXTURE_BYTES } from '../../domain/gtfsrt/__fixtures__/live-feeds.fixture';
@@ -137,11 +137,17 @@ export function bothProviders(stations: readonly string[]): FakeServer {
  * isInternetReachable as isConnected). VPN, OTHER, BLUETOOTH and WIMAX are Android-only.
  */
 const IOS_NETWORK_STATES: ReadonlyMap<string, NetworkState> = new Map(
-  (['WIFI', 'CELLULAR', 'ETHERNET', 'NONE', 'UNKNOWN'] as const).map((type) => {
+  (['WIFI', 'CELLULAR', 'ETHERNET', 'NONE', 'UNKNOWN'] as const satisfies readonly `${NetworkStateType}`[]).map((type) => {
     const connected = type !== 'NONE' && type !== 'UNKNOWN';
     return [type, Object.freeze({ type, isConnected: connected, isInternetReachable: connected }) as NetworkState];
   }),
 );
+
+/** The rest of expo-network 57.0.2's NetworkStateType (Network.types.d.ts): types only Android reports. */
+const ANDROID_ONLY_TYPES: readonly `${NetworkStateType}`[] = ['BLUETOOTH', 'WIMAX', 'VPN', 'OTHER'];
+
+/** Every type name expo-network's NetworkStateType defines, on either platform. */
+const EXPO_NETWORK_TYPES: ReadonlySet<string> = new Set([...IOS_NETWORK_STATES.keys(), ...ANDROID_ONLY_TYPES]);
 
 /** A listener event without a type: connected, type unknown. */
 const TYPELESS_STATE: NetworkState = Object.freeze({ isConnected: true, isInternetReachable: true });
@@ -168,9 +174,10 @@ export class FakeNetwork implements NetworkSource {
   readonly listeners: FakeListener[] = [];
   asks = 0;
 
+  /** The first answer is 'never', or a known iOS network state: a type name expo-network defines (1) that iOS reports (2). */
   constructor(public answer: string | 'never') {
-    expect(answer === 'never' || IOS_NETWORK_STATES.has(answer)).toBe(true); // a type iOS reports: its answer always names one
-    expect(this.open()).toEqual([]); // the class invariant (one watch at a time) holds from the start, with no watch yet
+    expect(answer === 'never' || EXPO_NETWORK_TYPES.has(answer)).toBe(true); // (1) 'never', or a type name expo-network defines: 'Wifi' is a typo
+    expect(!ANDROID_ONLY_TYPES.some((type) => type === answer)).toBe(true); // (2) never an Android-only type: iOS's answer is WIFI, CELLULAR, ETHERNET, NONE or UNKNOWN
   }
 
   getNetworkStateAsync(...args: unknown[]): Promise<NetworkState> {

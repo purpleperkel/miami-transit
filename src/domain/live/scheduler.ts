@@ -177,7 +177,12 @@ export function restartTask(state: SchedulerState, id: string, nowS: number): Sc
   return new Map(state).set(id, { ...task, dueAt: nowS, failures: 0, intervalS: task.cadenceS, lastStartedAt: null });
 }
 
-/** Back from the background at `nowS`: every idle task is due now, or one cadence after its last poll started if that is later. */
+/**
+ * Back from the background at `nowS`: every idle task is due now, or one cadence after its last poll
+ * started if that is later. A task still in flight is left as it is: the runtime aborts every poll in
+ * flight as the app leaves the foreground (mfix10 fix round 5), so such a poll has not ended yet, and
+ * its task is due again when it does.
+ */
 export function resumeAll(state: SchedulerState, nowS: number): SchedulerState {
   invariant(Number.isFinite(nowS), 'the app resumes at an instant');
   const next = new Map<string, TaskState>();

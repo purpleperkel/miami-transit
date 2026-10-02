@@ -1,7 +1,7 @@
 import { type ChainResolution, type ChainState, initialChainState, recordPoll, resolveChain, type Standings } from '../domain/live/chain';
 import { PROVIDER_CONFIG } from '../domain/live/constants';
 import { dueTasks, finishPoll, finishReusedPoll, type PollOutcome, type PollTask, releasePoll, restartTask, resumeAll, type SchedulerState, startPoll, syncTasks } from '../domain/live/scheduler';
-import { type Capability, type ChainProviderId, type LiveBatch, type LiveError, type LivePrediction, type LiveProvider, type LiveVehicle, type ProviderId, ReusedRejection } from '../domain/live/types';
+import { type Capability, type ChainProviderId, type LiveBatch, type LiveError, type LivePrediction, type LiveProvider, type LiveVehicle, PROVIDER_IDS, type ProviderId, ReusedRejection } from '../domain/live/types';
 import { invariant } from '../lib/invariant';
 import { ok, type Result } from '../lib/result';
 import { detach } from './detach';
@@ -25,12 +25,13 @@ import { detach } from './detach';
  *    allowed, and leaving Wi-Fi may have cut the download) or a key removed meanwhile — leaves no
  *    trace: no lastError (so no 'offline' flash), nothing in the chain, and its task is released with
  *    its failures and interval as they were (scheduler.ts releasePoll). A poll whose provider's key
- *    CHANGED meanwhile leaves no trace either, and its task starts over, due at once. Any other poll
- *    ends its task (a failure backs off, R-b), and is recorded in the chain only if its result is its
- *    own: a failure or a bug `reused` from a download another poll started (Swiftly's 30 s share) is
- *    recorded by that poll alone, so one failed download is one failure however many stations read
- *    it, while every station's task still backs off. A batch a poll brought back is always shown:
- *    fresh data the phone has already fetched.
+ *    CHANGED meanwhile, or that leaving the foreground aborted (a new era either way), leaves no trace
+ *    either, and its task starts over, due at once. Any other poll ends its task (a failure backs
+ *    off, R-b), and is recorded in the chain only if its result is its own: a failure or a bug
+ *    `reused` from a download another poll started (Swiftly's 30 s share) is recorded by that poll
+ *    alone, so one failed download is one failure however many stations read it, while every
+ *    station's task still backs off. A batch a poll brought back is always shown: fresh data the
+ *    phone has already fetched.
  *  - HOLD (mfix10 fix round 2): the runtime holds the poller while it waits for a fresh network
  *    reading on resume. A held poller is not ticked, and a poll that ends meanwhile is settled when
  *    `resume()` lifts the hold, on the standings then — so nothing moves until the reading is in.
@@ -45,11 +46,15 @@ import { detach } from './detach';
  *  - A poll the provider's floor turned away (mfix10 fix round 4, S2: a SUCCESS handed back from a
  *    download another poll started, its batch carrying `floorEndsInMs`) is due again the moment that
  *    floor ends (scheduler.ts finishReusedPoll); a FAILURE handed back that way backs off as above.
+ *  - LEAVING THE FOREGROUND (mfix10 fix round 5, T1: `pauseAll()`, from the runtime's pause()) aborts
+ *    every poll in flight, to every provider, as a credentials change does — a new era, the old
+ *    signal aborted — but keeps the chain's failures: the aborted polls leave no trace, and their tasks
+ *    start over. A request frozen through a lock would otherwise end after the unlock, and push its
+ *    task's next poll a cadence past that end.
  *
  * A failed poll keeps the previous batch: stale data ages visibly (its fetchedAt) instead of
  * vanishing. A poll that fails by a bug still ends (as a failure, so its task backs off rather than
- * wedging in flight) and the bug goes to `onBug`. Polls in flight when the app goes to the
- * background finish normally (each is bounded by its 8 s abort); `dispose()` aborts them and
+ * wedging in flight) and the bug goes to `onBug`. `dispose()` aborts the polls in flight too, and
  * nothing after that is recorded.
  *
  * TIME: the scheduler and the chain need an instant that never runs backwards, so the wall clock is
@@ -154,9 +159,9 @@ export class LivePoller {
   private readonly servedBy = new Map<string, ProviderId>();
   private readonly clock: MonotonicClock;
   private disposed = false;
-  /** Each provider's credentials era, bumped by credentialsChanged: a poll started in an earlier era counts for nothing. */
+  /** Each provider's credentials era, bumped by credentialsChanged and pauseAll: a poll started in an earlier era counts for nothing. */
   private readonly eras: Record<ProviderId, number> = { swiftly: 0, transitland: 0 };
-  /** The abort signal each provider's polls in its current era run under: credentialsChanged aborts it and starts a new one. */
+  /** The abort signal each provider's polls in its current era run under: credentialsChanged and pauseAll abort it and start a new one. */
   private readonly aborts: Record<ProviderId, AbortController> = { swiftly: new AbortController(), transitland: new AbortController() };
   /** Held by the runtime until a resume's network reading is in: not ticked, and ended polls wait in `ended`. */
   private held = false;
@@ -255,16 +260,46 @@ export class LivePoller {
       vehicles: Object.freeze({ ...this.chain.vehicles, [provider]: clean.vehicles[provider] }),
       predictions: Object.freeze({ ...this.chain.predictions, [provider]: clean.predictions[provider] }),
     });
-    const old = this.aborts[provider];
-    this.eras[provider] += 1; // first: the aborted polls end in an earlier era, whenever their ends run
-    this.aborts[provider] = new AbortController();
-    old.abort();
+    this.newEra(provider);
     const nowS = this.clock.now();
     for (const [id, servedBy] of this.servedBy) {
       this.scheduler = servedBy === provider ? restartTask(this.scheduler, id, nowS) : this.scheduler;
     }
     invariant(this.chain.vehicles[provider].consecutive === 0 && this.chain.predictions[provider].consecutive === 0, `${provider} starts clean`);
-    invariant(old.signal.aborted && !this.aborts[provider].signal.aborted, `${provider}'s old requests are aborted, and its new ones run under a live signal`);
+  }
+
+  /**
+   * The app left the foreground (mfix10 fix round 5, T1): EVERY poll in flight, to every provider, is
+   * aborted. On a phone that locks, a request in flight is frozen through the sleep with the app's
+   * JavaScript; it would end after the unlock, and its task would poll again only a cadence after that
+   * end. Each provider gets what credentialsChanged gives it — a new credentials era and a new abort
+   * signal, the old one aborted — but keeps its failure record in both chains: pausing is not a
+   * credential change. So the aborted polls end in an earlier era: they leave no trace and their tasks
+   * start over (settle), and the resume schedules them, under Swiftly's 30 s floor at the source.
+   * Idle tasks are left as they are. Transitland has no floor at the source: a Transitland poll aborted
+   * this way is tried again at the first heartbeat back, one more metered call than if it had finished.
+   */
+  pauseAll(): void {
+    invariant(!this.disposed, 'a disposed poller is not paused');
+    const [chain, eras] = [this.chain, { ...this.eras }];
+    for (const provider of PROVIDER_IDS) {
+      this.newEra(provider);
+    }
+    invariant(this.chain === chain, 'pausing keeps every provider\'s failure record: it is not a credential change');
+    invariant(PROVIDER_IDS.every((provider) => this.eras[provider] > eras[provider]), 'every provider\'s polls in flight are aborted, Transitland\'s as well as Swiftly\'s');
+  }
+
+  /**
+   * Starts `provider`'s next credentials era: a new abort signal for its next polls, the old one
+   * aborted. The era moves FIRST, so the aborted polls end in an earlier era whenever their ends run.
+   */
+  private newEra(provider: ProviderId): void {
+    invariant(!this.disposed, 'a disposed poller starts no era: dispose() aborted its requests for good');
+    const old = this.aborts[provider];
+    this.eras[provider] += 1;
+    this.aborts[provider] = new AbortController();
+    old.abort();
+    invariant(old.signal.aborted && !this.aborts[provider].signal.aborted, `${provider}'s old requests are aborted, and its next ones run under a live signal`);
   }
 
   /** Aborts every poll in flight; nothing is recorded or published afterwards. */
@@ -387,8 +422,9 @@ export class LivePoller {
   /**
    * Settles an ended poll in the scheduler and the chain, then publishes. A batch it brought back is
    * shown however it counts.
-   *  - Its provider's key CHANGED since it started (a new era): it leaves no trace, and its task
-   *    starts over, due at once — the new key owes nothing to the old key's answer.
+   *  - Its provider's era moved since it started (its key changed, or the app left the foreground;
+   *    either aborted it): it leaves no trace, and its task starts over, due at once — a new key owes
+   *    nothing to the old key's answer, and an aborted request brought none.
    *  - Its provider no longer stands keyed (gated off Wi-Fi, or its key removed): it leaves no trace —
    *    no lastError, nothing in the chain, its task released with its failures and interval as they were.
    *  - Otherwise it is recorded (record()).

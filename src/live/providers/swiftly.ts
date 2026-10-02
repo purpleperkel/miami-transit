@@ -39,17 +39,32 @@ import { type ProviderDeps, stationBatch, tripUpdatesBatch, vehiclesBatch } from
  *    bug, e.g. a mapper's broken invariant) is handed out as a ReusedRejection: the poll that started
  *    the download records it in the chain once, and every poll that gets it still backs off (poller.ts).
  *  - An ABORTED download is a start like any other: when Swiftly's credentials change, the poller
- *    aborts the requests out under the old ones (fix round 4, S4), and the aborted download stays
- *    remembered, as a failure, until its floor ends.
+ *    aborts the requests out under the old ones (fix round 4, S4), and when the app leaves the
+ *    foreground it aborts every request in flight (fix round 5, T1: poller.ts pauseAll). The aborted
+ *    download stays remembered, as a failure, until its floor ends, so the polls a resume starts over
+ *    are held to that floor: a trip to another app never buys an early request.
  *
- * ACCEPTED RESIDUALS (arbiter, mfix10 fix round 4, S5):
- *  - Agency A → B → A while A's failing download is in flight counts that failure ZERO times: the
+ * ACCEPTED RESIDUALS (arbiter, mfix10 fix rounds 4 and 5):
+ *  - S5: agency A → B → A while A's failing download is in flight counts that failure ZERO times: the
  *    change to B aborts it and its poll ends in an earlier credentials era, which leaves no trace; back
  *    on A inside its floor, every fetch reads it reused, which the chain does not count. (Any download
  *    of A in flight at the change ends the same way: read back as a cancelled failure, unrecorded,
  *    its tasks backing off as after any failure.)
  *  - R5: every poll that reads a broken download (a rejection, a bug) reports it through onBug, so one
  *    broken download is one report per poll that read it, all with the same text.
+ *  - S2 (fix round 5, T3): a poll turned away MID-DOWNLOAD (the download it reads still in flight) ends
+ *    when that download does, between heartbeats, and the poller rounds the floor's time left UP to
+ *    its whole-second clock: so the poll is due up to one heartbeat after the floor ends, never early.
+ *    On the wall clock, with the heartbeat's phase against the second, its request comes up to two
+ *    heartbeats after the floor ends; and a heartbeat that finds it due inside the floor's last second
+ *    is turned away once more, at no request (a model of 2 000 000 random phases, 2026-10-02: no early
+ *    request, at most 1.98 s late, about one in six turned away twice). A poll turned away AT a
+ *    heartbeat (the download already in) is due less than one heartbeat after the floor ends.
+ *  - T1 (fix round 5): a poll the resume starts over inside the floor of a download that leaving the
+ *    foreground aborted reads that download as a cancelled failure, reused: unrecorded, and its task
+ *    backs off one cadence (R-b) like any failed poll. So after a short trip to another app the next
+ *    request comes a cadence after the first poll back, not at the floor's end; after a lock longer
+ *    than 30 s the floor is over and the first poll back downloads afresh.
  */
 
 export const SWIFTLY_CAPABILITIES: Capabilities = Object.freeze({ vehicles: true, predictions: true });

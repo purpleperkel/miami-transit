@@ -14,7 +14,8 @@ import { bothProviders, FakeNetwork, runtimeNetwork, SWIFTLY_TRIP_UPDATES_URL, S
  * the setting is the real module over an in-memory kv store; the heartbeat is the real AppState-gated
  * binding on jest's fake clock, stepped one heartbeat (1 s) at a time. The app stays active, unless a
  * test moves it through a HandAppState (a resume then holds the poller until the network's fresh answer
- * is in); a test can hold Swiftly's downloads open and then cut them, as leaving Wi-Fi does.
+ * is in); a test can hold Swiftly's downloads open and then cut them, as leaving Wi-Fi does. A held
+ * download honours its request's abort signal, as a real fetch does.
  */
 
 const STATION = 'rail:government-ctr';
@@ -26,7 +27,8 @@ const ACTIVE: AppStateSource = { currentState: 'active', addEventListener: () =>
 
 type Provider = 'swiftly' | 'transitland';
 type AppStatus = NonNullable<AppStateSource['currentState']>;
-type Request = { readonly url: string; readonly provider: Provider; readonly capability: 'vehicles' | 'predictions'; readonly atS: number };
+/** A request as the call spy saw it: when it started on the wall clock (s) and on the awake clock (performance.now(), ms). */
+type Request = { readonly url: string; readonly provider: Provider; readonly capability: 'vehicles' | 'predictions'; readonly atS: number; readonly awakeMs: number };
 type RigOptions = { readonly wifiOnly?: boolean; readonly app?: AppStateSource; readonly stations?: readonly string[]; readonly awakeMs?: () => number };
 type Chain = {
   readonly runtime: LiveRuntime;
@@ -73,16 +75,35 @@ class HandAppState implements AppStateSource {
   }
 }
 
-/** Swiftly downloads the test holds open while `holding`, then cuts, as leaving Wi-Fi does mid-download. */
+/** One download the test holds open. */
+type HeldDownload = { readonly url: string; readonly fail: (error: Error) => void };
+
+/**
+ * Swiftly downloads the test holds open while `holding`, then cuts, as leaving Wi-Fi does mid-download.
+ * A held download whose request is aborted rejects at once, as a real fetch does (mfix10 fix round 5).
+ */
 class HeldDownloads {
   holding = false;
-  private readonly held: { readonly url: string; readonly fail: (error: Error) => void }[] = [];
+  /** How many held downloads ended because their request was aborted. */
+  aborted = 0;
+  private readonly held: HeldDownload[] = [];
 
-  /** A download of `url` that hangs until cutAll(). */
-  hold(url: string): Promise<FetchResponseLike> {
+  /** A download of `url` that hangs until cutAll(), or until `signal` aborts it. */
+  hold(url: string, signal: AbortSignal): Promise<FetchResponseLike> {
     expect(this.held.map((download) => download.url)).not.toContain(url); // one download per endpoint at a time (Swiftly's 30 s floor)
     expect(this.held.length).toBeLessThan(2); // at most its vehicles and its ONE shared trip-updates download
-    return new Promise<FetchResponseLike>((_resolve, reject) => void this.held.push({ url, fail: reject }));
+    return new Promise<FetchResponseLike>((_resolve, reject) => {
+      const download: HeldDownload = { url, fail: reject };
+      this.held.push(download);
+      signal.addEventListener('abort', () => this.abort(download), { once: true });
+    });
+  }
+
+  /** The held downloads still open. */
+  get open(): number {
+    expect(this.held.every((download) => download.url.startsWith('https://api.goswift.ly/'))).toBe(true); // only Swiftly's downloads are held
+    expect(this.aborted).toBeGreaterThanOrEqual(0);
+    return this.held.length;
   }
 
   /** Fails every held download (the Wi-Fi went away under it) and stops holding; how many there were. */
@@ -93,6 +114,19 @@ class HeldDownloads {
     cut.forEach((download) => download.fail(new Error('the Wi-Fi went away mid-download')));
     this.holding = false;
     return cut.length;
+  }
+
+  /** `download`'s request was aborted: if it is still held, it rejects now, as fetch does. One cut first stays cut. */
+  private abort(download: HeldDownload): void {
+    const at = this.held.indexOf(download);
+    const before = this.aborted;
+    if (at >= 0) {
+      this.held.splice(at, 1);
+      this.aborted += 1;
+      download.fail(new Error(`the request to ${download.url} was aborted`));
+    }
+    expect(this.held).not.toContain(download); // an aborted download is held no more
+    expect(this.aborted).toBe(at >= 0 ? before + 1 : before);
   }
 }
 
@@ -123,8 +157,8 @@ function chainRig(first: string | 'never', { wifiOnly, app = ACTIVE, stations = 
   const requests: Request[] = [];
   const downloads = new HeldDownloads();
   const fetch = jest.fn((url: string, init: HttpInit) => {
-    requests.push({ url, ...classify(url), atS: Date.now() / 1000 });
-    return downloads.holding && classify(url).provider === 'swiftly' ? downloads.hold(url) : server.fetch(url, init);
+    requests.push({ url, ...classify(url), atS: Date.now() / 1000, awakeMs: performance.now() });
+    return downloads.holding && classify(url).provider === 'swiftly' ? downloads.hold(url, init.signal) : server.fetch(url, init);
   });
   const quota = new Map<string, number>();
   const network = new FakeNetwork(first);
@@ -215,7 +249,7 @@ function swiftlyMeter(chain: Chain): string {
 /** The published states since state number `from` that show a Swiftly failure: a count, a bench or an error. */
 function failureTraces(chain: Chain, from: number): LiveState[] {
   expect(chain.states.length).toBeGreaterThan(from); // states were published since the mark, so an empty answer is not vacuous
-  expect(chain.downloads.holding).toBe(false); // every held download has ended, so every poll has been settled
+  expect(chain.downloads.open).toBe(0); // every held download has ended (cut or aborted), so every poll has been settled
   return chain.states.slice(from).filter((state) => [state.status.vehicles, state.status.predictions].some((status) => status.consecutiveFailures > 0 || status.failing || status.lastError !== null));
 }
 
@@ -504,5 +538,49 @@ describe('Swiftly only on Wi-Fi (mfix10): the floor clock counts the phone\'s sl
     expect(swiftlyCalls(chain, back)).toBe(0); // 20 s away, all of them awake, are counted once: the floor turns that poll away
     await stepS(1); // the floor ends
     expect(chain.fetch.mock.calls.slice(back).map(([url]) => url).sort()).toEqual([SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL]);
+  });
+});
+
+describe('Swiftly only on Wi-Fi (mfix10 fix round 5): leaving the foreground aborts every poll in flight', () => {
+  it('a swiftly request frozen through a long lock is aborted, and the first poll on unlock downloads fresh data', async () => {
+    const app = new HandAppState();
+    const chain = chainRig('WIFI', { app });
+    await stepS(1); // the mount's hold lifts: Swiftly downloads both feeds
+    await toEveOfSwiftlyPoll(chain);
+    chain.downloads.holding = true;
+    const [held, published] = [chain.fetch.mock.calls.length, chain.states.length];
+    await stepS(1); // Swiftly's next poll starts, for both feeds, and hangs
+    expect([swiftlyCalls(chain, held), chain.downloads.open]).toEqual([2, 2]);
+    app.set('background'); // the phone locks with both requests in flight
+    jest.setSystemTime(Date.now() + 40_000); // 40 s asleep: the wall clock moves; performance.now() (the awake clock) and every JS timer stand still, as on iOS
+    chain.downloads.holding = false;
+    const unlocked = chain.fetch.mock.calls.length;
+    app.set('active'); // unlocked: the runtime asks the network and holds until the next heartbeat
+    await stepS(2);
+    expect(chain.fetch.mock.calls.slice(unlocked).map(([url]) => url).sort()).toEqual([SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL]);
+    expect([chain.downloads.aborted, failureTraces(chain, published)]).toEqual([2, []]); // both were aborted, and their polls left no trace
+    expectServing(chain, 'swiftly');
+  });
+
+  it('a short trip to another app aborts the poll in flight, and the floor still holds', async () => {
+    const app = new HandAppState();
+    const chain = chainRig('WIFI', { app });
+    await stepS(1); // the mount's hold lifts: Swiftly downloads both feeds
+    await toEveOfSwiftlyPoll(chain);
+    chain.downloads.holding = true;
+    const [held, published] = [chain.requests.length, chain.states.length];
+    await stepS(1); // Swiftly's next poll starts, for both feeds, and hangs
+    const abortedMs = Math.max(...chain.requests.slice(held).map((request) => request.awakeMs));
+    app.set('background'); // another app: the phone stays awake, so the floor clock is performance.now() (no sleep to count)
+    await stepS(5);
+    expect([chain.downloads.aborted, chain.downloads.open]).toEqual([2, 0]); // leaving the foreground aborted both
+    chain.downloads.holding = false;
+    app.set('active');
+    await stepS(60);
+    const later = chain.requests.slice(held + 2).filter((request) => request.provider === 'swiftly');
+    expect(later.length).toBeGreaterThan(0); // Swiftly polls again within the minute, so the floor check below is not vacuous
+    expect(later.filter((request) => request.awakeMs - abortedMs < SWIFTLY_CADENCE_S * 1_000)).toEqual([]); // none within 30 000 floor-ms of the aborted ones
+    expect([Date.now() - performance.now(), failureTraces(chain, published)]).toEqual([T0_MS, []]); // wall and awake clocks moved together: the floor clock counted no sleep
+    expectServing(chain, 'swiftly');
   });
 });

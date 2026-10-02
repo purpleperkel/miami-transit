@@ -357,6 +357,33 @@ describe('LivePoller (mfix10): a key change while a poll is in flight', () => {
   });
 });
 
+describe('LivePoller (mfix10 fix round 5): leaving the foreground', () => {
+  it('pausing aborts every provider\'s polls in flight and keeps their failures; the aborted polls leave no trace and their tasks start over', async () => {
+    const h = new Harness();
+    h.keys.swiftly = true;
+    h.poller.watchStations(['rail:government-ctr']);
+    h.swiftly.script.set('vehicles', NETWORK_DOWN);
+    await h.step(60); // Swiftly's vehicles fail at 0, 30 and 60: benched, so Transitland serves vehicles from 61
+    [h.swiftly.hold, h.transitland.hold] = [true, true];
+    await h.step(90); // Transitland's vehicles poll (61) and Swiftly's predictions poll (90) start, and hang
+    const inFlight = [h.transitland.calls[h.transitland.calls.length - 1], h.swiftly.calls[h.swiftly.calls.length - 1]];
+    expect(inFlight.map((call) => [call?.what, (call?.at ?? T0) - T0])).toEqual([['vehicles', 61], ['rail:government-ctr', 90]]);
+    h.poller.pauseAll(); // the app leaves the foreground
+    expect(inFlight.map((call) => call?.signal.aborted)).toEqual([true, true]);
+    h.swiftly.release(); // both answer after the abort: an earlier era
+    h.transitland.release();
+    await settle();
+    [h.swiftly.hold, h.transitland.hold, h.now] = [false, false, T0 + 95];
+    h.poller.resume();
+    await settle();
+    expect([callTimes(h.transitland), callTimes(h.swiftly, 'rail:government-ctr'), callTimes(h.swiftly)]).toEqual([[61, 95], [0, 30, 60, 90, 95], [0, 30, 60]]); // started over, due at once; Swiftly's vehicles still benched
+    expect(h.latest.status).toEqual({
+      vehicles: { provider: 'transitland', failing: false, consecutiveFailures: 0, lastError: null }, // Swiftly's 3 failures kept: pausing is not a credential change
+      predictions: { provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null },
+    });
+  });
+});
+
 describe('LivePoller (mfix10): the resume hold', () => {
   it('a held poller is not ticked, and a poll that ended meanwhile is settled when the hold lifts, on the standings then', async () => {
     const h = new Harness();

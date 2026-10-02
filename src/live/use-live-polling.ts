@@ -13,9 +13,10 @@ import { invariant } from '../lib/invariant';
  *                          network reading in (mfix10, runtime.ts), so no request starts on a stale one
  *   inactive, background → the heartbeat stops: no new request starts until the app is active again;
  *                          and pause(), so the runtime's floor clock counts the phone's sleep while the
- *                          app is away (mfix10 fix round 4: on iOS performance.now() stops in sleep)
+ *                          app is away (mfix10 fix round 4: on iOS performance.now() stops in sleep),
+ *                          and every request in flight is aborted (fix round 5: frozen through a lock,
+ *                          it would end only after the unlock)
  *
- * A request already in flight when the app leaves the foreground ends by itself (8 s abort at most).
  * Unmounting stops the heartbeat, then the runtime (which aborts whatever is in flight).
  */
 

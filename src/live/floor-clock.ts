@@ -12,12 +12,15 @@ import { invariant } from '../lib/invariant';
  * the foreground while it is locked, so the runtime marks every departure (`background()`, when the
  * app goes inactive or to the background) and every return (`foreground()`, on resume).
  *
- * On a return, the part of the spell away that the awake clock MISSED — the wall span minus the awake
- * span, never less than zero — is added to an offset, and `now()` reads the awake clock plus that
- * offset. Time the phone stayed awake while the app was away (another app open) is on the awake clock
- * already, so it is not counted twice: a 20 s trip to another app does not end a floor 20 s early.
- * A wall-clock jump matters only when it happens while the app is away (a jump forward ends the floor
- * that much sooner; a jump back adds nothing): accepted (arbiter, fix round 4).
+ * THE RULE (arbiter-ratified, mfix10 fix round 5, T0): on a return the clock adds max(0, wall span −
+ * awake span) — the part of the spell away that the awake clock MISSED, never less than zero — to an
+ * offset, and `now()` reads the awake clock plus that offset. It does NOT add the whole wall span:
+ * time the phone stayed awake while the app was away (another app open) is on the awake clock already,
+ * and counting it again would end floors early — the review's fuzz of the whole-span formula started
+ * the same (URL, key) twice 21 s apart after an awake app switch. So a 20 s trip to another app does
+ * not end a floor 20 s early. A wall-clock jump matters only when it happens while the app is away (a
+ * jump forward ends the floor that much sooner; a jump back adds nothing): accepted (arbiter, fix
+ * round 4).
  */
 export class FloorClock {
   /** The sleep counted so far, in ms: only ever grows. */

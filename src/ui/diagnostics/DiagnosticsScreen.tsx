@@ -5,6 +5,7 @@ import { PlatformColor, Pressable, ScrollView, StyleSheet, Text, View } from 're
 import { invariant } from '@/lib/invariant';
 import { err } from '@/lib/result';
 
+import { type TickTimeReadout, tickTimeReadout } from '../map/tickTime';
 import { PROBES, type ProbeSpec } from './probe-catalog';
 import type { ProbeOutcome } from './probe-kit';
 
@@ -22,7 +23,8 @@ const PROBE_IDS: ReadonlySet<string> = new Set(PROBES.map((spec) => spec.id));
  * The M1 Diagnostics screen: every capability probe as a row Jamie runs on the phone (M1.19).
  * Tap a row to run that probe; "Run all" runs the in-app probes one at a time (so permission
  * prompts never stack) and leaves the maps:// probe, which switches apps, to its own tap.
- * It is reached from Data & Settings (M8b.1), and its own link goes back there.
+ * It is reached from Data & Settings (M8b.1), and its own link goes back there. Above the probes, the
+ * map's frame-tick time (M5.13: "Diagnostics tick time < 4 ms").
  */
 export function DiagnosticsScreen() {
   invariant(PROBES.length === 9, 'the screen lists the nine M1 probes');
@@ -47,11 +49,41 @@ export function DiagnosticsScreen() {
         style={styles.runAll}>
         <Text style={styles.runAllText}>{busy ? 'Running…' : `Run all (${IN_APP_PROBES.length} in-app probes)`}</Text>
       </Pressable>
+      <MapTickRow />
       <Text style={styles.summary}>{`${passed} of ${PROBES.length} passed`}</Text>
       {PROBES.map((spec) => (
         <ProbeRow key={spec.id} spec={spec} state={states[spec.id] ?? IDLE} disabled={busy} onRun={runOne} />
       ))}
     </ScrollView>
+  );
+}
+
+/** The map tick readout: "Map tick 1.8 ms (last) · 3.1 ms (max) · 412 ticks", or that none was drawn yet. */
+export function mapTickText(readout: TickTimeReadout | null): string {
+  invariant(readout === null || (readout.count > 0 && readout.maxMs >= readout.lastMs), 'a readout holds at least one tick');
+  const text =
+    readout === null
+      ? 'No map ticks yet'
+      : `Map tick ${readout.lastMs.toFixed(1)} ms (last) · ${readout.maxMs.toFixed(1)} ms (max) · ${readout.count} ${readout.count === 1 ? 'tick' : 'ticks'}`;
+  invariant(text.length > 0, 'the readout always says something');
+  return text;
+}
+
+/**
+ * The map's frame-tick time, read once when Diagnostics opens: the Map tab is out of sight while this
+ * screen is up (its frame timer is stopped), so the recorder holds what was drawn while the map showed.
+ */
+function MapTickRow() {
+  const [readout] = useState(() => tickTimeReadout());
+  invariant(readout === null || readout.count > 0, 'a readout holds at least one tick');
+  const text = mapTickText(readout);
+  invariant(text.length > 0, 'the row always says something');
+  return (
+    <View testID="map-tick" accessible accessibilityLabel={`${text}. Phone check: under 4 ms.`} style={styles.row}>
+      <Text style={styles.rowTitle}>Map frame tick</Text>
+      <Text style={styles.detail}>{text}</Text>
+      <Text style={styles.expectation}>Plan M5.13: under 4 ms. Measured on each frame while the map is on screen.</Text>
+    </View>
   );
 }
 

@@ -14,12 +14,13 @@ function ready(feedSha256: string) {
 }
 
 describe('data version accessory text (M3.8)', () => {
-  it('ready: the open copy’s feed hash and the first service end (rail to Nov 22), full and inline', () => {
+  it('ready (R3b): the live status and the schedule end in words — never the feed hash — full and inline', () => {
     const state = ready(manifest.feedSha256);
     const short = manifest.feedSha256.slice(0, 8);
-    expect(dataVersionText(state, 'regular').text).toBe(`Data ${short} · rail to Nov 22 · Settings`);
-    expect(dataVersionText(state, 'inline').text).toBe(`Data ${short}`);
-    expect(dataVersionText(state, 'inline').accessibilityLabel).toBe(`Schedule data ${short}, rail to Nov 22. Opens Data & Settings.`);
+    expect(dataVersionText(state, 'regular').text).toBe('Checking live · schedule to Nov 22');
+    expect(dataVersionText(state, 'inline').text).toBe('Checking live · to Nov 22');
+    expect(dataVersionText(state, 'inline').accessibilityLabel).toBe('Checking live. Bundled schedule: rail to Nov 22. Opens Data & Settings.');
+    expect(JSON.stringify([dataVersionText(state, 'regular'), dataVersionText(state, 'inline')])).not.toContain(short);
   });
 
   it('opening and failed states say so instead of a version', () => {

@@ -8,6 +8,7 @@ import { invariant } from '@/lib/invariant';
 import { detach } from '@/live/detach';
 
 import { tickPlan } from './tickPlan';
+import { recordTickTime } from './tickTime';
 import { type FramePlan, framesAt, NO_SHOWN, planFrames, SAMPLE_S, type ShownTracks, type VehicleFrame } from './vehicleFrames';
 
 /**
@@ -15,6 +16,7 @@ import { type FramePlan, framesAt, NO_SHOWN, planFrames, SAMPLE_S, type ShownTra
  * focused, 5 s under Reduce Motion, none when the map is out of sight) and each tick draws every
  * vehicle at that instant (vehicleFrames.ts framesAt — pure, no SQL). The timetable is read once per
  * SAMPLE_S span, or when a new live batch arrives (ScheduleRepo.timetableAround), never per frame.
+ * Each tick's draw is timed and recorded for Diagnostics (tickTime.ts, the M5.13 "tick time" check).
  */
 
 /** What the frames read the timetable from: the schedule repo (tests pass a counting fake). */
@@ -44,7 +46,7 @@ export function useVehicleFrames(
   invariant(typeof clockMs === 'function', 'frames are drawn against a clock');
   const holder = useRef<PlanHolder>({ plan: null, source: null, shown: NO_SHOWN });
   const [frames, setFrames] = useState<VehicleFrames>(NO_FRAMES);
-  useEffect(() => runFrames(() => setFrames(nextFrames(holder, source, batch, clockMs() / 1000)), tickMs), [source, batch, tickMs, clockMs]);
+  useEffect(() => runFrames(() => setFrames(timedFrames(holder, source, batch, clockMs() / 1000)), tickMs), [source, batch, tickMs, clockMs]);
   return frames;
 }
 
@@ -59,6 +61,17 @@ function runFrames(draw: () => void, tickMs: number): () => void {
       clearInterval(timer);
     }
   };
+}
+
+/** One frame at `nowS` (nextFrames), its draw timed with performance.now() and recorded for Diagnostics. */
+function timedFrames(holder: RefObject<PlanHolder>, source: TimetableSource | null, batch: LiveBatch<LiveVehicle> | null, nowS: number): VehicleFrames {
+  const startMs = performance.now();
+  invariant(Number.isFinite(startMs), 'the frame timer reads a monotonic clock');
+  const frames = nextFrames(holder, source, batch, nowS);
+  const durationMs = performance.now() - startMs;
+  invariant(durationMs >= 0, 'a monotonic clock never runs backward');
+  recordTickTime(durationMs);
+  return frames;
 }
 
 /** One frame at `nowS`: the plan is remade when its span has passed, or the timetable or the live batch changed. */

@@ -48,7 +48,17 @@ export function LiveDataProvider({ children }: { readonly children: ReactNode })
   const state = published !== null && published.runtime === runtime ? published.state : null;
   const value = useMemo<LiveContextValue>(() => (runtime === null ? NO_LIVE : { state, runtime }), [runtime, state]);
   invariant(value.runtime === runtime, 'the context offers the current runtime');
+  invariant(value.state === state, 'the context offers only the current runtime\'s state');
+  return <LiveValueProvider value={value}>{children}</LiveValueProvider>;
+}
+
+/**
+ * Offers a live value to everything inside it, for useLive(): LiveDataProvider offers the runtime it
+ * runs; a test offers a real runtime's published state the same way.
+ */
+export function LiveValueProvider({ value, children }: { readonly value: LiveContextValue; readonly children: ReactNode }) {
   invariant(value.state === null || value.runtime !== null, 'a state is offered only with its runtime');
+  invariant(value.state === null || value.state.status !== undefined, 'an offered state carries its chain status');
   return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>;
 }
 

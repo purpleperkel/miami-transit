@@ -42,7 +42,7 @@ describe('the tab shell (M5.5)', () => {
     });
     expect(labels).toEqual(['Map', 'Trips', 'Stations']);
     const names = triggers.map((trigger) => trigger.props.name);
-    expect(names).toEqual(['index', 'trips/index', 'stations/index']);
+    expect(names).toEqual(['index', 'trips', 'stations']);
     // Each Trigger names a route expo-router really builds in the (tabs) group, and every tab route has one.
     const routes = childLayout(appRoutes(), '(tabs)').children.map((child) => child.route);
     expect([...routes].sort()).toEqual([...names].sort());

@@ -13,7 +13,8 @@ import { SPACING } from '../tokens';
 /**
  * The Stations tab (plan M5.5): a plain list of every station in the bundled schedule DB, rail first,
  * each mode in name order — every station the map draws is also reachable here (plan §4
- * accessibility). M6.5 refines the rows (line strips, sections) and opens the station sheet.
+ * accessibility). M6.5 refines the rows (line strips, sections) and opens the station sheet. The title
+ * is the tab's native large-title header (stations/_layout.tsx), which the ScrollView insets under.
  *
  *   StationsScreen (reads the schedule DB context) → StationsView (props only, rendered in tests)
  */
@@ -45,9 +46,6 @@ export function StationsView({ state }: { readonly state: StationsState }) {
   invariant(state.kind !== 'failed' || state.message.length > 0, 'a failure says why');
   return (
     <ScrollView contentInsetAdjustmentBehavior="automatic" style={styles.screen} contentContainerStyle={styles.content}>
-      <TText variant="title" accessibilityRole="header">
-        Stations
-      </TText>
       {state.kind === 'ready' ? (
         <View style={styles.list}>
           {state.stations.map((station) => (

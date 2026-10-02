@@ -65,6 +65,12 @@ class LoggingRuntime implements PollingRuntime {
     expect(this.log[this.log.length - 1]).toBe('resume');
   }
 
+  pause(): void {
+    this.log.push('pause');
+    expect(jest.getTimerCount()).toBe(0); // the binding stops the heartbeat before it tells the runtime the app left
+    expect(this.log).not.toContain('stop'); // and tells it only while bound
+  }
+
   /** How many entries of `kind` were logged. */
   count(kind: string): number {
     const n = this.log.filter((entry) => entry === kind).length;
@@ -103,7 +109,7 @@ describe('use-live-polling (M4.9): the heartbeat runs only while the app is acti
     expect(binding.running).toBe(false);
     appState.set('active');
     jest.advanceTimersByTime(2_000);
-    expect(runtime.log).toEqual(['resume', 'tick', 'resume', 'tick', 'tick']);
+    expect(runtime.log).toEqual(['resume', 'tick', 'pause', 'resume', 'tick', 'tick']); // pause: the runtime's floor clock counts the sleep while away (mfix10)
   });
 
   it('inactive (the app switcher, Control Center) stops it too', () => {
@@ -114,6 +120,7 @@ describe('use-live-polling (M4.9): the heartbeat runs only while the app is acti
     jest.advanceTimersByTime(10_000);
     expect(runtime.count('tick')).toBe(0);
     expect(binding.running).toBe(false);
+    expect(runtime.count('pause')).toBe(1);
   });
 
   it('mounted in the background: the runtime starts but nothing ticks until the app is active', () => {
@@ -121,9 +128,9 @@ describe('use-live-polling (M4.9): the heartbeat runs only while the app is acti
     const appState = new FakeAppState('background');
     const unbind = bindRuntime(runtime, appState, 1_000);
     jest.advanceTimersByTime(10_000);
-    expect(runtime.log).toEqual(['start']);
+    expect(runtime.log).toEqual(['start', 'pause']);
     appState.set('active');
-    expect(runtime.log).toEqual(['start', 'resume']);
+    expect(runtime.log).toEqual(['start', 'pause', 'resume']);
     unbind();
   });
 

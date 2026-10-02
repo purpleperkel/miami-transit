@@ -27,7 +27,7 @@ const ACTIVE: AppStateSource = { currentState: 'active', addEventListener: () =>
 type Provider = 'swiftly' | 'transitland';
 type AppStatus = NonNullable<AppStateSource['currentState']>;
 type Request = { readonly url: string; readonly provider: Provider; readonly capability: 'vehicles' | 'predictions'; readonly atS: number };
-type RigOptions = { readonly wifiOnly?: boolean; readonly app?: AppStateSource; readonly stations?: readonly string[] };
+type RigOptions = { readonly wifiOnly?: boolean; readonly app?: AppStateSource; readonly stations?: readonly string[]; readonly awakeMs?: () => number };
 type Chain = {
   readonly runtime: LiveRuntime;
   readonly network: FakeNetwork;
@@ -108,9 +108,10 @@ function classify(url: string): Pick<Request, 'provider' | 'capability'> {
 /**
  * A started runtime with both keys on the network whose every answer is `first` (FakeNetwork's): the
  * setting unwritten (its default, ON) unless `wifiOnly` saves it, `stations` watched (one by default),
- * and `app` the app's foreground state (active throughout by default).
+ * `app` the app's foreground state (active throughout by default), and `awakeMs` the phone's awake
+ * clock (performance.now(), on jest's fake clock, by default).
  */
-function chainRig(first: string | 'never', { wifiOnly, app = ACTIVE, stations = [STATION] }: RigOptions = {}): Chain {
+function chainRig(first: string | 'never', { wifiOnly, app = ACTIVE, stations = [STATION], awakeMs }: RigOptions = {}): Chain {
   const keychain = new Map([['live.key.swiftly', 'fake-swiftly-chain-key'], ['live.key.transitland', 'fake-transitland-chain-key']]);
   const secrets: SecretStore = { getItemAsync: (key) => Promise.resolve(keychain.get(key) ?? null), setItemAsync: () => Promise.resolve(), deleteItemAsync: () => Promise.resolve() };
   const items = new Map<string, string>();
@@ -129,7 +130,8 @@ function chainRig(first: string | 'never', { wifiOnly, app = ACTIVE, stations = 
   const network = new FakeNetwork(first);
   const states: LiveState[] = [];
   const quotaStore = { get: (key: string) => quota.get(key) ?? null, set: (key: string, n: number) => void quota.set(key, n) };
-  const runtime = new LiveRuntime({ network: runtimeNetwork(), onChange: (state) => void states.push(state), fetch, keychain: secrets, quotaStore, networkSource: network, swiftlyWifiOnly: () => readSwiftlyWifiOnly(settings) });
+  const wifi = { networkSource: network, swiftlyWifiOnly: () => readSwiftlyWifiOnly(settings) };
+  const runtime = new LiveRuntime({ network: runtimeNetwork(), onChange: (state) => void states.push(state), fetch, keychain: secrets, quotaStore, monotonicMs: awakeMs, ...wifi });
   runtime.watchStations(stations);
   teardowns.push(bindRuntime(runtime, app, HEARTBEAT_MS));
   expect(network.open()).toHaveLength(1);
@@ -419,6 +421,25 @@ describe('Swiftly only on Wi-Fi (mfix10): Swiftly\'s 30 s floor and one failure 
   });
 });
 
+describe('Swiftly only on Wi-Fi (mfix10 fix round 4): Swiftly\'s floor sets when a turned-away poll is due', () => {
+  it('a poll the floor turns away is due again when the floor ends, not a cadence later', async () => {
+    const chain = chainRig('WIFI');
+    await stepS(1); // the mount's hold lifts: Swiftly downloads both feeds
+    const startedS = lastSwiftlyAtS(chain);
+    await stepS(4);
+    chain.network.emit('CELLULAR');
+    await stepS(1); // Transitland takes both tasks
+    chain.network.emit('WIFI');
+    await stepS(1); // Swiftly takes them back, due at once, 6 s after its downloads: the floor turns both polls away
+    expect([swiftlyCalls(chain), Date.now() / 1000 - startedS]).toEqual([2, 6]);
+    expectServing(chain, 'swiftly');
+    await stepS(SWIFTLY_CADENCE_S);
+    const starts = chain.requests.filter((request) => request.provider === 'swiftly').map((request) => [request.url, request.atS - startedS]);
+    const floorEndsS = SWIFTLY_CADENCE_S; // 30 s after the downloads; a cadence after the turned-away polls would be 36 s
+    expect(starts.sort()).toEqual([[SWIFTLY_TRIP_UPDATES_URL, 0], [SWIFTLY_TRIP_UPDATES_URL, floorEndsS], [SWIFTLY_VEHICLES_URL, 0], [SWIFTLY_VEHICLES_URL, floorEndsS]]);
+  });
+});
+
 describe('Swiftly only on Wi-Fi (mfix10): the 30 s floor runs on a monotonic millisecond clock', () => {
   it('a start at .95 s allows no new start at +30.05 s of wall time while fewer than 30 000 ms have passed', async () => {
     jest.setSystemTime(T0_MS + 950); // the wall clock reads x.95 s; performance.now(), the monotonic clock, does not move
@@ -428,11 +449,10 @@ describe('Swiftly only on Wi-Fi (mfix10): the 30 s floor runs on a monotonic mil
     expect([swiftlyCalls(chain), Math.round((startS % 1) * 100)]).toEqual([2, 95]);
     await stepS(28); // 28 000 ms after the start
     jest.setSystemTime(Date.now() + 1_050); // the wall clock is corrected 1.05 s forward
-    await stepS(1); // wall: +30.05 s after the start, so both Swiftly tasks are due; monotonic: 29 000 ms
+    await stepS(1); // wall: +30.05 s after the start, so both Swiftly tasks are due; monotonic: 29 000 ms, so the floor turns both away
     expect([Math.round(Date.now() - startS * 1_000), swiftlyCalls(chain)]).toEqual([30_050, 2]);
-    chain.runtime.watchStations([STATION, 'rail:brickell']); // a new station: its poll is due at once
-    await stepS(1); // 30 000 ms after the start: the floor ends
-    expect(chain.fetch.mock.calls.slice(2).map(([url]) => url)).toEqual([SWIFTLY_TRIP_UPDATES_URL]); // its download; vehicles were read from the floor at +30.05 s
+    await stepS(1); // 30 000 ms after the start: the floor ends, and the polls it turned away are due then (fix round 4)
+    expect(chain.fetch.mock.calls.slice(2).map(([url]) => url).sort()).toEqual([SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL]);
   });
 
   it('a forward wall-clock jump of +40 s does not end the floor', async () => {
@@ -443,9 +463,46 @@ describe('Swiftly only on Wi-Fi (mfix10): the 30 s floor runs on a monotonic mil
     jest.setSystemTime(Date.now() + 40_000); // the phone's clock jumps 40 s ahead: every task is due at once
     await stepS(25); // monotonic: 29 000 ms after the start
     expect([Math.round(Date.now() - startS * 1_000), swiftlyCalls(chain)]).toEqual([69_000, 2]);
-    chain.runtime.watchStations([STATION, 'rail:brickell']);
-    await stepS(1); // 30 000 ms after the start
-    expect(chain.fetch.mock.calls.slice(2).map(([url]) => url)).toEqual([SWIFTLY_TRIP_UPDATES_URL]);
+    await stepS(1); // 30 000 ms after the start: the floor ends, and the polls it turned away are due then
+    expect(chain.fetch.mock.calls.slice(2).map(([url]) => url).sort()).toEqual([SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL]);
     expect(chain.requests.filter((request) => request.provider === 'transitland')).toEqual([]);
+  });
+});
+
+describe('Swiftly only on Wi-Fi (mfix10): the floor clock counts the phone\'s sleep', () => {
+  it('after a lock longer than 30 s, the first poll on unlock downloads fresh swiftly data', async () => {
+    const app = new HandAppState();
+    const asleep = { ms: 0 };
+    const chain = chainRig('WIFI', { app, awakeMs: () => performance.now() - asleep.ms }); // performance.now() as iOS reads it: stopped while the phone sleeps
+    await stepS(40);
+    const lastS = lastSwiftlyAtS(chain);
+    expect(Date.now() / 1000 - lastS).toBe(9); // Swiftly downloaded both feeds 9 s before the lock
+    app.set('background'); // the phone locks
+    for (let s = 0; s < 40; s += 1) {
+      await stepS(1);
+      asleep.ms += HEARTBEAT_MS; // 40 s asleep: the wall clock runs, the awake clock does not
+    }
+    const unlocked = chain.fetch.mock.calls.length;
+    app.set('active'); // unlocked: the runtime asks the network and holds until the next heartbeat
+    await stepS(1); // the first poll on unlock: 50 s after Swiftly's downloads, only 10 s of them awake
+    expect(chain.fetch.mock.calls.slice(unlocked).map(([url]) => url).sort()).toEqual([SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL]);
+    expectServing(chain, 'swiftly');
+  });
+
+  it('a trip to another app with the phone awake does not count twice toward the floor', async () => {
+    const app = new HandAppState();
+    const chain = chainRig('WIFI', { app });
+    await stepS(32);
+    const lastS = lastSwiftlyAtS(chain); // Swiftly downloaded both feeds 1 s ago
+    app.set('background'); // another app: the phone stays awake, so performance.now() runs on
+    await stepS(20);
+    app.set('active');
+    await stepS(1); // the hold lifts; the tasks are due one cadence after their last start
+    const back = chain.fetch.mock.calls.length;
+    chain.runtime.watchStations([STATION, 'rail:brickell']); // a new station: its poll is due at once, inside the floor
+    await stepS(lastS + SWIFTLY_CADENCE_S - 1 - Date.now() / 1000); // to 29 s after Swiftly's downloads
+    expect(swiftlyCalls(chain, back)).toBe(0); // 20 s away, all of them awake, are counted once: the floor turns that poll away
+    await stepS(1); // the floor ends
+    expect(chain.fetch.mock.calls.slice(back).map(([url]) => url).sort()).toEqual([SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL]);
   });
 });

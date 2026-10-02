@@ -8,7 +8,7 @@ import { testNetwork } from '../../domain/live/__tests__/test-network';
 import { vehiclesFromFeed } from '../../domain/live/from-gtfsrt';
 import { predictionsFromDepartures } from '../../domain/live/from-transitland-departures';
 import type { LiveRequest } from '../../domain/live/transports';
-import type { LivePrediction, ProviderId } from '../../domain/live/types';
+import type { LivePrediction, LiveProvider, LiveResult, ProviderId } from '../../domain/live/types';
 import { ByteCounter, httpGet } from '../http';
 import type { LiveKeys } from '../keys';
 import type { ProviderDeps } from '../providers/batches';
@@ -56,6 +56,14 @@ function advance(clock: Clocks, seconds: number): void {
   expect(Number.isSafeInteger(clock.now + seconds)).toBe(true); // the wall clock reads whole seconds, as the runtime's wallClockS does
   clock.now += seconds;
   clock.ms += seconds * 1_000;
+}
+
+/** One fetch of each Swiftly feed — vehicles, then rail:brickell's predictions — in that order. */
+async function fetchBoth(provider: LiveProvider): Promise<LiveResult<unknown>[]> {
+  const results: LiveResult<unknown>[] = [await provider.fetchVehicles(signal()), await provider.fetchPredictions('rail:brickell', signal())];
+  expect(provider.id).toBe('swiftly'); // the feeds are Swiftly's
+  expect(results.every((result) => result.ok)).toBe(true); // the fake server answers both
+  return results;
 }
 
 /** (trip, stop) of each prediction, in order. */
@@ -190,7 +198,7 @@ describe('Swiftly provider (mfix10): the 30 s floor at the source', () => {
     advance(deps.clock, 29);
     const reread = await provider.fetchVehicles(signal());
     expect([server.urls(), deps.calls]).toEqual([[SWIFTLY_VEHICLES_URL], ['swiftly']]);
-    expect(reread.ok && first.ok && reread.value).toBe(first.ok && first.value); // the same batch, not a new download
+    expect(reread.ok && reread.value).toEqual(first.ok && { ...first.value, floorEndsInMs: 1_000 }); // the same download, handed out with the 1 000 ms left on its floor
     advance(deps.clock, 1);
     await provider.fetchVehicles(signal());
     expect([server.urls(), deps.calls]).toEqual([[SWIFTLY_VEHICLES_URL, SWIFTLY_VEHICLES_URL], ['swiftly', 'swiftly']]);
@@ -231,26 +239,27 @@ describe('Swiftly provider (mfix10): the floor per endpoint, per key, on a monot
     expect(server.urls()).toEqual([SWIFTLY_VEHICLES_URL, MDT, SWIFTLY_VEHICLES_URL]);
   });
 
-  it('a key change forgets every download, so the new key downloads at once; told of no change, the provider refuses', async () => {
-    const server = new FakeServer({ [SWIFTLY_VEHICLES_URL]: { status: 401, body: new Uint8Array(0) }, [SWIFTLY_TRIP_UPDATES_URL]: { status: 401, body: new Uint8Array(0) } });
+  it('the key is part of a request: a new key downloads at once, key a again within 30 s repeats nothing, and keyChanged forgets only downloads past their floor', async () => {
+    const server = new FakeServer({ [SWIFTLY_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES }, [SWIFTLY_TRIP_UPDATES_URL]: { status: 200, body: LIVE_TRIP_UPDATES_FIXTURE_BYTES } });
     let keys: LiveKeys = FAKE_KEYS;
     const deps: Deps = { ...providerDeps(server), keys: () => keys };
     const provider = createSwiftlyProvider(deps);
-    await provider.fetchVehicles(signal());
-    await provider.fetchPredictions('rail:brickell', signal());
-    expect(() => provider.keyChanged(FAKE_KEYS.swiftly)).toThrow('downloads are forgotten only for a new key');
+    await fetchBoth(provider); // key a
     keys = { ...FAKE_KEYS, swiftly: 'fake-swiftly-key-b' };
     expect(() => provider.keyChanged(FAKE_KEYS.swiftly)).toThrow('the provider is told of the key in effect now');
     provider.keyChanged(keys.swiftly);
     advance(deps.clock, 1);
-    await provider.fetchVehicles(signal());
-    await provider.fetchPredictions('rail:brickell', signal());
-    expect(server.requests.map((r) => [r.url, r.headers.Authorization])).toEqual([
-      [SWIFTLY_VEHICLES_URL, 'fake-swiftly-key'],
-      [SWIFTLY_TRIP_UPDATES_URL, 'fake-swiftly-key'],
-      [SWIFTLY_VEHICLES_URL, 'fake-swiftly-key-b'],
-      [SWIFTLY_TRIP_UPDATES_URL, 'fake-swiftly-key-b'],
-    ]);
+    await fetchBoth(provider); // key b: a new request, downloaded at once
+    keys = FAKE_KEYS;
+    provider.keyChanged(keys.swiftly);
+    advance(deps.clock, 28);
+    const again = await fetchBoth(provider); // key a again, 29 s after its downloads: inside their floor
+    expect(again.map((result) => result.ok && result.value.floorEndsInMs)).toEqual([1_000, 1_000]);
+    advance(deps.clock, 1);
+    await fetchBoth(provider); // 30 s after key a's downloads: their floor has ended
+    const sent = server.requests.map((r) => [r.url.slice(r.url.lastIndexOf('/') + 1), r.headers.Authorization]);
+    const [a, b] = ['fake-swiftly-key', 'fake-swiftly-key-b'];
+    expect(sent).toEqual([['gtfs-rt-vehicle-positions', a], ['gtfs-rt-trip-updates', a], ['gtfs-rt-vehicle-positions', b], ['gtfs-rt-trip-updates', b], ['gtfs-rt-vehicle-positions', a], ['gtfs-rt-trip-updates', a]]);
   });
 
   it('the floor\'s clock never runs backwards: a monotonic source that steps back is absorbed, so the floor neither stretches nor shortens', async () => {

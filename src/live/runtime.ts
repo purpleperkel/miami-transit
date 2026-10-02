@@ -8,6 +8,7 @@ import { invariant } from '../lib/invariant';
 import type { Result } from '../lib/result';
 import { ByteCounter, type ByteTallies, EXPO_FETCH, type FetchFn, httpGet } from './http';
 import { detach } from './detach';
+import { FloorClock } from './floor-clock';
 import { clearKey, KEY_MASK, KEYCHAIN, type KeyError, type LiveKeys, maskKey, NO_KEYS, readLiveKeys, saveKey, saveSwiftlyAgency, type SecretStore } from './keys';
 import { type NetworkSource, NetworkWatch } from './network-watch';
 import { LivePoller, type LiveSnapshot } from './poller';
@@ -43,23 +44,30 @@ import { readSwiftlyWifiOnly } from './swiftly-wifi';
  * the FIRST HEARTBEAT AFTER the fresh answer (or a listener event) is in — never at the instant it
  * lands — and the poller resumes on that reading; so the mount, whose answer lands at once, polls at
  * +1 s. The timeout counts heartbeats: the RESUME_HOLD_BEATS-th heartbeat after the resume
- * (RESUME_READING_TIMEOUT_MS / HEARTBEAT_MS, 3) lifts the hold with no reading, so off Wi-Fi. The hold
+ * (ceil(RESUME_READING_TIMEOUT_MS / HEARTBEAT_MS), 3) lifts the hold with no reading, so off Wi-Fi. The hold
  * never ends while the app is in the background: the heartbeat runs only while it is active.
  *
- * SWIFTLY'S 30 s FLOOR (providers/swiftly.ts) runs on `monotonicMs` (performance.now() by default),
- * not on the wall clock: a wall-clock correction neither shortens nor stretches it. A changed Swiftly
- * KEY clears it (a new key is a new request); a changed agency key is a new endpoint.
+ * SWIFTLY'S 30 s FLOOR (providers/swiftly.ts) runs on the runtime's FLOOR CLOCK (floor-clock.ts, fix
+ * round 4, S1): `monotonicMs` (performance.now() by default; on iOS it stops while the phone sleeps)
+ * plus the sleep inside every spell the app spends out of the foreground, measured on `wallMs`
+ * (Date.now() by default). use-live-polling.ts tells the runtime when the app leaves the foreground
+ * (`pause()`) and when it is back (`resume()`), so after a lock longer than 30 s the first poll on
+ * unlock downloads afresh. A wall-clock correction while the app is open neither shortens nor
+ * stretches the floor. The floor remembers each request by its URL AND key (fix round 4, S3): a new
+ * key or a new agency is a new request, and going back to an old one within 30 s repeats nothing.
+ * A credentials change aborts the provider's requests still out under the old ones (poller.ts, S4).
  *
  * LIFECYCLE: constructing a runtime does nothing observable. `start()` makes a fresh poller, loads
  * the keys and begins publishing; `stop()` aborts the poller's requests and publishing stops. A
  * stopped runtime can start again (React may run an effect twice). What outlives a stop: the keys,
- * the watched stations, the byte counter, and the quota (persisted).
+ * the watched stations, the byte counter, the floor clock and Swiftly's remembered downloads, and the
+ * quota (persisted).
  */
 
 /** How long a resume holds the poller for the network's fresh answer, counted in heartbeats (arbiter judgment constant, mfix10 fix round 2). */
 export const RESUME_READING_TIMEOUT_MS = 3_000;
 
-/** The heartbeats a resume holds the poller at most: RESUME_READING_TIMEOUT_MS of them; the last one lifts the hold. */
+/** The heartbeats a resume holds the poller at most: ceil(RESUME_READING_TIMEOUT_MS / HEARTBEAT_MS) heartbeats; the last one lifts the hold. */
 const RESUME_HOLD_BEATS = Math.ceil(RESUME_READING_TIMEOUT_MS / HEARTBEAT_MS);
 
 /** A resume waiting for the network's fresh answer: the heartbeats it has counted, and the Swiftly gate as it stood. */
@@ -95,8 +103,14 @@ export type RuntimeOptions = {
   readonly keychain?: SecretStore;
   readonly quotaStore?: QuotaStore;
   readonly nowS?: () => number;
-  /** A millisecond clock that never runs backwards, for Swiftly's 30 s floor (providers/swiftly.ts): performance.now() by default. */
+  /**
+   * A millisecond clock that never runs backwards, for Swiftly's 30 s floor (providers/swiftly.ts):
+   * performance.now() by default, which on iOS stops while the phone sleeps — the floor clock adds the
+   * sleep (floor-clock.ts).
+   */
   readonly monotonicMs?: () => number;
+  /** The wall clock in ms, read only as the app leaves and re-enters the foreground, to measure the sleep in between: Date.now() by default. */
+  readonly wallMs?: () => number;
   /** The phone's network for the Swiftly gate (live-context.tsx passes expo-network); without one there is never a reading, so never Wi-Fi. */
   readonly networkSource?: NetworkSource;
   /** The rider's "Use Swiftly only on Wi-Fi", read afresh every time the chain asks (swiftly-wifi.ts's kv item by default). */
@@ -123,8 +137,10 @@ export class LiveRuntime {
   private hold: ResumeHold | null = null;
   private readonly counter = new ByteCounter();
   private readonly providers: Readonly<Record<ChainProviderId, LiveProvider>>;
-  /** Swiftly's provider as such: a change of Swiftly's key clears its remembered downloads (its 30 s floor). */
+  /** Swiftly's provider as such: it is told when Swiftly's key changes, and prunes its remembered downloads (its 30 s floor). */
   private readonly swiftly: SwiftlyLiveProvider;
+  /** The clock Swiftly's 30 s floor runs on: awake ms plus the sleep inside every spell out of the foreground. */
+  private readonly floorClock: FloorClock;
   private readonly keychain: SecretStore;
   private readonly quota: QuotaStore;
   private readonly nowS: () => number;
@@ -137,13 +153,14 @@ export class LiveRuntime {
     this.nowS = options.nowS ?? wallClockS;
     this.wifiOnly = options.swiftlyWifiOnly ?? (() => readSwiftlyWifiOnly());
     this.watch = options.networkSource === undefined ? null : new NetworkWatch(options.networkSource, (message) => this.reportBug(message));
+    this.floorClock = new FloorClock(options.monotonicMs ?? (() => performance.now()), options.wallMs ?? (() => Date.now()));
     const fetch = options.fetch ?? EXPO_FETCH;
     const deps: ProviderDeps = {
       get: (request: LiveRequest, signal: AbortSignal) => httpGet(request, signal, { fetch, counter: this.counter, nowS: this.nowS }),
       keys: () => this.keys,
       network: options.network,
       recordCall: (provider: ProviderId) => this.meter(provider),
-      monotonicMs: options.monotonicMs ?? (() => performance.now()),
+      monotonicMs: () => this.floorClock.now(),
     };
     this.swiftly = createSwiftlyProvider(deps);
     this.providers = Object.freeze({ swiftly: this.swiftly, transitland: createTransitlandProvider(deps), none: NONE_PROVIDER });
@@ -212,14 +229,28 @@ export class LiveRuntime {
   }
 
   /**
-   * The app is active again (and on mount, as it becomes active). With a network watch the runtime asks
-   * the network afresh and HOLDS the poller until tick() finds the answer in (or the timeout passes);
-   * a resume during a hold asks again and starts the hold over, the gate kept as it stood. Without a
-   * watch there is no reading to wait for, and the poller resumes at once.
+   * The app left the foreground (inactive or background: use-live-polling.ts has stopped the heartbeat).
+   * The floor clock marks the moment, so the phone's sleep while the app is away counts toward
+   * Swiftly's 30 s floor when it returns (resume). Leaving again while away keeps the first mark.
+   */
+  pause(): void {
+    const [started, floorMs] = [this.isStarted(), this.floorClock.now()];
+    this.floorClock.background();
+    invariant(this.floorClock.now() >= floorMs, 'leaving the foreground never moves the floor clock back: only a return counts the time away');
+    invariant(this.isStarted() === started, 'leaving the foreground starts and stops nothing (the binding stops the heartbeat)');
+  }
+
+  /**
+   * The app is active again (and on mount, as it becomes active). The floor clock first counts the
+   * sleep inside the spell away, if the app was away. With a network watch the runtime asks the network
+   * afresh and HOLDS the poller until tick() finds the answer in (or the timeout passes); a resume
+   * during a hold asks again and starts the hold over, the gate kept as it stood. Without a watch there
+   * is no reading to wait for, and the poller resumes at once.
    */
   resume(): void {
     const poller = this.poller;
     invariant(poller !== null, 'only a started runtime resumes');
+    this.floorClock.foreground();
     if (this.watch === null) {
       poller.resume();
       this.publishGateMove();
@@ -287,10 +318,11 @@ export class LiveRuntime {
   }
 
   /**
-   * Puts `next` in effect. A changed Swiftly KEY clears Swiftly's remembered downloads first (a new
-   * key is a new request, so its 30 s floor does not hold it back); a changed agency key does not
-   * (it is a new endpoint, and going back to the old one within 30 s must not repeat its request).
-   * Each provider whose credentials changed starts clean in the poller, its tasks due at once.
+   * Puts `next` in effect. A changed Swiftly KEY is told to the Swiftly provider, which prunes its
+   * remembered downloads but forgets none inside its floor: a download is remembered by its URL AND
+   * key, so a new key (or agency) is a new request its floor does not hold back, and going back to an
+   * old one within 30 s repeats nothing. Each provider whose credentials changed starts clean in the
+   * poller: its requests out under the old credentials are aborted, and its tasks are due at once.
    */
   private applyKeys(next: LiveKeys): void {
     const swiftlyKeyChanged = next.swiftly !== this.keys.swiftly;
@@ -373,7 +405,7 @@ export class LiveRuntime {
     const nowS = this.nowS();
     const gated = this.swiftlyGated();
     const standings = { swiftly: this.standing('swiftly', nowS, gated), transitland: this.standing('transitland', nowS, false) };
-    invariant(!gated || !standings.swiftly.hasKey, 'a gated Swiftly is never offered to the chain, so no Swiftly request starts while it is gated');
+    invariant(!gated || !isOnWifi(this.watch === null ? null : this.watch.reading()), 'a gated Swiftly means the phone is off Wi-Fi at this very tick: the gate is never read from a cache');
     return standings;
   }
 

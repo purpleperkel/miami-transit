@@ -54,10 +54,15 @@ SDK 57; never trust memory for Expo APIs).
   provider switch, the published gate as it was. The hold lifts at the first heartbeat after the answer is in (never the
   instant it lands), so the mount polls at +1 s; the timeout counts heartbeats (`RESUME_READING_TIMEOUT_MS` / `HEARTBEAT_MS`,
   3 of them; then no reading, so off Wi-Fi). A test that calls `runtime.resume()` by hand must tick once after the answer
-  lands before anything polls. Swiftly never starts a request to an endpoint (its URL) within 30 000 ms of its last
-  start there, whatever the scheduler asks (providers/swiftly.ts); the floor runs on `performance.now()`, which jest's
-  fake timers move with the clock and `jest.setSystemTime` does not. A new Swiftly key clears it; a new agency is a new
-  endpoint. KNOWN UPSTREAM LIMIT (expo-network 57.0.2,
+  lands before anything polls. Swiftly never starts a request (its URL AND key) within 30 000 ms of its last start of
+  that request, whatever the scheduler asks (providers/swiftly.ts): a new key or agency is a new request, going back to an
+  old one within 30 s repeats nothing, a poll the floor turns away is due again when the floor ends, and a credentials
+  change aborts the provider's requests still out under the old ones (poller.ts). The floor runs on the runtime's floor
+  clock (src/live/floor-clock.ts): `performance.now()` plus the sleep inside every spell out of the foreground
+  (use-live-polling.ts calls the runtime's `pause()` on leaving, `resume()` on return). RN 0.86's iOS `performance.now()` is
+  mach_absolute_time, which pauses while the phone sleeps; jest's modern fake timers fake `performance.now()` from 0 and
+  move it with the clock, and `jest.setSystemTime` does not move it (probed 2026-10-02) — a test models sleep by injecting
+  `monotonicMs` (e.g. `performance.now()` minus the time asleep). KNOWN UPSTREAM LIMIT (expo-network 57.0.2,
   ios/NetworkModule.swift): its one NWPathMonitor is cancelled when the last listener goes and cannot restart, so after
   a runtime stop and start in one app session listener events stop until relaunch; resume asks still run.
 - `babel.config.js` exists because jest-expo 57.0.5's `jest-expo/ios` preset needs Expo's babel preset

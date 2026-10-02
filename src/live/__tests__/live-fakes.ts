@@ -47,8 +47,11 @@ export function bytesOf(json: unknown): Uint8Array {
   return bytes;
 }
 
-/** What the fake server answers: a status and body, or a rejection (the network failed). */
-export type Reply = { readonly status: number; readonly body: Uint8Array } | Error;
+/** A reply that never comes: the request hangs until its caller aborts it (then it rejects, as fetch does). */
+export const HANGS = 'hangs until aborted';
+
+/** What the fake server answers: a status and body, a rejection (the network failed), or nothing until aborted (HANGS). */
+export type Reply = { readonly status: number; readonly body: Uint8Array } | Error | typeof HANGS;
 
 /** A fake HTTP server: each URL answers from its queue of replies (the last reply repeats); unknown URLs reject. */
 export class FakeServer {
@@ -65,7 +68,7 @@ export class FakeServer {
 
   /** Sets the replies `url` gives from now on. */
   on(url: string, replies: Reply | readonly Reply[]): void {
-    const queue = Array.isArray(replies) ? [...replies] : [replies as Reply];
+    const queue: Reply[] = Array.isArray(replies) ? [...(replies as readonly Reply[])] : [replies as Reply];
     expect(queue.length).toBeGreaterThan(0);
     expect(url.startsWith('https://')).toBe(true);
     this.routes.set(url, queue);
@@ -98,6 +101,9 @@ export class FakeServer {
     const reply = queue === undefined ? new Error(`no route for ${url}`) : queue.length > 1 ? (queue.shift() as Reply) : (queue[0] as Reply);
     if (reply instanceof Error) {
       return Promise.reject(reply);
+    }
+    if (reply === HANGS) {
+      return new Promise<FetchResponseLike>((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error(`the request to ${url} was aborted`))));
     }
     return Promise.resolve({ ok: reply.status >= 200 && reply.status <= 299, status: reply.status, arrayBuffer: () => Promise.resolve(reply.body.slice().buffer) });
   }
@@ -164,7 +170,7 @@ export class FakeNetwork implements NetworkSource {
 
   constructor(public answer: string | 'never') {
     expect(answer === 'never' || IOS_NETWORK_STATES.has(answer)).toBe(true); // a type iOS reports: its answer always names one
-    expect(answer === 'never' || Object.isFrozen(networkState(answer))).toBe(true); // one state shared by every ask, so never mutable
+    expect(this.open()).toEqual([]); // the class invariant (one watch at a time) holds from the start, with no watch yet
   }
 
   getNetworkStateAsync(...args: unknown[]): Promise<NetworkState> {

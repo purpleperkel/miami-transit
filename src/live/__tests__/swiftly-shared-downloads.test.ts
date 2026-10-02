@@ -44,7 +44,7 @@ type FetchLog = { readonly fetches: Fetch[]; pending: number };
 /** `provider`, logging every fetch the poller asks of it, and when it is answered, around the fetch itself. */
 function recorded(provider: LiveProvider, log: FetchLog, atS: () => number): LiveProvider {
   expect(provider.id).toBe('swiftly'); // the rig records Swiftly's fetches
-  expect([log.fetches, log.pending]).toEqual([[], 0]); // from the first one
+  expect(provider.capabilities).toEqual({ vehicles: true, predictions: true }); // the rig polls both of Swiftly's feeds through it
   const asked = <T>(what: string, fetch: Promise<T>): Promise<T> => {
     expect(what === 'vehicles' || STATIONS.includes(what)).toBe(true); // the poller asks only for vehicles and the watched stations
     expect(log.pending).toBeLessThan(STATIONS.length + 1); // one poll per task at a time: polls never overlap

@@ -4,7 +4,7 @@ import type { SecretStore } from '../keys';
 import type { QuotaStore } from '../quota';
 import { LiveRuntime, type LiveState } from '../runtime';
 import { readSwiftlyWifiOnly } from '../swiftly-wifi';
-import { FakeNetwork, FakeServer, runtimeNetwork, SWIFTLY_VEHICLES_URL, TL_VEHICLES_URL } from './live-fakes';
+import { FakeNetwork, FakeServer, HANGS, runtimeNetwork, SWIFTLY_VEHICLES_URL, TL_VEHICLES_URL } from './live-fakes';
 
 /**
  * M4.9: the runtime end to end — Keychain → chain → HTTP → decoder → mapper → published state —
@@ -189,8 +189,8 @@ describe('LiveRuntime (mfix10): Swiftly\'s 30 s floor, per endpoint and per key'
     await tickThrough(r, 29); // back on A inside its floor: A's download is read again, not repeated
     expect(r.server.urls()).toEqual([SWIFTLY_VEHICLES_URL, MDT_VEHICLES_URL]);
     expect(latest(r.states).status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null });
-    await tickThrough(r, 40);
-    expect(r.server.urls()).toEqual([SWIFTLY_VEHICLES_URL, MDT_VEHICLES_URL, SWIFTLY_VEHICLES_URL]); // A again, one cadence after it was read
+    await tickThrough(r, 30);
+    expect(r.server.urls()).toEqual([SWIFTLY_VEHICLES_URL, MDT_VEHICLES_URL, SWIFTLY_VEHICLES_URL]); // A again the moment its floor ends, 30 s after its download (fix round 4)
   });
 
   it('a 401 with key a, then key b pasted: the first request with b starts at the next heartbeat', async () => {
@@ -207,5 +207,40 @@ describe('LiveRuntime (mfix10): Swiftly\'s 30 s floor, per endpoint and per key'
     await tickThrough(r, 6); // the next heartbeat
     expect(r.server.requests.map((request) => request.headers.Authorization)).toEqual(['fake-swiftly-key-a', 'fake-swiftly-key-b']);
     expect(latest(r.states).status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null });
+  });
+});
+
+describe('LiveRuntime (mfix10 fix round 4): the key is part of a request', () => {
+  const [KEY_A, KEY_B] = ['fake-swiftly-key-a', 'fake-swiftly-key-b'];
+
+  it('key a, then b, then a again within 30 s does not repeat a', async () => {
+    const r = rig({ 'live.key.swiftly': KEY_A, 'live.key.transitland': TL_KEY });
+    r.server.on(SWIFTLY_VEHICLES_URL, { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES });
+    r.runtime.start();
+    await settle();
+    await resumed(r); // key a downloads at 0 s
+    expect(await r.runtime.saveKey('swiftly', KEY_B)).toEqual({ ok: true, value: KEY_B });
+    await tickThrough(r, 5); // key b: a new request, downloaded at the next heartbeat
+    expect(await r.runtime.saveKey('swiftly', KEY_A)).toEqual({ ok: true, value: KEY_A });
+    await tickThrough(r, 29); // key a again, inside the floor of its download at 0 s: read again, not repeated
+    expect(r.server.requests.map((request) => request.headers.Authorization)).toEqual([KEY_A, KEY_B]);
+    await tickThrough(r, 30); // a's floor ends: the poll it turned away is due then
+    expect(r.server.requests.map((request) => request.headers.Authorization)).toEqual([KEY_A, KEY_B, KEY_A]);
+    expect(JSON.stringify(r.states)).not.toContain('fake-swiftly-key'); // a key identifies a download in memory only, never in what the runtime publishes
+  });
+
+  it('a key pasted while the old key\'s request is in flight is tried at the next heartbeat', async () => {
+    const r = rig({ 'live.key.swiftly': KEY_A, 'live.key.transitland': TL_KEY });
+    r.server.on(SWIFTLY_VEHICLES_URL, [HANGS, { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES }]); // key a's request hangs until it is aborted
+    r.runtime.start();
+    await settle();
+    await resumed(r); // key a's request goes out at 0 s, and hangs
+    await tickThrough(r, 3);
+    expect(await r.runtime.saveKey('swiftly', KEY_B)).toEqual({ ok: true, value: KEY_B });
+    await settle(); // the paste aborts key a's request: its poll ends before the next heartbeat
+    expect(r.server.requests).toHaveLength(1); // pasting sends nothing by itself
+    await tickThrough(r, 4); // the next heartbeat
+    expect(r.server.requests.map((request) => request.headers.Authorization)).toEqual([KEY_A, KEY_B]);
+    expect(latest(r.states).status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null }); // the aborted request left no trace
   });
 });

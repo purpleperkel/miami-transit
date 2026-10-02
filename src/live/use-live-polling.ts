@@ -11,7 +11,9 @@ import { invariant } from '../lib/invariant';
  *   active               → resume() (everything due again, cadence floors kept), then tick() every 1 s;
  *                          the live runtime first holds its poller until a heartbeat finds the fresh
  *                          network reading in (mfix10, runtime.ts), so no request starts on a stale one
- *   inactive, background → the heartbeat stops: no new request starts until the app is active again
+ *   inactive, background → the heartbeat stops: no new request starts until the app is active again;
+ *                          and pause(), so the runtime's floor clock counts the phone's sleep while the
+ *                          app is away (mfix10 fix round 4: on iOS performance.now() stops in sleep)
  *
  * A request already in flight when the app leaves the foreground ends by itself (8 s abort at most).
  * Unmounting stops the heartbeat, then the runtime (which aborts whatever is in flight).
@@ -23,6 +25,8 @@ export type PollingRuntime = {
   stop(): void;
   tick(): void;
   resume(): void;
+  /** The app left the foreground (inactive or background); told on every such AppState report. */
+  pause(): void;
 };
 
 /** The part of React Native's AppState the binding reads. */
@@ -61,6 +65,7 @@ export class PollingBinding {
       this.start();
     } else {
       this.stop();
+      this.runtime.pause();
     }
     invariant(this.running === (state === 'active'), 'the heartbeat follows the app state');
   }

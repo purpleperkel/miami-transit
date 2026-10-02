@@ -23,6 +23,10 @@ import { BACKOFF_CAP_S, BACKOFF_FIRST_S } from './constants';
  *  - A task can START OVER (mfix10 fix round 3, R4: its provider's key changed, so its next poll is a
  *    new request that owes nothing to the old key's backoff or cadence): it is due at once, with no
  *    failures and no previous start, as a new task would be.
+ *  - A poll the provider's FLOOR TURNED AWAY (mfix10 fix round 4, S2: the provider handed back a
+ *    download another poll started, a success) is due again the moment that floor ends — no request
+ *    could bring fresher data sooner, and waiting a cadence from now would leave the data a cadence
+ *    staler than it has to be. A failure handed back that way is an ordinary failure here (R-b's backoff).
  */
 
 export type PollOutcome = 'ok' | 'failed' | 'rate-limited';
@@ -39,7 +43,10 @@ export type TaskState = {
   readonly failures: number;
   /** The wait that set `dueAt`: the cadence after a success, a backoff after a failure. */
   readonly intervalS: number;
-  /** Epoch second the latest poll started, or null before the first. */
+  /**
+   * Epoch second the latest poll started, or null before the first — for a poll the provider's floor
+   * turned away, when the download it was handed started (finishReusedPoll).
+   */
   readonly lastStartedAt: number | null;
 };
 
@@ -120,6 +127,24 @@ export function finishPoll(state: SchedulerState, id: string, outcome: PollOutco
   invariant(task.inFlight && task.lastStartedAt !== null && nowS >= task.lastStartedAt, `task ${id} was in flight since before ${nowS}`);
   const { delayS, failures } = nextWait(task, outcome);
   return new Map(state).set(id, { ...task, inFlight: false, failures, intervalS: delayS, dueAt: nowS + delayS });
+}
+
+/**
+ * Ends at `nowS` a poll the provider's floor turned away: it was handed the download another poll
+ * started (a success), whose floor ends at `floorEndsAtS`. The task is due THEN — not a cadence after
+ * now — with no failures, its interval its cadence; and its last start moves to the download's
+ * (floorEndsAtS − cadence), so a resume's "never sooner than one cadence after the last start" also
+ * lands on the floor's end. A task dropped meanwhile stays dropped.
+ */
+export function finishReusedPoll(state: SchedulerState, id: string, nowS: number, floorEndsAtS: number): SchedulerState {
+  invariant(Number.isFinite(nowS) && Number.isFinite(floorEndsAtS), 'a turned-away poll ends at an instant, and its floor ends at one');
+  const task = state.get(id);
+  if (task === undefined) {
+    return state; // the task was dropped (syncTasks) while its poll was in flight
+  }
+  invariant(task.inFlight && task.lastStartedAt !== null && nowS >= task.lastStartedAt, `task ${id} was in flight since before ${nowS}`);
+  invariant(floorEndsAtS - task.cadenceS <= nowS, `task ${id} was handed a download that started before now (its floor ends at most one cadence on)`);
+  return new Map(state).set(id, { ...task, inFlight: false, failures: 0, intervalS: task.cadenceS, dueAt: floorEndsAtS, lastStartedAt: floorEndsAtS - task.cadenceS });
 }
 
 /**

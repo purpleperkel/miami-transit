@@ -16,28 +16,40 @@ import { type ProviderDeps, stationBatch, tripUpdatesBatch, vehiclesBatch } from
  *  - Predictions: `gtfs-rt-trip-updates` is ONE whole-agency feed, but the LiveProvider contract asks
  *    station by station, so every watched station reads the same download.
  *
- * SWIFTLY'S 30 s FLOOR, AT THE SOURCE (binding cache term, plan §3; mfix10 fix rounds 2 and 3): the
- * provider never STARTS a request to an endpoint less than FLOOR_MS (30 000 ms) after its previous
- * start there, whatever the scheduler or a provider switch asks.
- *  - PER ENDPOINT: the endpoint is the request URL (the agency key is in it). The provider remembers
- *    the last start at each endpoint, in a small map pruned of every entry past its floor, so agency
- *    A → B → A within 30 s downloads A once.
- *  - IN MILLISECONDS, ON A MONOTONIC CLOCK: `deps.monotonicMs` (the runtime injects performance.now()),
- *    never floored wall seconds. A start at x.95 s allows the next one at x.95 + 30.000 s, not at
- *    x + 30; and a wall-clock correction, forward or back, neither shortens nor stretches the floor.
- *    On iOS, React Native 0.86's performance.now() reads mach_absolute_time
- *    (ReactCommon/react/timing/primitives.h, machAbsoluteTimeToSteadyClockTimePoint), which does not
- *    advance while the phone sleeps: a floor started just before a sleep runs out its 30 s in awake
- *    time after the wake, so the first Swiftly poll after unlocking may be handed the previous download
- *    (its age shows) — never an extra request.
- *  - A NEW KEY IS A NEW REQUEST: `keyChanged()`, which the runtime calls when Swiftly's key changes,
- *    clears the map, so a corrected key is tried at the next heartbeat. (A new agency key
- *    needs no clearing: it is a new endpoint.)
+ * SWIFTLY'S 30 s FLOOR, AT THE SOURCE (binding cache term, plan §3; mfix10 fix rounds 2 to 4): the
+ * provider never STARTS a request less than FLOOR_MS (30 000 ms) after its previous start of the same
+ * request, whatever the scheduler or a provider switch asks.
+ *  - A REQUEST IS ITS (URL, KEY) (fix round 4, S3): the URL names the endpoint (the agency key is in
+ *    it), the Authorization key completes the request. The provider remembers the last start of each,
+ *    in a small map pruned of every entry past its floor, so agency A → B → A, or key A → B → A,
+ *    within 30 s downloads A once, while a new agency or a new key downloads at once. The key is used
+ *    only inside that in-memory map key: never logged, printed, or put in an invariant message.
+ *    `keyChanged()` (the runtime calls it when Swiftly's key changes) only prunes the entries past their
+ *    floor; it forgets nothing still inside one.
+ *  - IN MILLISECONDS, ON THE FLOOR CLOCK: `deps.monotonicMs`, never floored wall seconds. A start at
+ *    x.95 s allows the next one at x.95 + 30.000 s, not at x + 30; and a wall-clock correction while
+ *    the app is open neither shortens nor stretches the floor. The runtime's floor clock
+ *    (floor-clock.ts) is performance.now() — on iOS mach_absolute_time, which stops while the phone
+ *    sleeps — plus the sleep inside every spell out of the foreground, so a floor started before a lock
+ *    is over after a lock longer than 30 s (fix round 4, S1).
  *  - SHARING: inside the floor a fetch gets the previous download's result — in flight or finished,
- *    success, failure or rejection — and meters no call. A failure handed out that way is marked
- *    `reused`, and a rejection (a bug, e.g. a mapper's broken invariant) is handed out as a
- *    ReusedRejection: the poll that started the download records it in the chain once, and every
- *    poll that gets it still backs off (poller.ts).
+ *    success, failure or rejection — and meters no call. A SUCCESS handed out that way carries
+ *    `floorEndsInMs`, the time left on the floor, and the poller makes its task due the moment the
+ *    floor ends (fix round 4, S2). A FAILURE handed out that way is marked `reused`, and a rejection (a
+ *    bug, e.g. a mapper's broken invariant) is handed out as a ReusedRejection: the poll that started
+ *    the download records it in the chain once, and every poll that gets it still backs off (poller.ts).
+ *  - An ABORTED download is a start like any other: when Swiftly's credentials change, the poller
+ *    aborts the requests out under the old ones (fix round 4, S4), and the aborted download stays
+ *    remembered, as a failure, until its floor ends.
+ *
+ * ACCEPTED RESIDUALS (arbiter, mfix10 fix round 4, S5):
+ *  - Agency A → B → A while A's failing download is in flight counts that failure ZERO times: the
+ *    change to B aborts it and its poll ends in an earlier credentials era, which leaves no trace; back
+ *    on A inside its floor, every fetch reads it reused, which the chain does not count. (Any download
+ *    of A in flight at the change ends the same way: read back as a cancelled failure, unrecorded,
+ *    its tasks backing off as after any failure.)
+ *  - R5: every poll that reads a broken download (a rejection, a bug) reports it through onBug, so one
+ *    broken download is one report per poll that read it, all with the same text.
  */
 
 export const SWIFTLY_CAPABILITIES: Capabilities = Object.freeze({ vehicles: true, predictions: true });
@@ -45,17 +57,21 @@ export const SWIFTLY_CAPABILITIES: Capabilities = Object.freeze({ vehicles: true
 /** Swiftly's 30 s floor, in milliseconds. */
 const FLOOR_MS = PROVIDER_CONFIG.swiftly.cadenceS * 1_000;
 
-/** The Swiftly provider, as the runtime holds it: a LiveProvider whose remembered downloads a key change clears. */
+/** The Swiftly provider, as the runtime holds it: a LiveProvider told when Swiftly's key changes. */
 export type SwiftlyLiveProvider = LiveProvider & {
   /**
-   * Swiftly's key changed to `key` (null: removed), and it is in effect: every remembered download is
-   * forgotten, so the next fetch of each endpoint downloads with the new key.
+   * Swiftly's key changed to `key` (null: removed), and it is in effect: every remembered download
+   * past its floor is forgotten. One still inside its floor is kept: going back to its key within
+   * the floor must not repeat its request, and a new key is a new request anyway.
    */
   keyChanged(key: string | null): void;
 };
 
-/** One download from one endpoint, with the key it was made with, shared by every fetch of it within FLOOR_MS of its start. */
-type Download<T> = { readonly key: string; readonly startedAtMs: number; readonly result: Promise<LiveResult<T>> };
+/** One download of one request (URL, key), shared by every fetch of that request within FLOOR_MS of its start. */
+type Download<T> = { readonly startedAtMs: number; readonly result: Promise<LiveResult<T>> };
+
+/** The downloads of one feed inside their floor, by request identity (identityOf). */
+type Downloads<T> = Map<string, Download<T>>;
 
 /** The download a fetch reads: one it started, or one it reuses from inside the floor. */
 type Taken<T> = { readonly download: Download<T>; readonly reused: boolean };
@@ -63,9 +79,9 @@ type Taken<T> = { readonly download: Download<T>; readonly reused: boolean };
 class SwiftlyProvider implements SwiftlyLiveProvider {
   readonly id: ChainProviderId = 'swiftly';
   readonly capabilities = SWIFTLY_CAPABILITIES;
-  /** The last download from each endpoint, by URL, per feed — only while it is inside its floor. */
-  private readonly vehicles = new Map<string, Download<LiveVehicle>>();
-  private readonly tripUpdates = new Map<string, Download<LivePrediction>>();
+  /** The last download of each request (URL, key), per feed — only while it is inside its floor. */
+  private readonly vehicles: Downloads<LiveVehicle> = new Map();
+  private readonly tripUpdates: Downloads<LivePrediction> = new Map();
   private readonly clock: MonotonicClock;
 
   constructor(private readonly deps: ProviderDeps) {
@@ -81,7 +97,7 @@ class SwiftlyProvider implements SwiftlyLiveProvider {
     if (!request.ok) {
       return request;
     }
-    const batch = await handOut(this.take(this.vehicles, request.value, swiftly, signal, (body) => vehiclesBatch(body, this.deps.network)));
+    const batch = await this.handOut(this.take(this.vehicles, request.value, swiftly, signal, (body) => vehiclesBatch(body, this.deps.network)));
     invariant(!batch.ok || batch.value.provider === 'swiftly', 'the batch is Swiftly\'s');
     return batch;
   }
@@ -93,36 +109,32 @@ class SwiftlyProvider implements SwiftlyLiveProvider {
     if (!request.ok) {
       return request;
     }
-    const all = await handOut(this.take(this.tripUpdates, request.value, swiftly, signal, (body) => tripUpdatesBatch(body, this.deps.network)));
+    const all = await this.handOut(this.take(this.tripUpdates, request.value, swiftly, signal, (body) => tripUpdatesBatch(body, this.deps.network)));
     invariant(!all.ok || all.value.provider === 'swiftly', 'the shared feed is Swiftly\'s');
     return all.ok ? ok(stationBatch(all.value, stationKey)) : all;
   }
 
   keyChanged(key: string | null): void {
     invariant(key === this.deps.keys().swiftly, 'the provider is told of the key in effect now');
-    const remembered = [...this.vehicles.values(), ...this.tripUpdates.values()];
-    invariant(remembered.every((download) => download.key !== key), 'downloads are forgotten only for a new key (a new agency key is a new endpoint and forgets nothing)');
-    this.vehicles.clear();
-    this.tripUpdates.clear();
+    const nowMs = this.clock.now();
+    prune(this.vehicles, nowMs);
+    prune(this.tripUpdates, nowMs);
+    invariant([...this.vehicles.values(), ...this.tripUpdates.values()].every((download) => download.startedAtMs <= nowMs), 'every download kept started at or before now: the floor clock never runs backwards');
   }
 
   /**
-   * The download from `request`'s endpoint that started less than FLOOR_MS ago (reused), else one
+   * The download of `request` under `key` that started less than FLOOR_MS ago (reused), else one
    * started now; `downloads` is pruned of every entry past its floor first.
    */
-  private take<T>(downloads: Map<string, Download<T>>, request: LiveRequest, key: string | null, signal: AbortSignal, map: (body: HttpBody) => LiveResult<T>): Taken<T> {
+  private take<T>(downloads: Downloads<T>, request: LiveRequest, key: string | null, signal: AbortSignal, map: (body: HttpBody) => LiveResult<T>): Taken<T> {
     const nowMs = this.clock.now();
     invariant(key !== null && request.url.startsWith('https://'), 'a keyed request to an https endpoint');
-    for (const [url, download] of downloads) {
-      if (nowMs - download.startedAtMs >= FLOOR_MS) {
-        downloads.delete(url);
-      }
-    }
-    const last = downloads.get(request.url);
-    invariant(last === undefined || last.key === key, 'a download is shared only under the key it was made with (a key change forgets them all)');
-    const taken: Taken<T> = last === undefined ? { download: { key, startedAtMs: nowMs, result: this.download(request, signal, map) }, reused: false } : { download: last, reused: true };
-    downloads.set(request.url, taken.download);
-    invariant([...downloads.values()].every((download) => nowMs - download.startedAtMs < FLOOR_MS), 'only downloads inside their floor are remembered');
+    prune(downloads, nowMs);
+    const identity = identityOf(request.url, key);
+    const last = downloads.get(identity);
+    const taken: Taken<T> = last === undefined ? { download: { startedAtMs: nowMs, result: this.download(request, signal, map) }, reused: false } : { download: last, reused: true };
+    downloads.set(identity, taken.download);
+    invariant(taken.reused ? nowMs - taken.download.startedAtMs < FLOOR_MS : taken.download.startedAtMs === nowMs, 'a fetch reuses only a download inside its floor; any other starts one now');
     return taken;
   }
 
@@ -134,22 +146,44 @@ class SwiftlyProvider implements SwiftlyLiveProvider {
     const body = await this.deps.get(request, signal);
     return body.ok ? map(body.value) : body;
   }
+
+  /**
+   * A download's result as one fetch gets it: the fetch that started the download gets it as it came.
+   * A fetch that reuses it gets a success carrying `floorEndsInMs` (the floor's time left now), a
+   * failure marked `reused`, and a rejection (a bug) as a ReusedRejection.
+   */
+  private async handOut<T>({ download, reused }: Taken<T>): Promise<LiveResult<T>> {
+    let result: LiveResult<T>;
+    try {
+      result = await download.result;
+    } catch (error) {
+      throw reused ? new ReusedRejection(error) : error; // a bug either way: the poll reports it, and counts it only if it started the download
+    }
+    invariant(result.ok ? result.value.floorEndsInMs === undefined : result.error.reused !== true, 'a download\'s own result is never marked as handed out again (the shared result stays as downloaded)');
+    invariant(result.ok || result.error.kind !== 'no-key', 'a download fails by the network, the server or the body, never for want of a key');
+    if (!reused) {
+      return result;
+    }
+    return result.ok ? ok({ ...result.value, floorEndsInMs: Math.max(0, download.startedAtMs + FLOOR_MS - this.clock.now()) }) : err({ ...result.error, reused: true as const });
+  }
 }
 
-/**
- * A download's result as one fetch gets it: the fetch that started the download gets it as it came;
- * a fetch that reuses it gets a failure marked `reused`, and a rejection (a bug) as a ReusedRejection.
- */
-async function handOut<T>({ download, reused }: Taken<T>): Promise<LiveResult<T>> {
-  let result: LiveResult<T>;
-  try {
-    result = await download.result;
-  } catch (error) {
-    throw reused ? new ReusedRejection(error) : error; // a bug either way: the poll reports it, and counts it only if it started the download
+/** A request's identity as an in-memory map key: its URL and its key. Never logged or printed. */
+function identityOf(url: string, key: string): string {
+  invariant(url.startsWith('https://'), 'a request goes to an https endpoint');
+  invariant(key.length > 0, 'a request carries a key');
+  return JSON.stringify([url, key]);
+}
+
+/** Forgets every download in `downloads` that started FLOOR_MS or more before `nowMs`. */
+function prune<T>(downloads: Downloads<T>, nowMs: number): void {
+  invariant(Number.isFinite(nowMs), 'the floor is measured at an instant');
+  for (const [identity, download] of downloads) {
+    if (nowMs - download.startedAtMs >= FLOOR_MS) {
+      downloads.delete(identity);
+    }
   }
-  invariant(result.ok || result.error.reused !== true, 'a download\'s own result is never marked reused (the shared result stays as downloaded)');
-  invariant(result.ok || result.error.kind !== 'no-key', 'a download fails by the network, the server or the body, never for want of a key');
-  return reused && !result.ok ? err({ ...result.error, reused: true as const }) : result;
+  invariant([...downloads.values()].every((download) => nowMs - download.startedAtMs < FLOOR_MS), 'only downloads inside their floor are remembered');
 }
 
 export function createSwiftlyProvider(deps: ProviderDeps): SwiftlyLiveProvider {

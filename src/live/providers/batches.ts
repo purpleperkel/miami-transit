@@ -27,8 +27,9 @@ export type ProviderDeps = {
   /** Records one REST call against the provider's monthly quota (quota.ts). */
   readonly recordCall: (provider: ProviderId) => void;
   /**
-   * A clock in milliseconds that never runs backwards and ignores wall-clock corrections: the
-   * runtime's is performance.now(). Swiftly's 30 s floor is measured on it (providers/swiftly.ts).
+   * A clock in milliseconds that never runs backwards and ignores wall-clock corrections while the app
+   * is open: the runtime's floor clock (floor-clock.ts), performance.now() plus the phone's sleep while
+   * the app was away. Swiftly's 30 s floor is measured on it (providers/swiftly.ts).
    */
   readonly monotonicMs: () => number;
 };

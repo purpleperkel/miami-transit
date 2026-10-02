@@ -113,6 +113,13 @@ export type LiveBatch<T> = MappedFeed<T> & {
   readonly fetchedAt: number;
   /** Response body size — logged to Diagnostics (cellular budget, falsifier R19). */
   readonly bytes: number;
+  /**
+   * mfix10 fix round 4 (S2): set ONLY on a batch a provider hands out AGAIN, from a download another
+   * fetch started, because the provider's floor turned this fetch away (Swiftly's 30 s floor,
+   * providers/swiftly.ts): the milliseconds left until that floor ends, when a fetch would download
+   * afresh. The poller makes the task due then, not a cadence later.
+   */
+  readonly floorEndsInMs?: number;
 };
 
 /** The five ways a live fetch fails (§4). */

@@ -5,6 +5,7 @@ import {
   createScheduler,
   dueTasks,
   finishPoll,
+  finishReusedPoll,
   type PollOutcome,
   releasePoll,
   restartTask,
@@ -157,5 +158,22 @@ describe('poll scheduler (mfix10): a task that starts over', () => {
     expect(restartTask(dropped, 'vehicles', T0 + 12)).toBe(dropped);
     const idle = finishPoll(inFlight, 'vehicles', 'ok', T0 + 11);
     expect(() => restartTask(idle, 'vehicles', T0 + 5)).toThrow(InvariantError);
+  });
+});
+
+describe('poll scheduler (mfix10 fix round 4): a poll the provider\'s floor turned away', () => {
+  it('finishReusedPoll makes the task due when the floor ends, as a success, and a resume lands there too', () => {
+    const failedOnce = poll(createScheduler([SWIFTLY], T0), 'vehicles', T0, 'failed', 0);
+    const turnedAway = finishReusedPoll(startPoll(failedOnce, 'vehicles', T0 + 30), 'vehicles', T0 + 31, T0 + 50); // handed a download that started at T0 + 20
+    expect(turnedAway.get('vehicles')).toEqual({ id: 'vehicles', cadenceS: 30, dueAt: T0 + 50, inFlight: false, failures: 0, intervalS: 30, lastStartedAt: T0 + 20 });
+    expect(finishPoll(startPoll(failedOnce, 'vehicles', T0 + 30), 'vehicles', 'ok', T0 + 31).get('vehicles')?.dueAt).toBe(T0 + 61); // what a cadence after now would have been
+    expect(resumeAll(turnedAway, T0 + 40).get('vehicles')?.dueAt).toBe(T0 + 50); // back from the background before the floor ends: due when it ends
+  });
+
+  it('finishReusedPoll leaves a task dropped mid-poll dropped, and refuses a floor that ends more than a cadence after now', () => {
+    const inFlight = startPoll(createScheduler([SWIFTLY], T0), 'vehicles', T0);
+    const dropped = syncTasks(inFlight, [], T0 + 1);
+    expect(finishReusedPoll(dropped, 'vehicles', T0 + 2, T0 + 20)).toBe(dropped);
+    expect(() => finishReusedPoll(inFlight, 'vehicles', T0 + 2, T0 + 33)).toThrow(InvariantError);
   });
 });

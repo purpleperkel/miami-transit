@@ -29,22 +29,36 @@ cd "$(dirname "$0")/../.."
 #                                      Result<readonly (WalkPath | null)[], …> — never throws
 #   src/domain/walk/walk-cache.ts    export const REFRESH_MOVE_M = 150, MIN_REQUEST_GAP_S = 60, BACKOFF_MAX_S = 600,
 #                                    STALE_ORIGIN_M = 300
-#                                    export type WalkCache = { origin: LatLon; requestedAtS: number;
-#                                      paths: ReadonlyMap<string /* GTFS stop_id */, WalkPath | null> }
 #                                    export type WalkStop = { stopId: string; latitude: number; longitude: number } (a Platform fits)
+#                                    export function walkKey(stop: WalkStop): string — the GTFS stop_id AND the stop's coordinates
+#                                      rounded to 5 decimals (ARBITER FIX ROUND Q5: two feeds' stops sharing a raw stop_id never
+#                                      share a walk)
+#                                    export type WalkCache = { lastRequestAtS: number; entries: ReadonlyMap<string /* walkKey */,
+#                                      { path: WalkPath | null; origin: LatLon; straightAtOrigin: number; requestedAtS: number }> }
+#                                    export function mergeWalks(cache: WalkCache | null, answer: { origin: LatLon; requestedAtS: number;
+#                                      stops: readonly WalkStop[]; paths: readonly (WalkPath | null)[] }): WalkCache — ARBITER FIX ROUND
+#                                      Q1 (amends "its answer becomes the cache"): the answer's stops' entries are replaced and every
+#                                      other entry stays, unless it was asked more than STALE_ORIGIN_M from the answer's origin
+#                                    export function dropStaleWalks(cache: WalkCache, position: LatLon): WalkCache — drops the entries
+#                                      asked more than STALE_ORIGIN_M from the rider
 #                                    export type WalkEstimate = { walkMeters: number; detour: number; source: 'routed' | 'estimated' }
 #                                    export function needsWalkRequest(cache: WalkCache | null, position: LatLon, nowS: number,
-#                                      wantedStopIds: readonly string[], backoffUntilS: number): boolean
+#                                      wanted: readonly WalkStop[], backoffUntilS: number): boolean — per entry (Q1): a wanted stop
+#                                      with no entry, or whose entry was asked more than REFRESH_MOVE_M from the rider
 #                                    export function walkFor(cache: WalkCache | null, stop: WalkStop, position: LatLon): WalkEstimate
+#                                      — scaled by the stop's OWN entry's origin
 #   src/ui/walk/RoutedWalkProvider.tsx export function RoutedWalkProvider({ children, fetchWalk? }); its default fetchWalk is
 #                                    src/live/http.ts's EXPO_FETCH (imported) under the provider's own abort timer and typed
 #                                    LiveErrors (http.ts's httpGet is typed to the realtime providers)
 #                                    export type WalkFetch = (request: { url: string; headers: Readonly<Record<string, string>> },
 #                                      signal: AbortSignal) => Promise<Result<unknown /* the parsed JSON body */, LiveError>>
-#                                    export function useWalkTo(stops: readonly WalkStop[]): (stopId: string) => WalkEstimate
+#                                    export function useWalkTo(stops: readonly WalkStop[]): (stop: WalkStop) => WalkEstimate
+#                                      (Q5: a walk is looked up by the stop itself — its stop_id AT its place — never a raw stop_id)
 #                                    Its clock is the wall clock (Date.now, which the oracles' fake timers drive).
-#   src/ui/routes/route-options.ts   OptionContext gains walk?: (stopId: string) => WalkEstimate (stopId = gtfsStopId of the
-#                                    first ride's from.stopId); used only OFF the plan start (> CHIP_ROUTED_START_M)
+#   src/ui/routes/route-options.ts   OptionContext gains walk?: (stop: WalkStop) => WalkEstimate (stop = the first ride's boarding
+#                                    stop: gtfsStopId(from.stopId) at from's coordinates); used whenever no whole routed first walk
+#                                    applies: OFF the plan start (> CHIP_ROUTED_START_M), or AT it when a WALK leg before the first
+#                                    ride carries no distanceM (ARBITER FIX ROUND Q4)
 #   src/ui/routes/use-route-plan.ts  useChipPosition: the rider's fix for EVERY plan, else the plan's start (mfix8 F2)
 #   src/ui/routes/PlanScreen.tsx     registers its itineraries' first-ride boarding stops through useWalkTo for EVERY plan
 #                                    while the rider has a fix ("Route from here" and a plan from the rider's own location)
@@ -62,6 +76,17 @@ MFIX9_JEST_CASES=(
   'only an estimated walk is labelled estimated'
   'the station sheet walks the routed fixture distance instead of the estimate'
   'a rider 300 m off the plan start gets the routed walk'
+  'alternating stop sets, the rider still for 10 minutes, cost exactly 2 requests'
+  '130 wanted stops, the rider jittering 3 m for 10 minutes, ask nothing after the first round'
+  'moving 200 m refreshes the wanted stops, and entries from more than 300 m back are dropped'
+  'a throwing answer handler reaches the bug channel'
+  "at the plan start a first walk missing a leg distance walks the boarding stop's routed walk"
+  'reads an answer for a count of targets no request carries as an Err, never a throw'
+  'refuses a walk with any key besides its distance and duration, and still reads {} as no walk'
+  'an entry whose only key is empty is an Err, never a throw'
+  "an abandoned request's late answer is dropped quietly"
+  'a walk bug after the provider unmounts still reaches the bug channel'
+  'diagnostics shows the live runtime internal error and the routed walks status'
 )
 # The card's own test files and the committed fixture (the guard for the repo-wide gates and the re-checks).
 MFIX9_CLIENT_TEST=src/domain/walk/__tests__/one-to-many.test.ts
@@ -71,6 +96,10 @@ MFIX9_BAR_TEST=src/ui/now/__tests__/routed-walk-bar.test.tsx
 MFIX9_SHEET_TEST=src/ui/hurry/__tests__/routed-walk-sheet.test.tsx
 MFIX9_CHIP_TEST=src/ui/routes/__tests__/routed-walk-chip.test.tsx
 MFIX9_FIXTURE=src/domain/walk/__fixtures__/transitous-one-to-many.json
+# Arbiter fix rounds (Q1-Q8, then Z1-Z5): the churn, bug-channel and Diagnostics tests.
+MFIX9_CHURN_TEST=src/ui/walk/__tests__/walk-churn.test.tsx
+MFIX9_BUGS_TEST=src/ui/walk/__tests__/walk-bugs.test.tsx
+MFIX9_DIAG_TEST=src/ui/diagnostics/__tests__/internal-error.test.tsx
 
 # ---- card helpers (each fails loud with a named reason, like lib.sh) ----
 # jest_cases: copied from verify-mfix6_one_location_watch.sh (only the card universe and report names adjusted).
@@ -408,30 +437,38 @@ const CASES = {
     const errs = [[[{}], 2, 'a length other than n'], [{}, 1, 'a non-array body'], [null, 1, 'a null body'], [[{ duration: 5 }], 1, 'a duration without a distance'],
       [[{ distance: 5 }], 1, 'a distance without a duration'], [[{ distance: -1, duration: 5 }], 1, 'a negative distance'], [[{ distance: 5, duration: -1 }], 1, 'a negative duration'],
       [[{ distance: '5', duration: 5 }], 1, 'a string distance'], [[{ distance: Infinity, duration: 5 }], 1, 'an infinite distance'], [[{ distance: NaN, duration: 5 }], 1, 'a NaN distance'],
-      [[null], 1, 'a null entry'], [[7], 1, 'a number entry']];
+      [[null], 1, 'a null entry'], [[7], 1, 'a number entry'],
+      // ARBITER FIX ROUND Q3: never throws — a count outside 1..128 is an Err, and so is any key besides distance/duration.
+      [[], 0, 'n = 0'], [[], 129, 'n = 129'], [[{ distance: 5, duration: 5, geometry: 'kv}oC' }], 1, 'a walk carrying a geometry'],
+      [[{ distance: 5, duration: 5, steps: [] }], 1, 'a walk carrying steps'],
+      // ARBITER Z1 (review of 7c0bab8): a JSON-producible entry whose only key is the empty string.
+      [[{ '': 5 }], 1, 'an entry whose only key is empty'], [[{ '': 5, distance: 5, duration: 5 }], 1, 'a walk with an extra empty key']];
     for (const [json, n, what] of errs) {
       const r = parse(json, n);
       check(r !== null && typeof r === 'object' && r.ok === false && r.error !== undefined, `parseWalkTimes on ${what} must be an Err, got ${show(r)}`);
     }
-    console.log('ok: client buildWalkRequest writes the exact one-to-many query with m10a\'s User-Agent (imported); 0, 129 targets and non-finite coordinates are Errs; parseWalkTimes reads {distanceM, costS} | null and Errs on anything else; nothing throws');
+    same(parse([{}], 1)?.value, [null], 'parseWalkTimes still reads {} as no walk (null)');
+    console.log('ok: client buildWalkRequest writes the exact one-to-many query with m10a\'s User-Agent (imported); 0, 129 targets and non-finite coordinates are Errs; parseWalkTimes reads {distanceM, costS} | null and Errs on anything else (n outside 1..128, any key besides distance/duration); nothing throws');
   },
-  // B. The walk-cache policy.
+  // B. The walk-cache policy (ARBITER FIX ROUND Q1: one entry per stop, MERGED; Q5: keyed by stop_id AND place).
   cache: async () => {
-    const C = await load('src/domain/walk/walk-cache.ts', ['needsWalkRequest', 'walkFor', 'REFRESH_MOVE_M', 'MIN_REQUEST_GAP_S', 'BACKOFF_MAX_S', 'STALE_ORIGIN_M']);
+    const C = await load('src/domain/walk/walk-cache.ts', ['needsWalkRequest', 'walkFor', 'mergeWalks', 'dropStaleWalks', 'walkKey', 'REFRESH_MOVE_M', 'MIN_REQUEST_GAP_S', 'BACKOFF_MAX_S', 'STALE_ORIGIN_M']);
     const { HURRY_DEFAULTS } = await load('src/domain/hurry/verdict.ts', ['HURRY_DEFAULTS']);
     same([C.REFRESH_MOVE_M, C.MIN_REQUEST_GAP_S, C.BACKOFF_MAX_S, C.STALE_ORIGIN_M], [150, 60, 600, 300], 'REFRESH_MOVE_M 150, MIN_REQUEST_GAP_S 60, BACKOFF_MAX_S 600, STALE_ORIGIN_M 300');
-    const cache = { origin: O, requestedAtS: 1000, paths: new Map([['805', { distanceM: 710.639274597168, costS: 867 }], ['806', null]]) };
+    const S807 = { stopId: '807', latitude: 25.771865, longitude: -80.191377 };
+    const ask = (prev, origin, atS, walks) => call(() => C.mergeWalks(prev, { origin, requestedAtS: atS, stops: walks.map(([s]) => s), paths: walks.map(([, p]) => p) }), 'mergeWalks');
+    const cache = ask(null, O, 1000, [[S805, { distanceM: 710.639274597168, costS: 867 }], [S806, null]]);
     const needs = [
-      ['no cache', null, O, 1000, ['805'], 0, true],
-      ['no cache, backing off', null, O, 1000, ['805'], 1001, false],
-      ['no cache, the backoff just ended', null, O, 1001, ['805'], 1001, true],
-      ['a wanted stop has no entry, 59 s after the request', cache, O, 1059, ['805', '807'], 0, false],
-      ['a wanted stop has no entry, 60 s after the request', cache, O, 1060, ['805', '807'], 0, true],
-      ['every wanted stop has an entry (806: no path), at the origin', cache, O, 5000, ['805', '806'], 0, false],
-      ['149.99 m from the origin', cache, south(149.99), 5000, ['805'], 0, false],
-      ['150.5 m from the origin', cache, south(150.5), 5000, ['805'], 0, true],
-      ['150.5 m from the origin, 59 s after the request', cache, south(150.5), 1059, ['805'], 0, false],
-      ['150.5 m from the origin, backing off', cache, south(150.5), 5000, ['805'], 5001, false],
+      ['no cache', null, O, 1000, [S805], 0, true],
+      ['no cache, backing off', null, O, 1000, [S805], 1001, false],
+      ['no cache, the backoff just ended', null, O, 1001, [S805], 1001, true],
+      ['a wanted stop has no entry, 59 s after the request', cache, O, 1059, [S805, S807], 0, false],
+      ['a wanted stop has no entry, 60 s after the request', cache, O, 1060, [S805, S807], 0, true],
+      ['every wanted stop has an entry (806: no path), at the origin', cache, O, 5000, [S805, S806], 0, false],
+      ['149.99 m from the origin', cache, south(149.99), 5000, [S805], 0, false],
+      ['150.5 m from the origin', cache, south(150.5), 5000, [S805], 0, true],
+      ['150.5 m from the origin, 59 s after the request', cache, south(150.5), 1059, [S805], 0, false],
+      ['150.5 m from the origin, backing off', cache, south(150.5), 5000, [S805], 5001, false],
     ];
     for (const [what, c, pos, nowS, wanted, backoff, want] of needs) {
       const got = call(() => C.needsWalkRequest(c, pos, nowS, wanted, backoff), `needsWalkRequest (${what})`);
@@ -452,21 +489,30 @@ const CASES = {
     }
     close(walk(cache, S805, south(300.5), '300.5 m off'), est(S805, south(300.5)), '300.5 m from the origin: estimated (straight line, m7c\'s detour)');
     close(walk(cache, S806, O, 'no path'), est(S806, O), 'an entry with no path: estimated');
-    const S807 = { stopId: '807', latitude: 25.771865, longitude: -80.191377 };
     close(walk(cache, S807, O, 'no entry'), est(S807, O), 'a stop with no entry: estimated');
     close(walk(null, S805, O, 'no cache'), est(S805, O), 'no cache: estimated');
     const NEAR = { stopId: 'n40', ...north(40) };
-    const nearCache = { origin: O, requestedAtS: 1000, paths: new Map([['n40', { distanceM: 90, costS: 200 }], ['o0', { distanceM: 12, costS: 100 }]]) };
+    const nearCache = ask(null, O, 1000, [[NEAR, { distanceM: 90, costS: 200 }], [{ stopId: 'o0', ...O }, { distanceM: 12, costS: 100 }]]);
     close(walk(nearCache, NEAR, south(100), 'stop 40 m from the origin'), { walkMeters: 90, detour: 1, source: 'routed' }, 'a stop < 50 m from the origin: just distanceM');
     close(walk(nearCache, { stopId: 'o0', ...O }, south(20), 'stop at the origin'), { walkMeters: 12, detour: 1, source: 'routed' }, 'a stop AT the origin (straightAtOrigin 0): just distanceM, never a division by zero');
+    // Q1: a new answer is MERGED — only its own stops' entries are replaced — and each entry keeps the origin it was answered from.
+    const later = ask(cache, south(200), 2000, [[S807, { distanceM: 400, costS: 500 }]]);
+    same([S805, S806, S807].map((s) => show(later.entries.get(C.walkKey(s))?.origin ?? null)), [show(O), show(O), show(south(200))], 'mergeWalks replaces only the answer\'s stops: 805 and 806 keep their entries asked from 815, 807 is answered from 200 m south');
+    check(call(() => C.needsWalkRequest(later, south(100), 5000, [S805, S807], 0), 'needsWalkRequest (per entry)') === false && call(() => C.needsWalkRequest(later, south(260), 5000, [S805], 0), 'needsWalkRequest (per entry)') === true, 'needsWalkRequest judges each wanted stop by its OWN entry\'s origin (strictly > 150 m asks)');
+    close(walk(later, S807, south(100), '807 from its own origin'), { walkMeters: 400 * haversineMeters(south(100), S807) / haversineMeters(south(200), S807), detour: 1, source: 'routed' }, 'walkFor scales by the stop\'s own entry\'s origin');
+    same([...ask(later, south(400), 3000, [[S806, null]]).entries.keys()].sort(), [S806, S807].map(C.walkKey).sort(), 'a merge drops the entries asked more than 300 m from the answer\'s origin (805, asked at 815, 400 m back) and keeps the rest');
+    same([...call(() => C.dropStaleWalks(later, south(350)), 'dropStaleWalks').entries.keys()], [C.walkKey(S807)], 'dropStaleWalks drops the entries asked more than 300 m from the rider');
+    // Q5: a stop is keyed by its stop_id AND its place.
+    const elsewhere = { stopId: '805', latitude: 25.7801, longitude: -80.2001 };
+    close(walk(cache, elsewhere, O, 'another feed\'s 805'), est(elsewhere, O), 'a stop sharing 805\'s raw stop_id at another place never shares its walk');
     const code = fs.readFileSync('src/domain/walk/walk-cache.ts', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
     check(!/(^|[^\d.])1\.3(?!\d)/m.test(code) && /import\s*\{[^}]*\bHURRY_DEFAULTS\b[^}]*\}\s*from\s*['"]\.\.\/hurry\/verdict['"]/.test(code), 'walk-cache.ts must import m7c\'s HURRY_DEFAULTS from ../hurry/verdict for the estimated detour, never re-type 1.3 in code');
-    console.log('ok: cache needsWalkRequest and walkFor follow the brief (150 m strict, 60 s, backoff, missing entries; routed <= 300 m scaled, < 50 m unscaled, else estimated x HURRY_DEFAULTS.detour)');
+    console.log('ok: cache needsWalkRequest and walkFor follow the brief (150 m strict, 60 s, backoff, missing entries; routed <= 300 m scaled, < 50 m unscaled, else estimated x HURRY_DEFAULTS.detour); answers MERGE per entry, each scaled and refreshed by its own origin, dropped > 300 m back (Q1); keys are stop_id + place (Q5)');
   },
   // F. The committed fixture: Jamie's bug in public data.
   fixture: async () => {
     const W = await load('src/domain/walk/one-to-many.ts', ['parseWalkTimes']);
-    const C = await load('src/domain/walk/walk-cache.ts', ['walkFor']);
+    const C = await load('src/domain/walk/walk-cache.ts', ['walkFor', 'mergeWalks']);
     const { hurryVerdict } = await load('src/domain/hurry/verdict.ts', ['hurryVerdict']);
     let fx;
     try { fx = JSON.parse(fs.readFileSync(process.env.MFIX9_FIXTURE, 'utf8')); } catch (e) { fail(`${process.env.MFIX9_FIXTURE} is not readable (${e.message})`); }
@@ -477,7 +523,7 @@ const CASES = {
     const stops = fx.request.many.map((t) => ({ stopId: t.stopId, latitude: t.lat, longitude: t.lon }));
     const ratios = stops.map((s, i) => Number((parsed.value[i].distanceM / haversineMeters(O, s)).toFixed(2)));
     same(ratios, [2.03, 2.08, 1.31, 1.63, 1.19], 'premise: the routed / straight ratios the brief measured (no single detour constant is right)');
-    const cache = { origin: O, requestedAtS: 0, paths: new Map(stops.map((s, i) => [s.stopId, parsed.value[i]])) };
+    const cache = C.mergeWalks(null, { origin: O, requestedAtS: 0, stops, paths: parsed.value });
     const fifth = stops.find((s) => s.stopId === '805');
     near(haversineMeters(O, fifth), 342.03, 0.01, 'straight line 815 -> 805');
     const est = C.walkFor(null, fifth, O), routed = C.walkFor(cache, fifth, O);
@@ -653,7 +699,7 @@ const seen = new Map<string, Record<string, any>>();
 function Probe({ name, stops }: { name: string; stops: readonly any[] }) {
   const walk = WALK.useWalkTo(stops);
   const position = useUserPosition();
-  if (position.coordinate !== null) seen.set(name, Object.fromEntries(stops.map((s) => [s.stopId, plain(walk(s.stopId))])));
+  if (position.coordinate !== null) seen.set(name, Object.fromEntries(stops.map((s) => [s.stopId, plain(walk(s))])));
   return <View testID={`probe-${name}`} />;
 }
 let showExtra: () => void = () => fail('no consumers mounted');
@@ -945,7 +991,7 @@ const CASES: Record<string, () => Promise<void>> = {
   // G. Backoff on 429 / 5xx / network: 60 s, then 120 s; a success resets it; routed values hold <= 300 m from the origin.
   backoff: async () => {
     WALK = load('src/ui/walk/RoutedWalkProvider', ['RoutedWalkProvider', 'useWalkTo']);
-    const { walkFor } = load('src/domain/walk/walk-cache', ['walkFor']);
+    const { walkFor, mergeWalks } = load('src/domain/walk/walk-cache', ['walkFor', 'mergeWalks']);
     fakeClock();
     Object.assign(AppState, { currentState: 'active' });
     const f = fakeFetch();
@@ -965,7 +1011,7 @@ const CASES: Record<string, () => Promise<void>> = {
     await stepUntil(at(1) + 136);
     if (f.calls.length !== 3) fail(`after a second 429 the next attempt comes once 120 s have passed (by 136 s), got ${f.calls.length - 2}`);
     await step(1);
-    const cache = { origin: O, requestedAtS: at(2), paths: new Map(FIVE.map((s) => [s.stopId, { distanceM: 2 * haversineMeters(O, s), costS: 1 }])) };
+    const cache = mergeWalks(null, { origin: O, requestedAtS: at(2), stops: FIVE, paths: FIVE.map((s) => ({ distanceM: 2 * haversineMeters(O, s), costS: 1 })) });
     const ok805 = sourceOf('a', '805', 'routed', 'after the answer');
     if (Math.abs(ok805.walkMeters - 2 * haversineMeters(O, FIVE[1] as any)) > 1e-6) fail(`the routed walk is the answer's distance, got ${show(ok805)}`);
     await stepUntil(at(2) + 61);
@@ -1108,17 +1154,18 @@ const CASES: Record<string, () => Promise<void>> = {
   chip: async () => {
     const f = load('src/ui/routes/__tests__/route-fixtures', ['fixtureItineraries', 'FIXTURE_NETWORK', 'START', 'ASKED_AT_S']);
     const { routeOptions, CHIP_ROUTED_START_M } = load('src/ui/routes/route-options', ['routeOptions', 'CHIP_ROUTED_START_M']);
-    const { walkFor } = load('src/domain/walk/walk-cache', ['walkFor']);
+    const { walkFor, mergeWalks, walkKey } = load('src/domain/walk/walk-cache', ['walkFor', 'mergeWalks', 'walkKey']);
     const { gtfsStopId } = load('src/domain/routes/overlay', ['gtfsStopId']);
     if (CHIP_ROUTED_START_M !== 50) fail(`premise: mfix8's CHIP_ROUTED_START_M is 50, got ${show(CHIP_ROUTED_START_M)}`);
     const away = { latitude: f.START.latitude - 300 / perDeg, longitude: f.START.longitude };
     const itineraries = f.fixtureItineraries();
     const rideOf = (it: any) => it.legs.find((l: any) => l.tripId !== null);
     const stops = new Map<string, any>();
-    for (const it of itineraries) { const r = rideOf(it); if (r !== undefined && r.from.stopId !== null) stops.set(gtfsStopId(r.from.stopId), { stopId: gtfsStopId(r.from.stopId), latitude: r.from.latitude, longitude: r.from.longitude }); }
+    const boardingOf = (r: any) => ({ stopId: gtfsStopId(r.from.stopId), latitude: r.from.latitude, longitude: r.from.longitude });
+    for (const it of itineraries) { const r = rideOf(it); if (r !== undefined && r.from.stopId !== null) stops.set(walkKey(boardingOf(r)), boardingOf(r)); }
     const routedM = (s: any) => haversineMeters(away, s) * 1.7;
-    const cache = { origin: away, requestedAtS: f.ASKED_AT_S, paths: new Map([...stops.values()].map((s) => [s.stopId, { distanceM: routedM(s), costS: 1 }])) };
-    const walk = (c: unknown) => (id: string) => { const s = stops.get(id); if (s === undefined) fail(`the chip asked walk(${show(id)}), not a first ride's GTFS boarding stop_id`); return walkFor(c, s, away); };
+    const cache = mergeWalks(null, { origin: away, requestedAtS: f.ASKED_AT_S, stops: [...stops.values()], paths: [...stops.values()].map((s) => ({ distanceM: routedM(s), costS: 1 })) });
+    const walk = (c: unknown) => (stop: any) => { const s = stop?.stopId === undefined ? undefined : stops.get(walkKey(stop)); if (s === undefined) fail(`the chip asked walk(${show(stop)}), not a first ride's boarding stop (its GTFS stop_id at its coordinates)`); return walkFor(c, s, away); };
     const context = (w: unknown) => ({ position: away, nowS: f.ASKED_AT_S, pace: PACE, ...(w === null ? {} : { walk: w }) });
     const byWalk = routeOptions(itineraries, f.FIXTURE_NETWORK, context(walk(cache)));
     const straightOf = (o: any) => routeOptions([o.itinerary], f.FIXTURE_NETWORK, context(null))[0];
@@ -1126,7 +1173,7 @@ const CASES: Record<string, () => Promise<void>> = {
     for (const option of byWalk) {
       const ride = rideOf(option.itinerary);
       if (ride === undefined || option.verdict === null) continue;
-      const s = stops.get(gtfsStopId(ride.from.stopId));
+      const s = stops.get(walkKey(boardingOf(ride)));
       const want = routedM(s);
       if (Math.abs(option.verdict.walkS - want / 1.35) > 0.05 || Math.abs(option.verdict.jogS - want / 2.7) > 0.05) fail(`option ${option.id}, 300 m off the plan start: the chip walks walkFor's routed ${want.toFixed(1)} m to stop ${s.stopId} (walkS ${(want / 1.35).toFixed(1)}), got walkS ${show(option.verdict.walkS)}`);
       const straight = haversineMeters(away, s) * 1.3 / 1.35;
@@ -1252,13 +1299,13 @@ if (return 0 2>/dev/null); then return 0; fi
 trap 'echo "ratchet: mfix9_routed_walk gate failed at verify script line $LINENO"' ERR
 
 # --- (A) The one-to-many client, pure --------------------------------------------------------------------------
-# 1. Direct tsx call: WALK_ROUTER_URL / WALK_MAX_TARGETS 128 / WALK_MAX_S 3600 / WALK_MATCH_M 250; buildWalkRequest writes the exact query (one=815, many=805,806, mode=WALK, max=3600, maxMatchingDistance=250, arriveBy=false, withDistance=true) with headers exactly { User-Agent: transitousUserAgent(v) } === buildPlanRequest's (m10a) for two versions, imported (no 'MiamiTransit' in one-to-many.ts); 128 targets ok; 0 / 129 targets and non-finite coordinates are Errs; parseWalkTimes reads {distanceM, costS} | null ({} = no path) and Errs on a wrong length, a non-array, a duration without a distance and anything else; nothing throws.
+# 1. (ARBITER FIX ROUND Q3: parseWalkTimes never throws: n outside 1..128 and any key besides distance/duration are Errs; {} stays null.) Direct tsx call: WALK_ROUTER_URL / WALK_MAX_TARGETS 128 / WALK_MAX_S 3600 / WALK_MATCH_M 250; buildWalkRequest writes the exact query (one=815, many=805,806, mode=WALK, max=3600, maxMatchingDistance=250, arriveBy=false, withDistance=true) with headers exactly { User-Agent: transitousUserAgent(v) } === buildPlanRequest's (m10a) for two versions, imported (no 'MiamiTransit' in one-to-many.ts); 128 targets ok; 0 / 129 targets and non-finite coordinates are Errs; parseWalkTimes reads {distanceM, costS} | null ({} = no path) and Errs on a wrong length, a non-array, a duration without a distance and anything else; nothing throws.
 mfix9_pure client
 # 2. The client's own jest tests exist and pass.
 jest_nonempty "$MFIX9_CLIENT_TEST"
 
 # --- (B) The walk-cache policy, pure ---------------------------------------------------------------------------
-# 3. Direct tsx call: the four constants; needsWalkRequest (backoff, 60 s gap, strictly > 150 m, a missing entry, no cache); walkFor routed <= 300 m from the origin (distanceM x straightNow / straightAtOrigin; just distanceM under 50 m, never a division by zero; detour 1), estimated otherwise (straight line x HURRY_DEFAULTS.detour, imported — no literal 1.3 in walk-cache.ts).
+# 3. Direct tsx call: the four constants; needsWalkRequest (backoff, 60 s gap, strictly > 150 m, a missing entry, no cache); walkFor routed <= 300 m from the origin (distanceM x straightNow / straightAtOrigin; just distanceM under 50 m, never a division by zero; detour 1), estimated otherwise (straight line x HURRY_DEFAULTS.detour, imported — no literal 1.3 in walk-cache.ts). ARBITER FIX ROUND Q1: mergeWalks keeps every entry the answer does not replace (each with its own origin; needsWalkRequest and walkFor judge each stop by it), dropped > 300 m from the answer's origin, and dropStaleWalks drops > 300 m from the rider; Q5: a stop sharing a raw stop_id at another place never shares a walk.
 mfix9_pure cache
 
 # --- (F) The committed fixture: Jamie's bug in public data -----------------------------------------------------
@@ -1302,12 +1349,18 @@ jest_cases "$MFIX9_BAR_TEST" 'the bar walks the routed fixture distance instead 
 mfix9_oracle sheet
 # 18. One passing test (src/ui/hurry/__tests__/routed-walk-sheet.test.tsx).
 jest_cases "$MFIX9_SHEET_TEST" 'the station sheet walks the routed fixture distance instead of the estimate'
-# 19. Oracle on m10a's fixture: 300 m off the plan start with OptionContext.walk, every chip walks walkFor to its first ride's GTFS boarding stop (routed, no detour); without walk, or with an estimated walk, mfix5's straight line x 1.3; at the start mfix8's routed WALK legs still set it.
+# 19. Oracle on m10a's fixture: 300 m off the plan start with OptionContext.walk, every chip walks walkFor to its first ride's GTFS boarding stop (its stop_id at its coordinates; routed, no detour); without walk, or with an estimated walk, mfix5's straight line x 1.3; at the start mfix8's routed WALK legs still set it.
 mfix9_oracle chip
 # 19b. Oracle, the REAL route options sheet under RoutedWalkProvider: "Route from here", the rider 400 m off the start -> 1 one-to-many request for its first rides' boarding stops; its chip walks the routed walk, not the estimate; with no routed walk to give, the estimate. Then (mfix8 F2) a plan from the rider's OWN location, the rider 300 m off its start: 1 request from the rider for exactly the first rides' boarding stops; fed, every chip walks the routed walk; with no routed walk to give, every chip is the no-provider estimate.
 mfix9_oracle chip_screen
 # 20. One passing test (src/ui/routes/__tests__/routed-walk-chip.test.tsx).
 jest_cases "$MFIX9_CHIP_TEST" 'a rider 300 m off the plan start gets the routed walk'
+# 20b. The arbiter fix rounds' named tests, each its own passing test (Q1 churn, Q2/Z2/Z5 bugs, Q3/Z1 never throws, Q4 at-start chip, Z4 Diagnostics).
+jest_cases "$MFIX9_CHURN_TEST" 'alternating stop sets, the rider still for 10 minutes, cost exactly 2 requests' '130 wanted stops, the rider jittering 3 m for 10 minutes, ask nothing after the first round' 'moving 200 m refreshes the wanted stops, and entries from more than 300 m back are dropped'
+jest_cases "$MFIX9_BUGS_TEST" 'a throwing answer handler reaches the bug channel' "an abandoned request's late answer is dropped quietly" 'a walk bug after the provider unmounts still reaches the bug channel'
+jest_cases "$MFIX9_CHIP_TEST" "at the plan start a first walk missing a leg distance walks the boarding stop's routed walk"
+jest_cases "$MFIX9_CLIENT_TEST" 'reads an answer for a count of targets no request carries as an Err, never a throw' 'refuses a walk with any key besides its distance and duration, and still reads {} as no walk' 'an entry whose only key is empty is an Err, never a throw'
+jest_cases "$MFIX9_DIAG_TEST" 'diagnostics shows the live runtime internal error and the routed walks status'
 
 # --- Tests mock only native packages (guarded on this card's files) --------------------------------------------
 # 21. mfix6's helper over every directory this card's tests live in.
@@ -1316,6 +1369,7 @@ after_card mocks_native_only src/ui/walk/__tests__
 after_card mocks_native_only src/ui/now/__tests__
 after_card mocks_native_only src/ui/hurry/__tests__
 after_card mocks_native_only src/ui/routes/__tests__
+after_card mocks_native_only src/ui/diagnostics/__tests__
 
 # --- Repo-wide ----------------------------------------------------------------------------------------------------
 # 22. (guarded) Metro bundles the app for iOS on a private cache (TMPDIR=.cache/metro-tmp-mfix9), and the --no-bytecode bundle carries the one-to-many URL.
@@ -1323,4 +1377,4 @@ card_export_carries 'https://api.transitous.org/api/v1/one-to-many'
 # 23. With this card's files in the tree: tsc (app + scripts), eslint --max-warnings 0, standards, jest (every test), node:test — all green.
 card_full_gate
 
-echo "mfix9_routed_walk: all 29 gate lines green"
+echo "mfix9_routed_walk: all 35 gate lines green"

@@ -27,9 +27,10 @@ import { type OriginState, type PlanState, useChipPosition, useLiveOptions, useP
  * hurry chip; a tapped option opens its legs here in the sheet, with walking directions one tap away.
  * When Transitous cannot answer, Apple Maps can ("Open in Apple Maps"). The credits sit at the bottom.
  * mfix5: once the first option has left, the open sheet asks again — once per answer, and not while an
- * option's legs are open (the rider may be on that train) — and the hurry chips walk from the rider when
- * the location module has a fix: for "Route from here", whose plan starts at the station, and (mfix8) for
- * a plan from the rider's own location too, whose start is the one fix taken when the sheet opened.
+ * option's legs are open (the rider may be on that train) — and the hurry chips walk from the rider's freshest
+ * fix. For "Route from here", whose plan starts at the station, that is the location module's whenever it has
+ * one; for a plan from the rider's own location (mfix8), whose start is the one fix taken when the sheet opened,
+ * it is the location module's once that is newer than the sheet's own.
  *
  *   PlanScreen (schedule DB, location, Transitous, live runtime, clock) → PlanBody (props only)
  */
@@ -51,7 +52,8 @@ export function PlanScreen({ fromStation }: PlanScreenProps) {
   const stations = useMemo(() => (repo === null ? null : repo.stations()), [repo]);
   const network = useMemo<RouteNetwork>(() => (repo === null ? NO_ROUTE_NETWORK : repo.liveNetwork()), [repo]);
   const origin = usePlanOrigin(fromStation, stations);
-  const from = origin.kind === 'ready' ? origin.origin.coordinate : null;
+  const start = origin.kind === 'ready' ? origin.origin : null;
+  const from = start === null ? null : start.coordinate;
   const [destination, setDestination] = useState<RecentPlace | null>(null);
   const [recents, setRecents] = useState<readonly RecentPlace[]>(() => readRecentPlaces());
   const [notice, setNotice] = useState<string | null>(null);
@@ -61,7 +63,7 @@ export function PlanScreen({ fromStation }: PlanScreenProps) {
   const plan = usePlanRequest(appPlanClient(), from, destination, wallClockMs, round);
   const nowS = useNowS(PLAN_TICK_MS);
   const { walkMps, jogMps } = readWalkingPace();
-  const chipFrom = useChipPosition(fromStation, from);
+  const chipFrom = useChipPosition(start);
   const context = useMemo<OptionContext>(() => ({ position: chipFrom, nowS, pace: { walkMps, jogMps } }), [chipFrom, nowS, walkMps, jogMps]);
   const options = useLiveOptions(plan.kind === 'ok' ? plan.itineraries : NO_ITINERARIES, network, context);
   useReplanOnceLeft(plan, options, nowS, reading ? null : replan);

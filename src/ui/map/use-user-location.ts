@@ -96,6 +96,42 @@ export function currentPosition(): Promise<Result<LatLon, string>> {
   return read;
 }
 
+/** A fix of the rider: where they were, and when expo-location took it (its LocationObject.timestamp, epoch ms). */
+export type Fix = { readonly coordinate: LatLon; readonly takenAtMs: number };
+
+/**
+ * One fix now, with the time it was taken, or why there is none: the route options sheet's start for a plan from the
+ * rider's own location, which its hurry chips weigh against the watch's latest fix (mfix8: the freshest fix wins).
+ */
+export function currentFix(): Promise<Result<Fix, string>> {
+  invariant(typeof Location.getCurrentPositionAsync === 'function', 'expo-location reads a position');
+  const read = Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }).then(timedFixOf, failureOf);
+  invariant(typeof read.then === 'function', 'the fix arrives later');
+  return read;
+}
+
+/** A one-shot answer read defensively: a fix needs its coordinates AND the time it was taken (or it cannot be weighed). */
+function timedFixOf(fix: Location.LocationObject | undefined): Result<Fix, string> {
+  const position = positionOf(fix);
+  const takenAtMs = takenAtOf(fix);
+  if (!position.ok) {
+    return position;
+  }
+  const timed = takenAtMs === null ? err('the position came back without the time it was taken') : ok({ coordinate: position.value, takenAtMs });
+  invariant(!timed.ok || timed.value.coordinate === position.value, 'the fix is where the answer put the rider');
+  invariant(!timed.ok || timed.value.takenAtMs === fix?.timestamp, 'the fix is timed by the answer');
+  return timed;
+}
+
+/** When expo-location took `fix` (LocationObject.timestamp, epoch ms), read defensively: null when it carries no usable time. */
+export function takenAtOf(fix: Location.LocationObject | undefined): number | null {
+  const stamp: unknown = fix?.timestamp;
+  const takenAtMs = typeof stamp === 'number' && Number.isFinite(stamp) && stamp >= 0 ? stamp : null;
+  invariant(takenAtMs === null || fix !== undefined, 'only a real answer has a time');
+  invariant(takenAtMs === null || takenAtMs === fix?.timestamp, 'the time is the answer\'s own');
+  return takenAtMs;
+}
+
 /** A position answer read defensively: one with no coordinates is no position. */
 export function positionOf(fix: Location.LocationObject | undefined): Result<LatLon, string> {
   const coords = fix?.coords;
@@ -152,11 +188,16 @@ export const WATCH_DISTANCE_M = 50;
 export type UserPosition = {
   /** The latest fix, or null before one arrives (or without permission). */
   readonly coordinate: LatLon | null;
+  /**
+   * When expo-location took that fix (its LocationObject.timestamp, epoch ms); null without a fix, or for a fix that
+   * came without a time — which the route chips then never count as newer than a plan's own fix.
+   */
+  readonly takenAtMs: number | null;
   /** Why there is no fix (location off, refused or failed), or null. */
   readonly note: string | null;
 };
 
-const WAITING: UserPosition = Object.freeze({ coordinate: null, note: null });
+const WAITING: UserPosition = Object.freeze({ coordinate: null, takenAtMs: null, note: null });
 
 /** What the app's one location owner shares: its one permission answer, and its one watch's latest fix. */
 export type SharedLocation = {
@@ -173,23 +214,24 @@ export const LocationContext = createContext<SharedLocation | null>(null);
 /**
  * The rider's position: the latest fix of the app's ONE location watch, or why there is none (the Stations
  * list, the hurry hook and the Now strip, the Trips tab, a trip's screen, and the route options sheet's
- * hurry chips, mfix5 and mfix8). Not `enabled`: no position, whatever the watch has. Outside
- * UserLocationProvider it fails loud: there is no fallback that would open a watch of its own.
+ * hurry chips, mfix5 and mfix8). Outside UserLocationProvider it fails loud: there is no fallback that would
+ * open a watch of its own.
  */
-export function useUserPosition(enabled: boolean = true): UserPosition {
+export function useUserPosition(): UserPosition {
   const shared = useContext(LocationContext);
   invariant(shared !== null, 'useUserPosition needs UserLocationProvider above it (the app\'s one location watch, mounted by src/app/_layout.tsx)');
-  const current = enabled ? shared.position : WAITING;
+  const current = shared.position;
   invariant(current.coordinate === null || isLatLon(current.coordinate), 'a fix is a real coordinate');
   invariant(current.coordinate === null || current.note === null, 'a fix carries no excuse');
   return current;
 }
 
-/** A watched fix as the list's position: the coordinate, or why the fix had none. */
-export function fixed(position: Result<LatLon, string>): UserPosition {
-  const next = position.ok ? { coordinate: position.value, note: null } : unlocated(position.error);
+/** A watched fix as the list's position: the coordinate and when it was taken (`takenAtMs`), or why the fix had none. */
+export function fixed(position: Result<LatLon, string>, takenAtMs: number | null): UserPosition {
+  const next = position.ok ? { coordinate: position.value, takenAtMs, note: null } : unlocated(position.error);
   invariant(next.coordinate === null || isLatLon(next.coordinate), 'a fix is a real coordinate');
   invariant((next.coordinate === null) !== (next.note === null), 'a position has a fix or an excuse, not both');
+  invariant(next.coordinate !== null || next.takenAtMs === null, 'only a fix has a time');
   return next;
 }
 
@@ -198,5 +240,5 @@ export function unlocated(problem: string | null): UserPosition {
   invariant(problem === null || typeof problem === 'string', 'a problem is a message or nothing');
   const note = problem === null || problem.trim().length === 0 ? copy.noLocation : `${copy.noLocation} (${problem})`;
   invariant(note.startsWith(copy.noLocation), 'the note says location is off first');
-  return { coordinate: null, note };
+  return { coordinate: null, takenAtMs: null, note };
 }

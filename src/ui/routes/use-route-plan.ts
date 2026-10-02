@@ -14,7 +14,7 @@ import type { LiveRuntime } from '@/live/runtime';
 
 import { wallClockNowS } from '../clock';
 import { copy } from '../copy';
-import { askForLocation, currentPosition, useUserPosition } from '../map/use-user-location';
+import { askForLocation, currentFix, type Fix, type UserPosition, useUserPosition } from '../map/use-user-location';
 import { watchStation } from '../stations/use-station-predictions';
 import type { RecentPlace } from './recent-places';
 import { boardingStations, type OptionContext, optionLeavesS, predictionsAt, type RouteNetwork, type RouteOption, routeOptions } from './route-options';
@@ -28,13 +28,17 @@ import { boardingStations, type OptionContext, optionLeavesS, predictionsAt, typ
  *   usePlanRequest   Transitous's itineraries for (start, destination) through the app's polite client;
  *                    'superseded' (a newer call replaced this one) is ignored, never shown as an error
  *   useReplanOnceLeft  asks again ONCE per answer, once its first option has left (mfix5)
- *   useChipPosition  where the hurry chips walk from: the rider when located, for every plan (mfix5; mfix8)
+ *   useChipPosition  where the hurry chips walk from: the rider's freshest fix, for every plan (mfix5; mfix8)
  *   useLiveOptions   the itineraries corrected by m4b's live predictions (m10a's overlay) for their
  *                    boarding stations — watched only while the sheet is open, at most MAX_WATCHED_STATIONS
  *                    (REALTIME COST RULE) — as rows sorted by arrival, each with its hurry chip
  */
 
-export type PlanOrigin = { readonly name: string; readonly coordinate: LatLon };
+/**
+ * Where a plan starts. `takenAtMs`: for a plan from the rider's own location, when expo-location took the one fix it
+ * starts at (epoch ms); null for a station's start, which is no fix of the rider.
+ */
+export type PlanOrigin = { readonly name: string; readonly coordinate: LatLon; readonly takenAtMs: number | null };
 export type OriginState = { readonly kind: 'locating' } | { readonly kind: 'ready'; readonly origin: PlanOrigin } | { readonly kind: 'failed'; readonly message: string };
 
 export type PlanState =
@@ -55,6 +59,7 @@ export function usePlanOrigin(fromStation: string | null, stations: readonly Sta
   const state = station ?? here;
   invariant(fromStation === null || state.kind !== 'ready' || state.origin.name !== copy.yourLocation, 'a station start is named by its station');
   invariant(state.kind !== 'ready' || isLatLon(state.origin.coordinate), 'a start is a real coordinate');
+  invariant(state.kind !== 'ready' || (fromStation === null) === (state.origin.takenAtMs !== null), 'a start at the rider is a timed fix; a station start is no fix');
   return state;
 }
 
@@ -65,16 +70,16 @@ function stationOrigin(stationKey: string, stations: readonly StationListing[] |
     return stations === null ? LOCATING : { kind: 'failed', message: copy.unknownStation };
   }
   invariant(station.stationKey === stationKey, 'the start is the station asked for');
-  return { kind: 'ready', origin: { name: station.name, coordinate: station.coordinate } };
+  return { kind: 'ready', origin: { name: station.name, coordinate: station.coordinate, takenAtMs: null } };
 }
 
-/** Asks for location and reads one fix, reporting the start (or why there is none) unless the sheet closed first. */
+/** Asks for location and reads one timed fix, reporting the start (or why there is none) unless the sheet closed first. */
 function locateOnce(report: (state: OriginState) => void): () => void {
   invariant(typeof report === 'function', 'the start is reported to the sheet');
   const life = { open: true };
-  const located: Promise<Result<LatLon, string>> = askForLocation().then((grant) => (grant.ok ? currentPosition() : err(grant.error.kind === 'failed' ? grant.error.message : copy.routeNoLocation)));
+  const located: Promise<Result<Fix, string>> = askForLocation().then((grant) => (grant.ok ? currentFix() : err(grant.error.kind === 'failed' ? grant.error.message : copy.routeNoLocation)));
   located.then(
-    (position) => (life.open ? report(position.ok ? { kind: 'ready', origin: { name: copy.yourLocation, coordinate: position.value } } : { kind: 'failed', message: position.error }) : undefined),
+    (fix) => (life.open ? report(fix.ok ? { kind: 'ready', origin: { name: copy.yourLocation, coordinate: fix.value.coordinate, takenAtMs: fix.value.takenAtMs } } : { kind: 'failed', message: fix.error }) : undefined),
     (error: unknown) => (life.open ? report({ kind: 'failed', message: String(error) }) : undefined),
   );
   invariant(life.open, 'the ask starts while the sheet is open');
@@ -175,21 +180,36 @@ function replanIfLeft(watched: { current: Watched | null }, itineraries: readonl
 }
 
 /**
- * Where the hurry chips measure the walk from, for EVERY plan: the rider — followed by the app's ONE location
- * watch (mfix6) while the sheet is open, so following costs nothing — once located; the plan's start without
- * a fix. A "Route from here" plan starts at the station (mfix5), and a plan from the rider's own location starts
- * at the ONE fix the sheet took when it opened: either way the rider may have moved on since, and the chip
- * asks whether the RIDER makes the train. That is what lets route-options.ts keep the routed first walk only
- * while the rider is within CHIP_ROUTED_START_M of the itinerary's start, and fall back to the straight line
- * from the rider once they have walked off (mfix8). `fromStation` names the kind of plan; the rule is the same.
+ * Where the hurry chips measure the walk from, for EVERY plan: the rider's FRESHEST fix, so the chip asks whether
+ * the RIDER makes the train. The app's ONE location watch (mfix6) follows them while the sheet is open, at no
+ * cost. A "Route from here" plan starts at the station (mfix5), which is no fix of the rider: the watch's fix
+ * wins whenever there is one. A plan from the rider's own location starts at the ONE fix the sheet took when it
+ * opened, and the watch reports only every WATCH_DISTANCE_M (= CHIP_ROUTED_START_M), at the same Balanced
+ * accuracy: its latest fix may be older than the sheet's, and off the plan's start by more than the jitter of a
+ * rider who has not moved. So the watch's fix wins only once it was taken AFTER the sheet's (mfix8). Without a
+ * fix the chip walks from the plan's start. That is what lets route-options.ts keep the routed first walk while
+ * the rider is within CHIP_ROUTED_START_M of the itinerary's start, and fall back to the straight line from the
+ * rider once they have walked off.
  */
-export function useChipPosition(fromStation: string | null, start: LatLon | null): LatLon | null {
-  invariant(fromStation === null || fromStation.includes(':'), `a plan starts at a station keyed mode:name, got "${fromStation}"`);
-  const rider = useUserPosition(true);
-  const position = rider.coordinate ?? start;
-  invariant(rider.coordinate === null || position === rider.coordinate, 'once the rider is located the chip walks from them, whatever kind of plan');
-  invariant(position === null || isLatLon(position), 'the chip walks from a real coordinate');
+export function useChipPosition(start: PlanOrigin | null): LatLon | null {
+  const rider = useUserPosition();
+  const position = rider.coordinate !== null && (start === null || watchIsFresher(rider, start)) ? rider.coordinate : (start?.coordinate ?? null);
+  invariant(
+    rider.coordinate === null ? position === (start?.coordinate ?? null) : position === rider.coordinate || position === start?.coordinate,
+    'located, the chip walks from the rider\'s fix, or from the plan\'s own when that is the fresher; unlocated, from the plan\'s start',
+  );
+  invariant(position === null || isLatLon(position), 'the chip walks from a real coordinate, or from nowhere yet');
   return position;
+}
+
+/**
+ * The watch's fix is fresher than the plan's start: the start is a station (no fix of the rider), or the watch took
+ * its fix after the sheet took the plan's. Against the plan's timed fix, a watch fix without a time never counts.
+ */
+function watchIsFresher(rider: UserPosition, start: PlanOrigin): boolean {
+  invariant(rider.coordinate !== null, 'only a fix of the rider can be the fresher');
+  invariant(start.takenAtMs === null || Number.isFinite(start.takenAtMs), 'a plan\'s fix is taken at an instant');
+  return start.takenAtMs === null || (rider.takenAtMs !== null && rider.takenAtMs > start.takenAtMs);
 }
 
 /** The rows: `itineraries` with their boarding departures corrected by live predictions, sorted by arrival. */

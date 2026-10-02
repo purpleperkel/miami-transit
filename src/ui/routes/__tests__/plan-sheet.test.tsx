@@ -103,7 +103,7 @@ describe('asking Transitous from the sheet (M10b.1)', () => {
 describe('the sheet body (M10b.1–M10b.2)', () => {
   it('opens an option inside the sheet and goes back to every option', async () => {
     const options = routeOptions(fixtureItineraries(), FIXTURE_NETWORK, { position: START, nowS: ASKED_AT_S, pace: { walkMps: HURRY_DEFAULTS.walkMps, jogMps: HURRY_DEFAULTS.jogMps } });
-    const props = { origin: { kind: 'ready', origin: { name: 'Your location', coordinate: START } }, destination: END, network: FIXTURE_NETWORK, names: FIXTURE_NAMES, clock: FIXTURE_CLOCK, nowS: ASKED_AT_S } as const;
+    const props = { origin: { kind: 'ready', origin: { name: 'Your location', coordinate: START, takenAtMs: ASKED_AT_S * 1000 } }, destination: END, network: FIXTURE_NETWORK, names: FIXTURE_NAMES, clock: FIXTURE_CLOCK, nowS: ASKED_AT_S } as const;
     const tree = await renderPrimitive(<PlanBody {...props} plan={{ kind: 'ok', itineraries: fixtureItineraries() }} options={options} />);
     await press(tree, 'route-option-1');
     expect(hostsByTestID(tree.root, 'itinerary-detail')).toHaveLength(1);

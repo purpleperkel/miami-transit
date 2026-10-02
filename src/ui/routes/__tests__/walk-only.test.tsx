@@ -124,7 +124,7 @@ describe('a walk-only route option (mfix7)', () => {
 });
 
 describe('the sheet body around walk-only answers (mfix7)', () => {
-  const sheet = { origin: { kind: 'ready', origin: { name: 'Your location', coordinate: OFF_LINE_POINT } }, destination: BRICKELL_CITY_CENTRE, network: FIXTURE_NETWORK, names: FIXTURE_NAMES, clock: FIXTURE_CLOCK, nowS: ASKED_AT_S } as const;
+  const sheet = { origin: { kind: 'ready', origin: { name: 'Your location', coordinate: OFF_LINE_POINT, takenAtMs: ASKED_AT_S * 1000 } }, destination: BRICKELL_CITY_CENTRE, network: FIXTURE_NETWORK, names: FIXTURE_NAMES, clock: FIXTURE_CLOCK, nowS: ASKED_AT_S } as const;
 
   it('route options are unavailable only when itineraries and direct are both empty', async () => {
     const empty = await answerOf({ ...DIRECT_ONLY, itineraries: [], direct: [] });

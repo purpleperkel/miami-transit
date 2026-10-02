@@ -48,7 +48,7 @@ function listOf(stations: readonly StationListing[]): StationList {
 
 /** StationsView's props for `state`: 08:00 Wednesday, no location (the list keeps its line order), taps ignored. */
 function viewProps(state: StationsViewProps['state']): StationsViewProps {
-  const props: StationsViewProps = { state, nowS: 1_790_769_600, location: { coordinate: null, note: null }, onOpen: jest.fn() };
+  const props: StationsViewProps = { state, nowS: 1_790_769_600, location: { coordinate: null, takenAtMs: null, note: null }, onOpen: jest.fn() };
   expect(props.location.coordinate).toBeNull();
   expect(typeof props.onOpen).toBe('function');
   return props;

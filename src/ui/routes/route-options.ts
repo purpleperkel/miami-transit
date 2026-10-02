@@ -18,7 +18,7 @@ import { clockFor } from '../hurry/hurry-reading';
  *
  * sorted by ARRIVAL (the question is "when do I get there?"), each with its line badges, a Live badge when
  * any leg runs on a live prediction, and hurry or chill for the FIRST transit leg — m7c's engine through
- * m10a's firstLegVerdict, walking to the boarding stop at Jamie's paces from the rider when located, else
+ * m10a's firstLegVerdict, walking to the boarding stop at Jamie's paces from the rider's freshest fix, else
  * from the plan's start — for every plan, "Route from here" (mfix5) or from the rider's own location (mfix8;
  * OptionContext.position, use-route-plan.ts useChipPosition). A late leg that may cost a connection says so
  * on its row: "Tight transfer · may miss 26".
@@ -70,7 +70,12 @@ export type RouteOption = {
   readonly connectionAtRisk: string | null;
 };
 
-/** What the hurry chip is computed from: the plan's start, now, and Jamie's paces (m8b). */
+/**
+ * What the hurry chip is computed from: where the rider is, now, and Jamie's paces (m8b). `position` is the rider
+ * whenever they are located, for every plan (mfix8 F2), at their freshest fix: the location watch's, or — until the
+ * watch reports after it — the one fix a plan from the rider's own location starts at. Unlocated, the plan's start;
+ * null before there is one (use-route-plan.ts useChipPosition).
+ */
 export type OptionContext = { readonly position: LatLon | null; readonly nowS: number; readonly pace: FirstLegPace };
 
 /** An epoch as the rows show it ("2:01", or "in 6 min" without service-day bases). */
@@ -99,7 +104,7 @@ const MODE_WORDS: Readonly<Record<string, string>> = { BUS: 'Bus', TRAM: 'Tram',
 /** The options for `itineraries`, earliest arrival first (a tie leaves later, then changes less). */
 export function routeOptions(itineraries: readonly Itinerary[], network: RouteNetwork, context: OptionContext): RouteOption[] {
   invariant(Number.isFinite(context.nowS), 'the options are read at an instant');
-  invariant(context.position === null || isLatLon(context.position), 'the start is a real coordinate, or unknown');
+  invariant(context.position === null || isLatLon(context.position), 'the chip walks from a real coordinate (the rider whenever located, else the plan\'s start), or from nowhere yet');
   const options = itineraries.map((itinerary, id) => optionOf(id, itinerary, network, context));
   options.sort((a, b) => a.arriveEpoch - b.arriveEpoch || b.departEpoch - a.departEpoch || a.transfers - b.transfers);
   invariant(options.every((option, i) => i === 0 || (options[i - 1] as RouteOption).arriveEpoch <= option.arriveEpoch), 'the options are sorted by arrival');

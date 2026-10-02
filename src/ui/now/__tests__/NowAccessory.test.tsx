@@ -199,8 +199,9 @@ describe('the Now strip (R2): no feed hash', () => {
     // one line (before mfix8), and 3 more now — in the three 'ready' states above the tab bar the saved trip shows,
     // as two lines (its destination over its verdict near Government Center, or over its countdown otherwise).
     expect(seen).toHaveLength(2 * 3 * 3 * 2 + 3);
-    // Every state was said: the saved trip judged (its destination first, then the trip in words), and where to
-    // (no trip near, no fix, the schedule opening or failed).
+    // What the states say: near Government Center the saved trip is judged (its destination first, then the trip in
+    // words); across town and with no fix it shows its countdown (the realtime cost test below pins the one across
+    // town); only while the schedule is opening or has failed does the bar say where to.
     expect(seen.some((said) => said.includes('Trip to Brickell from Government Center'))).toBe(true);
     expect(['Brickell', 'Where to?', 'Where to? Opens route options.'].every((said) => seen.includes(said))).toBe(true);
     expect(seen.filter((said) => /Data [0-9a-f]{6,}/.test(said))).toEqual([]);

@@ -6,7 +6,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import { SCHEDULE_DB_NAME, ScheduleDbProvider } from '../../../data/schedule-db-provider';
 import fixture from '../../../domain/routes/__fixtures__/transitous-plan.json';
-import { haversineMeters, type LatLon } from '../../../lib/geo';
+import { haversineMeters, isLatLon, type LatLon } from '../../../lib/geo';
 import { hurryShort } from '../../hurry/copy';
 import { UserLocationProvider } from '../../location/UserLocationProvider';
 import { hostsByTestID } from '../../primitives/__tests__/render-primitive';
@@ -49,8 +49,8 @@ const RIDER_AT: LatLon = { latitude: STATION_AT.latitude + 400 / 111_195, longit
 const PACE = { walkMps: 1.35, jogMps: 2.7 };
 
 const trees: ReactTestRenderer[] = [];
-/** Reports a new fix through the running watch (the last one started). */
-let moveRider: ((at: LatLon) => void) | null = null;
+/** Reports a new fix through the running watch (the last one started), taken at `takenAtMs` (epoch ms; now by default). */
+let moveRider: ((at: LatLon, takenAtMs?: number) => void) | null = null;
 /** The remove() of every expo-location watch the sheet started: each must be called once the sheet closes. */
 const watchRemovals: jest.Mock[] = [];
 let mockCopy: SQLiteDatabase | null = null;
@@ -108,22 +108,26 @@ afterAll(() => {
 
 type OnFix = Parameters<typeof Location.watchPositionAsync>[1];
 
-/** expo-location grants and its watch fixes the rider at `at`; or, with null, location is refused. */
-function locate(at: LatLon | null): void {
+/**
+ * expo-location grants and its watch fixes the rider at `at` — a fix taken at `takenAtMs` (epoch ms), or when the
+ * watch starts; or, with null, location is refused.
+ */
+function locate(at: LatLon | null, takenAtMs?: number): void {
   const answer = { granted: at !== null, status: at === null ? 'denied' : 'granted', canAskAgain: false, expires: 'never' } as Location.LocationPermissionResponse;
   jest.mocked(Location.requestForegroundPermissionsAsync).mockResolvedValue(answer);
   if (at !== null) {
-    jest.mocked(Location.watchPositionAsync).mockImplementation((_options, onFix) => watchFixing(at, onFix));
+    jest.mocked(Location.watchPositionAsync).mockImplementation((_options, onFix) => watchFixing(at, onFix, takenAtMs ?? Date.now()));
   }
   expect(jest.mocked(Location.watchPositionAsync)).not.toHaveBeenCalled();
   expect(answer.granted).toBe(at !== null);
 }
 
-/** A started expo-location watch: one fix at `at` at once, and a remove() kept for the close check. */
-async function watchFixing(at: LatLon, onFix: OnFix): Promise<{ remove: jest.Mock }> {
+/** A started expo-location watch: one fix at `at` (taken at `takenAtMs`) at once, and a remove() kept for the close check. */
+async function watchFixing(at: LatLon, onFix: OnFix, takenAtMs: number): Promise<{ remove: jest.Mock }> {
   expect(typeof onFix).toBe('function');
-  moveRider = (next) => onFix({ coords: { ...next, altitude: null, accuracy: 10, altitudeAccuracy: null, heading: null, speed: null }, timestamp: Date.now() });
-  moveRider(at);
+  expect(Number.isSafeInteger(takenAtMs)).toBe(true);
+  moveRider = (next, when = Date.now()) => onFix({ coords: { ...next, altitude: null, accuracy: 10, altitudeAccuracy: null, heading: null, speed: null }, timestamp: when });
+  moveRider(at, takenAtMs);
   const remove = jest.fn();
   watchRemovals.push(remove);
   expect(watchRemovals).toContain(remove);
@@ -206,9 +210,13 @@ function southOfStart(metres: number): LatLon {
   return rider;
 }
 
-/** The REAL sheet from the rider's own location — the sheet's one fix at START — planning to Brickell, its options in. */
-async function routeFromMyLocation(): Promise<ReactTestRenderer> {
-  locate(START);
+/**
+ * The REAL sheet from the rider's own location — the sheet's one fix at START, taken as it opens — planning to
+ * Brickell, its options in. The app's one watch first fixes the rider at `watchAt` (taken at `watchTakenAtMs`, epoch ms;
+ * as the watch starts by default).
+ */
+async function routeFromMyLocation(watchAt: LatLon = START, watchTakenAtMs?: number): Promise<ReactTestRenderer> {
+  locate(watchAt, watchTakenAtMs);
   jest.mocked(Location.getCurrentPositionAsync).mockResolvedValue({ coords: { ...START, altitude: null, accuracy: 10, altitudeAccuracy: null, heading: null, speed: null }, timestamp: Date.now() });
   expect(recordRecentPlace(END).ok).toBe(true);
   const tree = await mountSheet(null);
@@ -218,6 +226,14 @@ async function routeFromMyLocation(): Promise<ReactTestRenderer> {
   await settle(2);
   expect(jest.mocked(expoFetch).mock.calls.map((call) => String(call[0]).includes(`fromPlace=${START.latitude},${START.longitude}&`))).toEqual([true]);
   return tree;
+}
+
+/** The first option's chip as m10a's options read it with the rider at `position` (Jamie's default paces). */
+function chipAt(position: LatLon): string | null {
+  const verdict = routeOptions(fixtureItineraries(), FIXTURE_NETWORK, { position, nowS: ASKED_AT_S, pace: PACE })[0]?.verdict ?? null;
+  expect(verdict).not.toBeNull();
+  expect(isLatLon(position)).toBe(true);
+  return verdict === null ? null : hurryShort(verdict, { now: ASKED_AT_S, clock: FIXTURE_CLOCK });
 }
 
 describe('a plan from the rider\'s own location and its hurry chips (mfix8 fix round, F2)', () => {
@@ -231,11 +247,39 @@ describe('a plan from the rider\'s own location and its hurry chips (mfix8 fix r
     expect(haversineMeters(away, START)).toBeGreaterThan(CHIP_ROUTED_START_M);
     await act(async () => moveRider?.(away));
     await settle(1);
-    const verdict = routeOptions(fixtureItineraries(), FIXTURE_NETWORK, { position: away, nowS: ASKED_AT_S, pace: PACE })[0]?.verdict ?? null;
-    expect(verdict).not.toBeNull();
-    expect(firstChip(tree).text).toBe(verdict === null ? null : hurryShort(verdict, { now: ASKED_AT_S, clock: FIXTURE_CLOCK }));
+    expect(firstChip(tree).text).toBe(chipAt(away));
     expect(firstChip(tree).text).not.toBe('Chill · 1 min spare');
     // Following the rider never re-plans: the sheet asked Transitous once.
+    expect(jest.mocked(expoFetch)).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** A rider `metres` from the fixture's START, straight toward the Government Center Mover (where option 0 boards). */
+function towardTheMover(metres: number): LatLon {
+  const share = metres / haversineMeters(START, STATION_AT);
+  const rider = { latitude: START.latitude + (STATION_AT.latitude - START.latitude) * share, longitude: START.longitude + (STATION_AT.longitude - START.longitude) * share };
+  expect(haversineMeters(START, rider)).toBeCloseTo(metres, 0);
+  expect(share).toBeLessThan(1);
+  return rider;
+}
+
+describe('the hurry chip walks from the freshest fix (mfix8 cleanup)', () => {
+  it('a watch fix older than the plan fix keeps the routed walk from the start until a newer watch fix moves the rider', async () => {
+    // The watch reports only every WATCH_DISTANCE_M, so its latest fix can be older than the one the sheet took as it
+    // opened. Here it was taken 30 s before, 80 m off the plan's start (beyond CHIP_ROUTED_START_M) toward the Mover:
+    // read from there the chip would promise more spare than the street walk gives.
+    const stale = towardTheMover(80);
+    expect(haversineMeters(stale, START)).toBeGreaterThan(CHIP_ROUTED_START_M);
+    expect(chipAt(stale)).not.toBe('Chill · 1 min spare');
+    const tree = await routeFromMyLocation(stale, Date.now() - 30_000);
+    // The sheet's own fix is the freshest: the chip walks the 324 m Transitous routed from the plan's start.
+    expect(firstChip(tree).text).toBe('Chill · 1 min spare');
+    // A fix the watch takes AFTER the sheet's, 300 m south: the chip follows the rider (mfix5's straight line × 1.3).
+    const away = southOfStart(300);
+    await act(async () => moveRider?.(away));
+    await settle(1);
+    expect(firstChip(tree).text).toBe(chipAt(away));
+    expect(firstChip(tree).text).not.toBe('Chill · 1 min spare');
     expect(jest.mocked(expoFetch)).toHaveBeenCalledTimes(1);
   });
 });

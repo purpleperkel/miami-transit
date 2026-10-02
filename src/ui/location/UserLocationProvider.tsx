@@ -10,6 +10,7 @@ import {
   LOCATING,
   positionOf,
   type SharedLocation,
+  takenAtOf,
   unlocated,
   type UserLocation,
   type UserPosition,
@@ -95,7 +96,7 @@ async function watchPosition(watch: Watch, report: Report): Promise<Unwatch | nu
     return null;
   }
   const options = { accuracy: Location.Accuracy.Balanced, distanceInterval: WATCH_DISTANCE_M };
-  const subscription = await Location.watchPositionAsync(options, (fix) => report.publish(fixed(positionOf(fix))), (reason) => report.publish(unlocated(reason)));
+  const subscription = await Location.watchPositionAsync(options, (fix) => report.publish(fixed(positionOf(fix), takenAtOf(fix))), (reason) => report.publish(unlocated(reason)));
   invariant(typeof subscription.remove === 'function', 'expo-location returns a removable watch');
   return subscription;
 }

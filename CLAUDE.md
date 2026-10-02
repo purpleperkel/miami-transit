@@ -46,6 +46,12 @@ SDK 57; never trust memory for Expo APIs).
 - Location (mfix6, 2026-10-02): ONE app-wide `UserLocationProvider` (src/ui/location/) owns the only `watchPositionAsync`;
   any test rendering something that reads the rider's position (`useUserPosition`) must wrap it in `<UserLocationProvider>`
   or it throws by design. Never open a second watch.
+- Network (mfix10, 2026-10-02): the live runtime owns the app's ONE expo-network watch (src/live/network-watch.ts),
+  which LiveDataProvider hands it. Any test that renders the real `LiveDataProvider` needs a labelled
+  `// test-time mock of native module` expo-network mock whose `addNetworkStateListener` returns a subscription with
+  `remove()`: jest-expo's automock returns a Promise instead, and the watch refuses it with an invariant. The watch
+  asks `getNetworkStateAsync` on every resume (the mount while active included) and discards the old reading first,
+  so the resume tick itself always runs with no reading (off Wi-Fi: Swiftly gated).
 - `babel.config.js` exists because jest-expo 57.0.5's `jest-expo/ios` preset needs Expo's babel preset
   to parse React Native's jest setup. TypeScript 6 defaults `types` to `[]` — the tsconfigs set it explicitly.
 

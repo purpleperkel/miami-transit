@@ -117,39 +117,41 @@ export function networkState(type: string | null): NetworkState {
 export type FakeListener = { readonly listener: (state: NetworkState) => void; removed: boolean };
 
 /**
- * The phone's network, standing in for expo-network as a runtime's `networkSource`: the first answer
- * is networkState(`first`), or never lands for 'never'; `emit` plays a network change to every listener
- * still subscribed. It counts the first-answer asks and keeps every listener it handed out.
+ * The phone's network, standing in for expo-network as a runtime's `networkSource`: every ask
+ * (getNetworkStateAsync, made on each resume) answers networkState(`answer`), or never lands for
+ * 'never'; a test sets `answer` to move the phone with no listener event (as when the app is in the
+ * background), and `emit` plays a network change to every listener still subscribed. It counts the
+ * asks and keeps every listener it handed out.
  */
 export class FakeNetwork implements NetworkSource {
   readonly listeners: FakeListener[] = [];
   asks = 0;
 
-  constructor(private readonly first: string | null | 'never') {
-    expect(first === null || first.length > 0).toBe(true);
-    expect(this.listeners).toEqual([]);
+  constructor(public answer: string | null | 'never') {
+    expect(answer === null || answer.length > 0).toBe(true);
+    expect(answer === null || answer === 'never' || /^[A-Z]+$/.test(answer)).toBe(true); // an expo-network type name
   }
 
   getNetworkStateAsync(): Promise<NetworkState> {
     this.asks += 1;
-    expect(this.asks).toBeGreaterThan(0);
-    expect(this.first).not.toBe('');
-    return this.first === 'never' ? new Promise<NetworkState>(() => undefined) : Promise.resolve(networkState(this.first));
+    expect(this.answer === null || this.answer.length > 0).toBe(true);
+    expect(this.open().length).toBeGreaterThan(0);
+    return this.answer === 'never' ? new Promise<NetworkState>(() => undefined) : Promise.resolve(networkState(this.answer));
   }
 
   addNetworkStateListener(listener: (state: NetworkState) => void): { remove(): void } {
+    expect(typeof listener).toBe('function');
+    expect(this.open()).toHaveLength(0); // the app's ONE watch: never a second subscription while one is open
     const entry: FakeListener = { listener, removed: false };
     this.listeners.push(entry);
-    expect(typeof listener).toBe('function');
-    expect(this.listeners).toContain(entry);
     return { remove: () => void (entry.removed = true) };
   }
 
   /** The listeners still subscribed. */
   open(): FakeListener[] {
     const open = this.listeners.filter((entry) => !entry.removed);
-    expect(open.length).toBeLessThanOrEqual(this.listeners.length);
-    expect(open.every((entry) => !entry.removed)).toBe(true);
+    expect(open.length).toBeLessThanOrEqual(1); // one watch at a time
+    expect(this.listeners.every((entry) => typeof entry.listener === 'function')).toBe(true);
     return open;
   }
 

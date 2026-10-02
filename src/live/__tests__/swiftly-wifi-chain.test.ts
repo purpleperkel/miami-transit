@@ -1,7 +1,7 @@
 import { LIVE_TRIP_UPDATES_FIXTURE_BYTES, LIVE_VEHICLES_FIXTURE_BYTES } from '../../domain/gtfsrt/__fixtures__/live-feeds.fixture';
 import { DEPARTURES_9513 } from '../../domain/live/__fixtures__/transitland-departures.fixture';
 import { HEARTBEAT_MS, PROVIDER_CONFIG } from '../../domain/live/constants';
-import type { FetchFn, HttpInit } from '../http';
+import type { FetchFn, FetchResponseLike, HttpInit } from '../http';
 import type { SecretStore } from '../keys';
 import type { SyncKeyValue } from '../quota-store';
 import { LiveRuntime, type LiveState } from '../runtime';
@@ -14,7 +14,8 @@ import { bytesOf, departuresUrl, FakeNetwork, FakeServer, runtimeNetwork, SWIFTL
  * (fake) keys. Both providers are answered by a fake server through a call spy on fetch, which records
  * each request and its instant; the phone's network is a FakeNetwork (the runtime's `networkSource`);
  * the setting is the real module over an in-memory kv store; the heartbeat is the real AppState-gated
- * binding on jest's fake clock, stepped one heartbeat (1 s) at a time.
+ * binding on jest's fake clock, stepped one heartbeat (1 s) at a time. The app stays active, unless a
+ * test moves it through a HandAppState; a test can hold Swiftly's downloads open and then cut them.
  */
 
 const STATION = 'rail:government-ctr';
@@ -23,9 +24,11 @@ const SWIFTLY_CADENCE_S = PROVIDER_CONFIG.swiftly.cadenceS;
 const ACTIVE: AppStateSource = { currentState: 'active', addEventListener: () => ({ remove: () => undefined }) };
 
 type Provider = 'swiftly' | 'transitland';
+type AppStatus = NonNullable<AppStateSource['currentState']>;
 type Request = { readonly url: string; readonly provider: Provider; readonly capability: 'vehicles' | 'predictions'; readonly atS: number };
 type Chain = {
   readonly network: FakeNetwork;
+  readonly downloads: HeldDownloads;
   /** The call spy: every fetch the runtime makes, to either provider. */
   readonly fetch: jest.Mock<ReturnType<FetchFn>, Parameters<FetchFn>>;
   readonly requests: Request[];
@@ -45,6 +48,50 @@ afterEach(() => {
   teardowns.splice(0).forEach((teardown) => teardown());
   jest.useRealTimers();
 });
+
+/** The app's foreground state, moved by the test as iOS moves it; the real AppState-gated binding listens to it. */
+class HandAppState implements AppStateSource {
+  currentState: AppStatus = 'active';
+  private readonly listeners: ((state: AppStatus) => void)[] = [];
+
+  addEventListener(type: 'change', listener: (state: AppStatus) => void): { remove(): void } {
+    expect(type).toBe('change');
+    expect(this.listeners).toHaveLength(0); // one binding per runtime
+    this.listeners.push(listener);
+    return { remove: () => void this.listeners.splice(this.listeners.indexOf(listener), 1) };
+  }
+
+  /** The app moves to `state`: the binding hears it (becoming active resumes the runtime at once). */
+  set(state: AppStatus): void {
+    expect(this.listeners).toHaveLength(1);
+    expect(state).not.toBe(this.currentState);
+    this.currentState = state;
+    this.listeners.forEach((listener) => listener(state));
+  }
+}
+
+/** Swiftly downloads the test holds open while `holding`, then cuts, as leaving Wi-Fi does mid-download. */
+class HeldDownloads {
+  holding = false;
+  private readonly cuts: ((error: Error) => void)[] = [];
+
+  /** A download that hangs until cutAll(). */
+  hold(): Promise<FetchResponseLike> {
+    expect(this.holding).toBe(true);
+    expect(this.cuts.length).toBeLessThan(2); // polls never overlap: at most Swiftly's vehicles and its one shared trip-updates fetch
+    return new Promise<FetchResponseLike>((_resolve, reject) => void this.cuts.push(reject));
+  }
+
+  /** Fails every held download (the Wi-Fi went away under it) and stops holding; how many there were. */
+  cutAll(): number {
+    expect(this.holding).toBe(true);
+    const cut = this.cuts.splice(0);
+    expect(cut.length).toBeGreaterThan(0);
+    cut.forEach((reject) => reject(new Error('the Wi-Fi went away mid-download')));
+    this.holding = false;
+    return cut.length;
+  }
+}
 
 /** Every URL either provider answers, from the committed synthetic fixtures. */
 function bothProviders(): FakeServer {
@@ -70,10 +117,11 @@ function classify(url: string): Pick<Request, 'provider' | 'capability'> {
 }
 
 /**
- * A started runtime with both keys, watching one station, on the network whose first answer is
- * `first` (FakeNetwork's); `wifiOnly` null leaves the setting unwritten (its default, ON).
+ * A started runtime with both keys, watching one station, on the network whose answer is `first`
+ * (FakeNetwork's); `wifiOnly` null leaves the setting unwritten (its default, ON); `app` is the app's
+ * foreground state (active throughout by default).
  */
-function chainRig(first: string | null | 'never', wifiOnly: boolean | null = null): Chain {
+function chainRig(first: string | null | 'never', wifiOnly: boolean | null = null, app: AppStateSource = ACTIVE): Chain {
   const keychain = new Map([['live.key.swiftly', 'fake-swiftly-chain-key'], ['live.key.transitland', 'fake-transitland-chain-key']]);
   const secrets: SecretStore = { getItemAsync: (key) => Promise.resolve(keychain.get(key) ?? null), setItemAsync: () => Promise.resolve(), deleteItemAsync: () => Promise.resolve() };
   const items = new Map<string, string>();
@@ -83,9 +131,10 @@ function chainRig(first: string | null | 'never', wifiOnly: boolean | null = nul
   }
   const server = bothProviders();
   const requests: Request[] = [];
+  const downloads = new HeldDownloads();
   const fetch = jest.fn((url: string, init: HttpInit) => {
     requests.push({ url, ...classify(url), atS: Date.now() / 1000 });
-    return server.fetch(url, init);
+    return downloads.holding && classify(url).provider === 'swiftly' ? downloads.hold() : server.fetch(url, init);
   });
   const quota = new Map<string, number>();
   const network = new FakeNetwork(first);
@@ -93,9 +142,9 @@ function chainRig(first: string | null | 'never', wifiOnly: boolean | null = nul
   const quotaStore = { get: (key: string) => quota.get(key) ?? null, set: (key: string, n: number) => void quota.set(key, n) };
   const runtime = new LiveRuntime({ network: runtimeNetwork(), onChange: (state) => void states.push(state), fetch, keychain: secrets, quotaStore, networkSource: network, swiftlyWifiOnly: () => readSwiftlyWifiOnly(settings) });
   runtime.watchStations([STATION]);
-  teardowns.push(bindRuntime(runtime, ACTIVE, HEARTBEAT_MS));
+  teardowns.push(bindRuntime(runtime, app, HEARTBEAT_MS));
   expect(network.open()).toHaveLength(1);
-  return { network, fetch, requests, states, quota };
+  return { network, downloads, fetch, requests, states, quota };
 }
 
 /** Steps the fake clock `seconds` heartbeats, one at a time, letting each tick's requests finish. */
@@ -247,6 +296,45 @@ describe('Swiftly only on Wi-Fi (mfix10): the chain as the network changes', () 
     const back = chain.requests.length;
     chain.network.emit('WIFI');
     expect(await nextFetches(chain, back, 1)).toEqual({ vehicles: 'swiftly', predictions: 'swiftly' });
+    await stepS(1);
+    expectServing(chain, 'swiftly');
+  });
+});
+
+describe('Swiftly only on Wi-Fi (mfix10): a resume and a cut download', () => {
+  it('a resume discards the wi-fi reading, so leaving wi-fi in the background sends swiftly nothing', async () => {
+    const app = new HandAppState();
+    const chain = chainRig('WIFI', null, app);
+    await stepS(40);
+    expectServing(chain, 'swiftly');
+    app.set('background');
+    chain.network.answer = 'CELLULAR'; // the phone leaves Wi-Fi while the app is suspended: no listener event reaches it
+    await stepS(120);
+    const resumed = chain.requests.length;
+    app.set('active'); // the resume tick runs here, before the fresh answer can land
+    await stepS(65);
+    expect([chain.network.asks, swiftlyCalls(chain, resumed)]).toEqual([2, 0]);
+    expect([firstTo(chain, resumed, 'vehicles'), firstTo(chain, resumed, 'predictions')]).toEqual(['transitland', 'transitland']);
+    expectServing(chain, 'transitland');
+  });
+
+  it('a swiftly poll cut by leaving wi-fi records no failure, so swiftly serves at the next tick back on wi-fi', async () => {
+    const chain = chainRig('WIFI');
+    await stepS(40);
+    await toEveOfSwiftlyPoll(chain);
+    chain.downloads.holding = true;
+    const cut = chain.requests.length;
+    await stepS(1); // Swiftly's next poll starts on Wi-Fi, for both capabilities, and hangs
+    chain.network.emit('CELLULAR');
+    await stepS(1); // gated now: no new Swiftly request, and the two in flight may still finish
+    expect([chain.downloads.cutAll(), swiftlyCalls(chain, cut)]).toEqual([2, 2]); // they fail while Swiftly is gated
+    await stepS(SWIFTLY_CADENCE_S); // past Swiftly's 30 s share of the cut trip-updates fetch, so the return asks afresh
+    expectServing(chain, 'transitland');
+    const [states, requests] = [chain.states.length, chain.requests.length];
+    chain.network.emit('WIFI');
+    expect(await nextFetches(chain, requests, 1)).toEqual({ vehicles: 'swiftly', predictions: 'swiftly' });
+    const takeover = chain.states.slice(states).find((state) => state.status.vehicles.provider === 'swiftly');
+    expect([takeover?.status.vehicles.consecutiveFailures, takeover?.status.predictions.consecutiveFailures, swiftlyCalls(chain, cut)]).toEqual([0, 0, 4]);
     await stepS(1);
     expectServing(chain, 'swiftly');
   });

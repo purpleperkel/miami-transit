@@ -132,8 +132,8 @@ function KeyEditor({ provider, live }: { readonly provider: ProviderId; readonly
 function WifiOnlySwitch() {
   const [wifiOnly, setWifiOnly] = useState(() => readSwiftlyWifiOnly());
   const [notice, setNotice] = useState<Notice | null>(null);
-  invariant(typeof wifiOnly === 'boolean', 'the switch is on or off');
   invariant(notice === null || notice.tone === 'error', 'the switch speaks up only when a save fails');
+  invariant(notice === null || wifiOnly === readSwiftlyWifiOnly(), 'after a refused save the switch shows the setting still in effect');
   const onValueChange = (value: boolean) => {
     const saved = saveSwiftlyWifiOnly(value);
     invariant(!saved.ok || saved.value === value, 'a saved setting reads back as toggled');

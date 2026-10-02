@@ -10,7 +10,8 @@ import { FakeNetwork, FakeServer, runtimeNetwork, SWIFTLY_VEHICLES_URL, TL_VEHIC
  * M4.9: the runtime end to end — Keychain → chain → HTTP → decoder → mapper → published state —
  * over a fake server, an in-memory Keychain and quota store, and a manual clock. Keys are fake. The
  * phone is on Wi-Fi and "Use Swiftly only on Wi-Fi" is at its default (ON, mfix10), so a keyed Swiftly
- * serves as it always has; swiftly-wifi-chain.test.ts covers the phone off Wi-Fi.
+ * serves as it always has; swiftly-wifi-chain.test.ts covers the phone off Wi-Fi. The runtime reads the
+ * network on resume (the app becoming active); a test that only ticks hears Wi-Fi from a network event.
  */
 
 const OCT_1 = Date.UTC(2026, 9, 1, 12) / 1000;
@@ -18,6 +19,7 @@ const TL_KEY = 'fake-transitland-key-for-runtime-test';
 
 type Rig = {
   readonly runtime: LiveRuntime;
+  readonly network: FakeNetwork;
   readonly server: FakeServer;
   readonly states: LiveState[];
   readonly keychain: Map<string, string>;
@@ -39,12 +41,13 @@ function rig(items: Readonly<Record<string, string>> = { 'live.key.transitland':
   };
   const quotaStore: QuotaStore = { get: (key) => quota.get(key) ?? null, set: (key, count) => void quota.set(key, count) };
   const settings = new Map<string, string>();
-  const wifi = { networkSource: new FakeNetwork('WIFI'), swiftlyWifiOnly: () => readSwiftlyWifiOnly({ getItemSync: (key) => settings.get(key) ?? null, setItemSync: (key, value) => void settings.set(key, value) }) };
+  const network = new FakeNetwork('WIFI');
+  const wifi = { networkSource: network, swiftlyWifiOnly: () => readSwiftlyWifiOnly({ getItemSync: (key) => settings.get(key) ?? null, setItemSync: (key, value) => void settings.set(key, value) }) };
   const options = { network: runtimeNetwork(), onChange: (state: LiveState) => void states.push(state), fetch: server.fetch, keychain: secretStore, quotaStore, nowS: () => clock.now, ...wifi };
   const runtime = new LiveRuntime(options);
   expect(runtime.isStarted()).toBe(false);
   expect(states).toEqual([]);
-  return { runtime, server, states, keychain, quota, clock };
+  return { runtime, network, server, states, keychain, quota, clock };
 }
 
 /** Lets the Keychain read, fetches and bookkeeping finish. */
@@ -104,9 +107,10 @@ describe('LiveRuntime (M4.9): start and polling', () => {
 
 describe('LiveRuntime (M4.9): keys and lifecycle', () => {
   it('saveKey puts a pasted key in effect at once (Swiftly takes over); a bad paste changes nothing', async () => {
-    const { runtime, states, server, keychain } = rig();
+    const { runtime, network, states, server, keychain } = rig();
     server.on(SWIFTLY_VEHICLES_URL, { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES });
     runtime.start();
+    network.emit('WIFI');
     await settle();
     const refused = await runtime.saveKey('swiftly', 'two words');
     expect(refused.ok).toBe(false);

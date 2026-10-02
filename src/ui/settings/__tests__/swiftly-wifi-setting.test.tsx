@@ -41,7 +41,10 @@ function bothProviders(): FakeServer {
   return server;
 }
 
-/** One heartbeat (resume() the first time, as the app does on becoming active); then the clock moves on and the screen redraws. */
+/**
+ * One heartbeat (resume() the first time, as the app does on becoming active: the network is read
+ * afresh, so that first tick runs with no reading, off Wi-Fi); then the clock moves on and the screen redraws.
+ */
 async function beat(rig: LiveRig, screen: SettingsScreen, first: boolean, thenAdvanceS: number): Promise<void> {
   expect(rig.runtime.isStarted()).toBe(true);
   await act(async () => {
@@ -123,7 +126,8 @@ describe('Data & Settings (mfix10): the status rows and the footer', () => {
     const network = new FakeNetwork('WIFI');
     const rig = await liveRig({ keychain: BOTH_KEYS, fetch: bothProviders().fetch, network });
     const screen = await renderSettings(rig);
-    await beat(rig, screen, true, 5);
+    await beat(rig, screen, true, 0);
+    await beat(rig, screen, false, 5);
     expect(screen.textOf('provider-status-swiftly')).toMatch(LIVE_HEALTH);
     await act(async () => network.emit('CELLULAR'));
     await beat(rig, screen, false, 5);
@@ -135,8 +139,9 @@ describe('Data & Settings (mfix10): the status rows and the footer', () => {
     const network = new FakeNetwork('WIFI');
     const rig = await liveRig({ keychain: BOTH_KEYS, fetch: bothProviders().fetch, network });
     const screen = await renderSettings(rig);
-    await beat(rig, screen, true, 5);
-    expect(screen.textOf('provider-status-transitland')).toBe('Standby · Swiftly serves');
+    await beat(rig, screen, true, 0);
+    await beat(rig, screen, false, 5);
+    expect(screen.textOf('provider-status-transitland')).toMatch(/^Standby · Swiftly serves( · |$)/);
     await act(async () => network.emit('CELLULAR'));
     await beat(rig, screen, false, 12);
     expect(screen.textOf('provider-status-transitland')).toMatch(LIVE_HEALTH);

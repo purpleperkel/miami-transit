@@ -25,15 +25,17 @@ import { readSwiftlyWifiOnly } from './swiftly-wifi';
  * publishes its LiveState; use-live-polling.ts starts and stops it.
  *
  * mfix10 "Use Swiftly only on Wi-Fi": the runtime owns the app's one network watch (network-watch.ts,
- * over the `networkSource` live-context.tsx passes: expo-network) and starts and stops it with itself;
- * a runtime given no source has no reading, so the phone counts as off Wi-Fi. Every time the chain
- * takes the providers' standings (each poll tick, each finished poll) the gate is read afresh: the
- * rider's setting from its kv item (swiftly-wifi.ts, ON by default) and the watch's latest reading.
- * With the setting on and the phone off Wi-Fi, Swiftly stands in the chain exactly as if it had no
- * key, for both capabilities: no request starts, no call is metered, no failure or backoff accrues,
- * and Transitland serves. The Keychain still holds the key, so `hasKey` and `keyHints` still show it,
- * and `swiftlyGated` says why it is not serving. A request already in flight when the gate closes
- * finishes normally.
+ * over the `networkSource` live-context.tsx passes: expo-network), starts and stops it with itself, and
+ * refreshes it on every resume: back from the background the reading is discarded (so Swiftly is gated)
+ * and asked afresh, since the phone may have left Wi-Fi while the app was suspended. A runtime given
+ * no source has no reading, so the phone counts as off Wi-Fi. Every time the chain takes the
+ * providers' standings (each poll tick, each finished poll) the gate is read afresh: the rider's
+ * setting from its kv item (swiftly-wifi.ts, ON by default) and the watch's latest reading. With the
+ * setting on and the phone off Wi-Fi, Swiftly stands in the chain exactly as if it had no key, for
+ * both capabilities: no request starts, no call is metered, no failure or backoff accrues, and
+ * Transitland serves. The Keychain still holds the key, so `hasKey` and `keyHints` still show it, and
+ * `swiftlyGated` says why it is not serving. A request already in flight when the gate closes may
+ * finish, and the chain records nothing for it (poller.ts finish).
  *
  * LIFECYCLE: constructing a runtime does nothing observable. `start()` makes a fresh poller, loads
  * the keys and begins publishing; `stop()` aborts the poller's requests and publishing stops. A
@@ -125,9 +127,10 @@ export class LiveRuntime {
     return started;
   }
 
-  /** Starts polling machinery and publishing; loads the keys from the Keychain. */
+  /** Starts the network watch, the polling machinery and publishing; loads the keys from the Keychain. */
   start(): void {
     invariant(!this.isStarted(), 'the runtime is started once at a time');
+    this.watch?.start(); // first: the gate reads the watch whenever the poller asks for standings
     const poller = new LivePoller({
       providers: this.providers,
       standings: () => this.standings(),
@@ -137,7 +140,6 @@ export class LiveRuntime {
     });
     this.poller = poller;
     poller.watchStations(this.stations);
-    this.watch?.start();
     this.emit();
     detach(this.loadKeys(), (message) => this.reportBug(message));
     invariant(this.isStarted(), 'the runtime is started');
@@ -157,16 +159,20 @@ export class LiveRuntime {
   tick(): void {
     invariant(this.poller !== null, 'only a started runtime ticks');
     this.poller.tick();
-    if (this.swiftlyGated() !== this.publishedGate) {
-      this.emit(); // the gate moved but no chain status did (Swiftly benched for failing: Transitland serves either way)
-    }
+    this.publishGateMove();
     invariant(this.isStarted(), 'a tick keeps the runtime started');
   }
 
-  /** Back from the background. */
+  /**
+   * Back from the background (and on mount, as the app becomes active): the network reading is
+   * discarded and asked afresh, so Swiftly stays gated until a fresh answer says Wi-Fi; then every
+   * task is due again and the chain resolves at once.
+   */
   resume(): void {
     invariant(this.poller !== null, 'only a started runtime resumes');
+    this.watch?.refresh();
     this.poller.resume();
+    this.publishGateMove();
     invariant(this.isStarted(), 'resuming keeps the runtime started');
   }
 
@@ -259,24 +265,37 @@ export class LiveRuntime {
 
   /**
    * Whether "Use Swiftly only on Wi-Fi" holds a keyed Swiftly back now: the setting is on and the phone
-   * is off Wi-Fi (or has no reading yet). Read afresh on every call, never cached: the setting from its
-   * kv item, the network from the watch's latest reading.
+   * is off Wi-Fi (or has no reading: none yet, or discarded by a resume). Read afresh on every call,
+   * never cached: the setting from its kv item (only when Swiftly has a key), the network from the
+   * watch's latest reading.
    */
   private swiftlyGated(): boolean {
-    const reading = this.watch === null ? null : this.watch.reading();
-    const gated = this.keys.swiftly !== null && !swiftlyAllowed({ wifiOnly: this.wifiOnly(), onWifi: isOnWifi(reading) });
-    invariant(!gated || this.keys.swiftly !== null, 'only a keyed Swiftly is held back');
-    invariant(!gated || !isOnWifi(reading), 'Swiftly is held back only off Wi-Fi');
-    return gated;
+    invariant(this.watch === null || this.watch.listening, 'the gate is read only while the runtime runs, its network watch listening');
+    if (this.keys.swiftly === null) {
+      return false; // nothing to hold back, so the setting is not even read
+    }
+    const wifiOnly = this.wifiOnly();
+    invariant(typeof wifiOnly === 'boolean', 'the Wi-Fi only setting reads on or off');
+    return !swiftlyAllowed({ wifiOnly, onWifi: isOnWifi(this.watch === null ? null : this.watch.reading()) });
+  }
+
+  /** Publishes when the Swiftly gate moved but no chain status did (e.g. Swiftly benched for failing: Transitland serves either way). */
+  private publishGateMove(): void {
+    invariant(this.poller !== null, 'only a running runtime publishes');
+    const gated = this.swiftlyGated();
+    if (gated !== this.publishedGate) {
+      this.emit();
+    }
+    invariant(this.publishedGate === gated, 'the published state shows the gate in effect');
   }
 
   /** Every provider's standing for the chain: key present (a gated Swiftly stands as key-less), capabilities, calls this month. */
   private standings(): Standings {
+    invariant(this.poller !== null, 'the chain takes standings only while the runtime runs');
     const nowS = this.nowS();
     const gated = this.swiftlyGated();
     const standings = { swiftly: this.standing('swiftly', nowS, gated), transitland: this.standing('transitland', nowS, false) };
-    invariant(PROVIDER_IDS.every((id) => standings[id].callsThisMonth >= 0), 'call counts are never negative');
-    invariant(PROVIDER_IDS.every((id) => standings[id].hasKey === (this.keys[id] !== null && !(id === 'swiftly' && gated))), 'a standing reflects the Keychain and the Wi-Fi gate');
+    invariant(PROVIDER_IDS.every((id) => Number.isSafeInteger(standings[id].callsThisMonth) && standings[id].callsThisMonth >= 0), 'call counts are whole and never negative');
     return standings;
   }
 

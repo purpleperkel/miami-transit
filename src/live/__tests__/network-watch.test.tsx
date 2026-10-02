@@ -45,17 +45,17 @@ const trees: ReactTestRenderer[] = [];
 /** expo-network's first answer: networkState(mockNet.first). */
 function mockGetNetworkState(): Promise<NetworkState> {
   mockNet.asks += 1;
-  expect(mockNet.asks).toBeGreaterThan(0);
   expect(mockNet.first.length).toBeGreaterThan(0);
+  expect(mockNet.listeners.filter((entry) => entry.remove.mock.calls.length === 0)).toHaveLength(1); // asked only while the one watch listens
   return Promise.resolve(networkState(mockNet.first));
 }
 
 /** expo-network's listener, handing back a subscription whose remove() is counted. */
 function mockAddNetworkListener(listener: (state: NetworkState) => void): { remove: jest.Mock } {
+  expect(typeof listener).toBe('function');
+  expect(mockNet.listeners.filter((entry) => entry.remove.mock.calls.length === 0)).toHaveLength(0); // the app's ONE watch
   const entry = { listener, remove: jest.fn() };
   mockNet.listeners.push(entry);
-  expect(typeof listener).toBe('function');
-  expect(mockNet.listeners).toContain(entry);
   return { remove: entry.remove };
 }
 

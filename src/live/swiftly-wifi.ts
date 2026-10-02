@@ -25,9 +25,8 @@ export const SWIFTLY_WIFI_ONLY_ITEM = 'settings.swiftly-wifi-only';
 export function readSwiftlyWifiOnly(store: SyncKeyValue = Storage): boolean {
   invariant(typeof store.getItemSync === 'function', 'the setting is read synchronously from the kv store');
   const stored = store.getItemSync(SWIFTLY_WIFI_ONLY_ITEM);
-  const value = stored === 'true' ? true : stored === 'false' ? false : DEFAULT_SWIFTLY_WIFI_ONLY;
-  invariant(stored === String(value) || value === DEFAULT_SWIFTLY_WIFI_ONLY, 'only a value this module writes overrides the default');
-  return value;
+  invariant(stored === null || typeof stored === 'string', 'the kv store answers a string, or null for no item');
+  return stored === 'true' ? true : stored === 'false' ? false : DEFAULT_SWIFTLY_WIFI_ONLY;
 }
 
 /** Stores the setting in its one item and returns it as read back; a kv-store failure is a `storage` error and stores nothing. */

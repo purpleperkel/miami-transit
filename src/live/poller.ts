@@ -18,7 +18,8 @@ import { detach } from './detach';
  *    once. Each task polls at its provider's cadence, never overlapping, backing off on failure
  *    (m4a scheduler.ts; a 429 doubles the interval).
  *  - Every finished poll is recorded in the chain (3 failures in a row → failing / failover) and
- *    published as a new immutable snapshot through `onChange`.
+ *    published as a new immutable snapshot through `onChange` — except a poll whose provider stands
+ *    key-less when it ends (mfix10: Swiftly gated off Wi-Fi meanwhile), which the chain never records.
  *  - When a capability's serving provider CHANGES (failover, a re-probe of the primary after 300 s,
  *    a better provider's key pasted), each idle task of it is due at once: the new provider owes
  *    nothing to the old one's backoff or cadence, so a failover never waits out a dead provider.
@@ -191,8 +192,7 @@ export class LivePoller {
     invariant(this.abort.signal.aborted, 'polls in flight see the abort');
   }
 
-  private resolve(nowS: number): Readonly<Record<Capability, ChainResolution>> {
-    const standings = this.deps.standings();
+  private resolve(nowS: number, standings: Standings = this.deps.standings()): Readonly<Record<Capability, ChainResolution>> {
     const resolutions = { vehicles: resolveChain(this.chain, 'vehicles', standings, nowS), predictions: resolveChain(this.chain, 'predictions', standings, nowS) };
     invariant(resolutions.vehicles.provider === 'none' || standings[resolutions.vehicles.provider].hasKey, 'a keyed provider serves vehicles');
     invariant(resolutions.predictions.provider === 'none' || standings[resolutions.predictions.provider].hasKey, 'a keyed provider serves predictions');
@@ -263,17 +263,26 @@ export class LivePoller {
     return outcomeOf(result);
   }
 
-  /** Records a finished poll in the scheduler and the chain, then publishes. Ignored after dispose(). */
+  /**
+   * Records a finished poll in the scheduler and the chain, then publishes. Ignored after dispose().
+   * A provider that stands key-less when its poll ends is recorded nowhere in the chain: no failure, no
+   * success, so never benched (mfix10 fix round). That is Swiftly gated off Wi-Fi meanwhile — the poll
+   * started while it was allowed, and leaving Wi-Fi may have cut the download — or a key removed
+   * meanwhile. Its task still finishes in the scheduler, and the next tick hands it to whoever serves.
+   */
   private finish(id: string, capability: Capability, provider: ProviderId, outcome: PollOutcome): void {
     if (this.disposed) {
       return;
     }
     const nowS = this.clock.now();
+    const standings = this.deps.standings();
     this.scheduler = finishPoll(this.scheduler, id, outcome, nowS);
-    this.chain = recordPoll(this.chain, capability, provider, outcome === 'ok' ? 'ok' : 'failed', nowS);
+    if (standings[provider].hasKey) {
+      this.chain = recordPoll(this.chain, capability, provider, outcome === 'ok' ? 'ok' : 'failed', nowS);
+    }
     invariant(this.scheduler.get(id)?.inFlight !== true, `task ${id} is no longer in flight`);
-    invariant(outcome !== 'ok' || this.chain[capability][provider].consecutive === 0, 'a success clears the provider\'s failures');
-    this.publishStatus(this.resolve(nowS), true);
+    invariant(outcome !== 'ok' || !standings[provider].hasKey || this.chain[capability][provider].consecutive === 0, 'a recorded success clears the provider\'s failures');
+    this.publishStatus(this.resolve(nowS, standings), true);
   }
 
   private publishStatus(resolutions: Readonly<Record<Capability, ChainResolution>>, always: boolean): void {

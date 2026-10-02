@@ -20,16 +20,13 @@ const WIFI_TYPES: readonly string[] = Object.freeze(['WIFI', 'ETHERNET']);
 export function isOnWifi(state: NetworkReading | null): boolean {
   invariant(state === null || typeof state === 'object', 'a network reading is an object, or null before the first one');
   const type = state === null ? undefined : state.type;
-  const onWifi = typeof type === 'string' && WIFI_TYPES.includes(type);
-  invariant(!onWifi || type === 'WIFI' || type === 'ETHERNET', 'only WIFI and ETHERNET count as on Wi-Fi');
-  return onWifi;
+  invariant(type === undefined || typeof type === 'string', 'a reading names its network type as a string, or has none');
+  return type !== undefined && WIFI_TYPES.includes(type);
 }
 
 /** Swiftly may be asked unless the rider turned on "Use Swiftly only on Wi-Fi" and the phone is off Wi-Fi. */
 export function swiftlyAllowed({ wifiOnly, onWifi }: { readonly wifiOnly: boolean; readonly onWifi: boolean }): boolean {
   invariant(typeof wifiOnly === 'boolean', 'the Wi-Fi only setting is on or off');
   invariant(typeof onWifi === 'boolean', 'the phone is on Wi-Fi or not');
-  const allowed = !wifiOnly || onWifi;
-  invariant(allowed !== (wifiOnly && !onWifi), 'Swiftly is held back exactly when the setting is on and the phone is off Wi-Fi');
-  return allowed;
+  return !wifiOnly || onWifi;
 }

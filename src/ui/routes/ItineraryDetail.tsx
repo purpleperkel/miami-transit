@@ -23,6 +23,9 @@ import { linkingOpenURL, useOpenLink } from './use-open-link';
  *             under the button
  *   transit   its line badge (m6a's LineBadge, or the route's name), where it heads, the station it
  *             leaves from and the one to get off at, and whether its departure is Live or Scheduled
+ *
+ * A walk-only option (mfix7, Transitous's direct answer) is one walk leg: "Walk 8 min · no train needed"
+ * over it, and its "Directions" hand the whole trip to Apple Maps walking directions (dirflg=w).
  */
 
 const LIVE: Freshness = Object.freeze({ kind: 'live' });
@@ -51,7 +54,7 @@ export function ItineraryDetail({ option, network, names, clock, openURL = linki
         {facts.times}
       </TText>
       <TText testID="itinerary-facts" variant="subhead" tone="secondary">
-        {[facts.duration, facts.transfers, facts.walk].join(' · ')}
+        {facts.walkOnly ?? [facts.duration, facts.transfers, facts.walk].join(' · ')}
       </TText>
       {option.connectionAtRisk === null ? null : <ConnectionRisk testID="itinerary-risk" text={option.connectionAtRisk} />}
       {legs.map((_, j) => (

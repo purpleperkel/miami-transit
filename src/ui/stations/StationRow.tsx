@@ -20,7 +20,14 @@ export type StationRowProps = {
   readonly nowS: number;
   /** Opens the station sheet. */
   readonly onPress: (stationKey: string) => void;
+  /**
+   * What the row's test ids start with: 'station-row' in its mode's section, 'nearby-row' in the Nearby section
+   * (mfix7), where the same station is listed a second time and must not be counted twice.
+   */
+  readonly idPrefix?: StationRowIdPrefix;
 };
+
+export type StationRowIdPrefix = 'station-row' | 'nearby-row';
 
 /**
  * One station in the Stations list (plan M6.5 + R7): its name and how far away it is, the lines that
@@ -28,7 +35,7 @@ export type StationRowProps = {
  * time ("Dadeland South · 4 min"), straight from the bundled timetable. A row never asks for live
  * predictions; tapping it opens the station sheet, which does. VoiceOver reads the row as one sentence.
  */
-export function StationRow({ row, walkingMeters, nowS, onPress }: StationRowProps) {
+export function StationRow({ row, walkingMeters, nowS, onPress, idPrefix = 'station-row' }: StationRowProps) {
   invariant(row.lines.length > 0, `${row.stationKey} is served by a line`);
   invariant(walkingMeters === null || (Number.isFinite(walkingMeters) && walkingMeters >= 0), 'a walking distance is a non-negative number of metres');
   const distance = walkingMeters === null ? null : formatDistance(walkingMeters);
@@ -41,7 +48,7 @@ export function StationRow({ row, walkingMeters, nowS, onPress }: StationRowProp
   });
   return (
     <Pressable
-      testID={`station-row-${row.stationKey}`}
+      testID={`${idPrefix}-${row.stationKey}`}
       accessibilityRole="button"
       accessibilityLabel={label}
       onPress={() => onPress(row.stationKey)}
@@ -51,29 +58,29 @@ export function StationRow({ row, walkingMeters, nowS, onPress }: StationRowProp
           {row.name}
         </TText>
         {distance === null ? null : (
-          <TText testID={`station-row-distance-${row.stationKey}`} variant="subhead" tone="secondary">
+          <TText testID={`${idPrefix}-distance-${row.stationKey}`} variant="subhead" tone="secondary">
             {distance}
           </TText>
         )}
       </View>
-      <LineStrip lines={row.lines} testID={`station-row-lines-${row.stationKey}`} />
+      <LineStrip lines={row.lines} testID={`${idPrefix}-lines-${row.stationKey}`} />
       {times.length === 0 ? (
         <TText variant="footnote" tone="secondary">
           {copy.nothingSoon}
         </TText>
       ) : (
-        times.map(({ next, when }) => <NextLine key={next.directionId} stationKey={row.stationKey} next={next} when={when} />)
+        times.map(({ next, when }) => <NextLine key={next.directionId} id={`${idPrefix}-next-${row.stationKey}-${next.directionId}`} next={next} when={when} />)
       )}
     </Pressable>
   );
 }
 
 /** One direction's next departure: "Dadeland South · 4 min". */
-function NextLine({ stationKey, next, when }: { readonly stationKey: string; readonly next: NextDeparture; readonly when: string }) {
+function NextLine({ id, next, when }: { readonly id: string; readonly next: NextDeparture; readonly when: string }) {
   invariant(next.headsign.trim().length > 0, 'a departure says where it goes');
-  invariant(when.length > 0, 'a departure says when it leaves');
+  invariant(when.length > 0 && id.endsWith(`-${next.directionId}`), 'a departure says when it leaves, under its direction\'s id');
   return (
-    <View testID={`station-row-next-${stationKey}-${next.directionId}`} style={styles.next}>
+    <View testID={id} style={styles.next}>
       <TText variant="subhead" numberOfLines={1} style={styles.headsign}>
         {next.headsign}
       </TText>

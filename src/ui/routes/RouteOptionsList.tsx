@@ -11,7 +11,7 @@ import { LineBadge } from '../primitives/LineBadge';
 import { TText } from '../primitives/TText';
 import { RADIUS, SPACING } from '../tokens';
 import { openLink } from './leg-actions';
-import { badgeLabel, type LegBadge, optionFacts, type RouteClock, type RouteOption } from './route-options';
+import { badgeLabel, type LegBadge, type OptionFacts, optionFacts, type RouteClock, type RouteOption } from './route-options';
 import { linkingOpenURL, useOpenLink } from './use-open-link';
 
 /**
@@ -21,6 +21,9 @@ import { linkingOpenURL, useOpenLink } from './use-open-link';
  *   2:01 → 2:21                                   Chill · 2 min      ← the first leg's hurry chip
  *   20 min   No transfers   13 min walk
  *   [Brickell] [Orange]   ((·)) Live                                ← line badges, Live when overlaid
+ *
+ * A walk-only option (mfix7: Transitous's direct answer, when walking beats every train) reads
+ * "Walk 8 min · no train needed" under its times, with no badges, no Live badge and no hurry chip.
  *
  * A row opens its itinerary (ItineraryDetail) inside the sheet. Under the list, the attribution
  * Transitous's terms ask of an open client — "Routes by Transitous", linking its data sources — and the
@@ -61,7 +64,8 @@ type RowProps = { readonly option: RouteOption; readonly index: number; readonly
 function RouteOptionRow({ option, index, clock, ctx, onSelect }: RowProps) {
   const facts = optionFacts(option, clock);
   const id = `route-option-${index}`;
-  const label = [facts.times.replace('→', 'to'), facts.duration, facts.transfers, facts.walk, ...option.badges.map(badgeLabel), option.live ? 'Live' : null, option.connectionAtRisk]
+  const said = facts.walkOnly === null ? [facts.duration, facts.transfers, facts.walk] : [facts.walkOnly.replace(' · ', ', ')];
+  const label = [facts.times.replace('→', 'to'), ...said, ...option.badges.map(badgeLabel), option.live ? 'Live' : null, option.connectionAtRisk]
     .filter((part) => part !== null)
     .join(', ');
   invariant(label.length > facts.times.length, 'VoiceOver hears every fact of the row');
@@ -74,17 +78,7 @@ function RouteOptionRow({ option, index, clock, ctx, onSelect }: RowProps) {
         </TText>
         {option.verdict === null ? null : <HurryChip testID={`${id}-hurry`} verdict={option.verdict} ctx={ctx} />}
       </View>
-      <View style={styles.facts}>
-        <TText testID={`${id}-duration`} variant="subhead">
-          {facts.duration}
-        </TText>
-        <TText testID={`${id}-transfers`} variant="subhead" tone="secondary">
-          {facts.transfers}
-        </TText>
-        <TText testID={`${id}-walk`} variant="subhead" tone="secondary">
-          {facts.walk}
-        </TText>
-      </View>
+      <FactsLine id={id} facts={facts} />
       <View style={styles.badges}>
         {option.badges.map((badge, j) => (
           <LegBadgeView key={`${j}-${badgeLabel(badge)}`} badge={badge} testID={`${id}-badge-${j}`} />
@@ -93,6 +87,34 @@ function RouteOptionRow({ option, index, clock, ctx, onSelect }: RowProps) {
       </View>
       {option.connectionAtRisk === null ? null : <ConnectionRisk testID={`${id}-risk`} text={option.connectionAtRisk} />}
     </Pressable>
+  );
+}
+
+/** Under the times: the duration, transfers and walk of a ride — or, for a walk-only option, "Walk 8 min · no train needed". */
+function FactsLine({ id, facts }: { readonly id: string; readonly facts: OptionFacts }) {
+  invariant(id.startsWith('route-option-'), 'the facts belong to a row');
+  invariant(facts.duration.length > 0, 'an option takes a time');
+  if (facts.walkOnly !== null) {
+    return (
+      <View style={styles.facts}>
+        <TText testID={`${id}-walk-only`} variant="subhead">
+          {facts.walkOnly}
+        </TText>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.facts}>
+      <TText testID={`${id}-duration`} variant="subhead">
+        {facts.duration}
+      </TText>
+      <TText testID={`${id}-transfers`} variant="subhead" tone="secondary">
+        {facts.transfers}
+      </TText>
+      <TText testID={`${id}-walk`} variant="subhead" tone="secondary">
+        {facts.walk}
+      </TText>
+    </View>
   );
 }
 

@@ -31,6 +31,8 @@ export const HURRY_NOTES = Object.freeze({
   locating: 'Finding where you are for hurry or chill…',
   noLocation: 'Turn on location to see whether to hurry or chill.',
   far: (distance: string) => `You are ${distance} away, too far to hurry for a train.`,
+  /** mfix7: the station sheet while its station's first live predictions are on their way (no verdict yet). */
+  checking: 'Checking live times…',
 });
 
 /** The verdict a rider acts on: a MISSED verdict's nested one when a later train can be made, else itself. */

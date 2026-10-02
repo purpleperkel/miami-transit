@@ -131,6 +131,8 @@ export const copy = Object.freeze({
   timetableNotStarted: 'The timetable does not start yet.',
   /** Location is off or refused, so the list keeps its line order. */
   noLocation: 'Location is off, so stations are listed in line order.',
+  /** mfix7: the Stations tab's first section with a location, the nearest stations of any mode. */
+  nearby: 'Nearby',
   /** The vehicle sheet. */
   nextStops: 'Next stops',
   scheduledTimes: 'Scheduled times',
@@ -155,6 +157,8 @@ export const copy = Object.freeze({
   routeNoLocation: 'Location is off, so route options cannot start from where you are.',
   findingRoutes: 'Finding routes…',
   noRoutes: 'No route options for this trip right now.',
+  /** mfix7: a walk-only option (Transitous's direct answer, when walking beats every train), on its row and in its detail. */
+  walkOnlyOption: (duration: string) => `Walk ${duration} · no train needed`,
   routesUnavailable: 'Route options unavailable',
   openInAppleMaps: 'Open in Apple Maps',
   openInAppleMapsHint: 'Opens Apple Maps with transit directions to this place',

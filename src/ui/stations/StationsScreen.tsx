@@ -24,11 +24,19 @@ import { StationRow } from './StationRow';
  * RULE: a row costs zero Transitland calls); tapping a row opens the station sheet, which does. The
  * title is the tab's native large-title header (stations/_layout.tsx), which the ScrollView insets under.
  *
+ * mfix7 (Jamie's 07:10 recording: his nearest station, a Metromover stop, sat under every Metrorail row):
+ * with a location, a "Nearby" section comes first — the NEARBY_COUNT nearest stations of ANY mode, by the
+ * same orderStations, each the same row (distance, next scheduled departures) — then the two sections as
+ * before. Its rows carry 'nearby-row' test ids, since each station is also listed in its mode's section.
+ *
  *   StationsScreen (schedule DB, clock, location) → StationsView (props only, rendered in tests)
  */
 
 /** The list re-reads its next departures this often. */
 export const LIST_REFRESH_MS = 30_000;
+
+/** How many stations the Nearby section lists. */
+export const NEARBY_COUNT = 3;
 
 /** What the list can show: the schedule DB is still opening, failed to open, or the list. */
 export type StationsState =
@@ -74,6 +82,7 @@ export function StationsView({ state, nowS, location, onOpen }: StationsViewProp
       {state.kind === 'ready' ? (
         <>
           <ListNotes list={state.list} location={location} />
+          {location.coordinate === null ? null : <NearbySection list={state.list} location={location.coordinate} nowS={nowS} onOpen={onOpen} />}
           {state.list.sections.map((section) => (
             <Section key={section.mode} section={section} location={location.coordinate} nowS={nowS} onOpen={onOpen} />
           ))}
@@ -119,6 +128,28 @@ function Section({ section, location, nowS, onOpen }: { readonly section: Statio
       <View style={styles.list}>
         {ordered.map(({ station, walkingMeters }) => (
           <StationRow key={station.stationKey} row={station} walkingMeters={walkingMeters} nowS={nowS} onPress={onOpen} />
+        ))}
+      </View>
+    </View>
+  );
+}
+
+type NearbyProps = { readonly list: StationList; readonly location: LatLon; readonly nowS: number; readonly onOpen: (stationKey: string) => void };
+
+/** The NEARBY_COUNT nearest stations of any mode, nearest first: what the rider most likely wants, above the line order. */
+function NearbySection({ list, location, nowS, onOpen }: NearbyProps) {
+  const everyMode = list.sections.flatMap((section) => section.rows);
+  const nearest = orderStations(everyMode, location).slice(0, NEARBY_COUNT);
+  invariant(nearest.length > 0 && nearest.length <= NEARBY_COUNT, 'the Nearby section lists a few stations');
+  invariant(nearest.every((near) => near.walkingMeters !== null), 'each nearby station has its distance');
+  return (
+    <View testID="stations-section-nearby" style={styles.section}>
+      <TText variant="headline" accessibilityRole="header">
+        {copy.nearby}
+      </TText>
+      <View style={styles.list}>
+        {nearest.map(({ station, walkingMeters }) => (
+          <StationRow key={station.stationKey} idPrefix="nearby-row" row={station} walkingMeters={walkingMeters} nowS={nowS} onPress={onOpen} />
         ))}
       </View>
     </View>

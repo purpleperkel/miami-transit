@@ -18,6 +18,12 @@ import { err, ok, type Result } from '../../lib/result';
  * RESPONSE: parseItineraries turns the /plan body into Itinerary values, keeping EVERY itinerary and
  * EVERY leg in order (walk, bus, rail, Mover…). Times become epoch seconds. Transitous gives a distance
  * only on walk legs, so a transit leg's distanceM is null. Any malformed body is an Err, never a throw.
+ *
+ * WALK-ONLY ANSWERS (mfix7): when walking beats every train, Transitous answers `itineraries: []` and
+ * puts the walk in `direct[]` (the app asks for no other direct mode, so MOTIS's default WALK applies).
+ * Each direct entry becomes an itinerary of the SAME shape — WALK legs only, no trip — appended after the
+ * transit itineraries, so an itinerary's index stays its place in the answer. A body without a `direct`
+ * key (an older MOTIS, a hand-made test body) reads exactly as its itineraries alone.
  */
 
 export const TRANSITOUS_PLAN_URL = 'https://api.transitous.org/api/v5/plan';
@@ -104,23 +110,56 @@ export function buildPlanRequest(query: PlanQuery, appVersion: string): PlanRequ
   return { url, headers };
 }
 
-/** Every itinerary of a /plan body, in order, or an Err naming the first malformed part. */
+/** Every itinerary of a /plan body, in order, then each direct (walk-only) answer; or an Err naming the first malformed part. */
 export function parseItineraries(json: unknown): Result<Itinerary[], PlanParseError> {
   const body = asRecord(json);
   if (body === null || !Array.isArray(body.itineraries)) {
     return malformed('the body is not a /plan response with an itineraries array');
   }
+  if (body.direct !== undefined && !Array.isArray(body.direct)) {
+    return malformed('the body\'s direct answers are not an array');
+  }
   const raws: readonly unknown[] = body.itineraries;
+  const directs: readonly unknown[] = body.direct === undefined ? [] : body.direct;
+  const transit = parseAll(raws, 'itinerary');
+  if (!transit.ok) {
+    return malformed(transit.error);
+  }
+  const walks = parseAll(directs, 'direct');
+  if (!walks.ok) {
+    return malformed(walks.error);
+  }
+  const strayWalk = walks.value.findIndex((walk) => !isWalkOnly(walk));
+  if (strayWalk >= 0) {
+    return malformed(`direct ${strayWalk}: a direct answer that is not on foot (the app asks for walking only)`);
+  }
+  const itineraries = [...transit.value, ...walks.value];
+  const kept = [...raws, ...directs];
+  invariant(itineraries.length === kept.length, 'every itinerary is kept, and every direct walk after them');
+  invariant(itineraries.every((it, i) => it.legs.length === (asRecord(kept[i])?.legs as unknown[]).length), 'every leg is kept');
+  return ok(itineraries);
+}
+
+/** An itinerary that rides nothing: every leg a WALK without a trip (a direct answer, mfix7). */
+export function isWalkOnly(itinerary: Itinerary): boolean {
+  invariant(itinerary.legs.length > 0, 'an itinerary has legs');
+  const walkOnly = itinerary.legs.every((leg) => leg.mode === 'WALK' && leg.tripId === null);
+  invariant(!walkOnly || itinerary.legs.every((leg) => !leg.live), 'a walk is never live');
+  return walkOnly;
+}
+
+/** Every entry of one array of the body (`what` names it in an error: "itinerary 2", "direct 0"), in order. */
+function parseAll(raws: readonly unknown[], what: 'itinerary' | 'direct'): Result<Itinerary[], string> {
+  invariant(what === 'itinerary' || what === 'direct', 'entries come from the itineraries or the direct answers');
   const itineraries: Itinerary[] = [];
   for (let i = 0; i < raws.length; i += 1) {
-    const parsed = parseItinerary(raws[i], `itinerary ${i}`);
+    const parsed = parseItinerary(raws[i], `${what} ${i}`);
     if (!parsed.ok) {
-      return malformed(parsed.error);
+      return parsed;
     }
     itineraries.push(parsed.value);
   }
-  invariant(itineraries.length === raws.length, 'every itinerary is kept');
-  invariant(itineraries.every((it, i) => it.legs.length === (asRecord(raws[i])?.legs as unknown[]).length), 'every leg is kept');
+  invariant(itineraries.length === raws.length, `every ${what} entry is kept, in order`);
   return ok(itineraries);
 }
 

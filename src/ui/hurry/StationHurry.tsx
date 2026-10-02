@@ -6,15 +6,15 @@ import { formatDistance } from '../format';
 import { TText } from '../primitives/TText';
 import { SPACING } from '../tokens';
 import { HURRY_NOTES } from './copy';
-import type { HurryReading } from './hurry-reading';
 import { HurryCard } from './HurryCard';
-import { useHurryVerdict } from './useHurryVerdict';
+import { type SheetReading, useStationHurryVerdict } from './useHurryVerdict';
 
 /**
  * Plan M7c.3: hurry-or-chill on the station sheet, in the header's verdict slot (m6b R7): one HurryCard
  * per direction of the station ("To Dadeland South: Chill · 3 min to spare"), or one line saying why
  * there is no verdict yet. While the schedule opens, fails or has run out the sheet itself says so, and
- * the slot stays empty.
+ * the slot stays empty. While the station's first live predictions are on their way (mfix7) the line is
+ * "Checking live times…" — no card, so no verdict to flip and no jog buzz for a timetable train.
  *
  *   StationHurry (the hook) → StationHurryView (props only, rendered in tests)
  */
@@ -27,12 +27,12 @@ export type StationHurryProps = {
 
 export function StationHurry({ stationKey, clock }: StationHurryProps) {
   invariant(stationKey.includes(':'), `a station is keyed mode:name, got "${stationKey}"`);
-  const reading = useHurryVerdict({ kind: 'station', stationKey }, clock);
+  const reading = useStationHurryVerdict(stationKey, clock);
   invariant(reading.kind !== 'boards' || reading.stationKey === stationKey, 'the sheet shows its own station\'s verdict');
   return <StationHurryView reading={reading} />;
 }
 
-export function StationHurryView({ reading }: { readonly reading: HurryReading }) {
+export function StationHurryView({ reading }: { readonly reading: SheetReading }) {
   const note = noteOf(reading);
   invariant(reading.kind !== 'boards' || reading.boards.length > 0, 'a station reading has a board');
   invariant(reading.kind !== 'boards' || note === null, 'a verdict needs no note');
@@ -53,10 +53,12 @@ export function StationHurryView({ reading }: { readonly reading: HurryReading }
 }
 
 /** The one line shown instead of a verdict, or null where the sheet already explains (schedule opening, failed or out). */
-function noteOf(reading: HurryReading): string | null {
+function noteOf(reading: SheetReading): string | null {
   invariant(typeof reading.kind === 'string', 'a reading has a kind');
   const note =
-    reading.kind === 'locating'
+    reading.kind === 'checking'
+      ? HURRY_NOTES.checking
+      : reading.kind === 'locating'
       ? HURRY_NOTES.locating
       : reading.kind === 'no-location'
         ? HURRY_NOTES.noLocation

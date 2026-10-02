@@ -3,7 +3,7 @@ import type { HurryVerdict } from '../../domain/hurry/verdict';
 import { type LineId, lineById } from '../../domain/lines/line-catalog';
 import type { LiveBatch, LiveNetwork, LivePrediction } from '../../domain/live/types';
 import { type FirstLegPace, firstLegVerdict, gtfsStopId, gtfsTripId } from '../../domain/routes/overlay';
-import type { Itinerary, Leg, LegPlace } from '../../domain/routes/transitous';
+import { isWalkOnly, type Itinerary, type Leg, type LegPlace } from '../../domain/routes/transitous';
 import { isLatLon, type LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
 import { copy } from '../copy';
@@ -69,7 +69,14 @@ export type OptionContext = { readonly position: LatLon | null; readonly nowS: n
 /** An epoch as the rows show it ("2:01", or "in 6 min" without service-day bases). */
 export type RouteClock = (epoch: number) => string;
 
-export type OptionFacts = { readonly times: string; readonly duration: string; readonly transfers: string; readonly walk: string };
+export type OptionFacts = {
+  readonly times: string;
+  readonly duration: string;
+  readonly transfers: string;
+  readonly walk: string;
+  /** A walk-only option (Transitous's direct answer, mfix7) in one line, "Walk 8 min · no train needed"; null for a ride. */
+  readonly walkOnly: string | null;
+};
 
 /** At most this many boarding stations are watched for live predictions while the sheet is open (REALTIME COST RULE). */
 export const MAX_WATCHED_STATIONS = 3;
@@ -162,7 +169,7 @@ export function optionLeavesS(option: RouteOption): number {
   return leavesS;
 }
 
-/** The row's words: "2:01 → 2:21", "20 min", "No transfers", "13 min walk". */
+/** The row's words: "2:01 → 2:21", "20 min", "No transfers", "13 min walk" — or, on foot only, "Walk 8 min · no train needed". */
 export function optionFacts(option: RouteOption, clock: RouteClock): OptionFacts {
   invariant(option.arriveEpoch >= option.departEpoch, 'an option arrives after it departs');
   const walkMinutes = Math.ceil(option.walkS / 60);
@@ -171,8 +178,10 @@ export function optionFacts(option: RouteOption, clock: RouteClock): OptionFacts
     duration: durationText(option.durationS),
     transfers: option.transfers === 0 ? 'No transfers' : option.transfers === 1 ? '1 transfer' : `${option.transfers} transfers`,
     walk: walkMinutes === 0 ? 'No walking' : `${walkMinutes} min walk`,
+    walkOnly: isWalkOnly(option.itinerary) ? copy.walkOnlyOption(durationText(option.walkS)) : null,
   };
-  invariant(Object.values(facts).every((text) => text.length > 0), 'every fact says something');
+  invariant(Object.values(facts).every((text) => text === null || text.length > 0), 'every fact says something');
+  invariant(facts.walkOnly === null || (option.verdict === null && !option.live && option.badges.length === 0), 'a walk-only option has no hurry chip, no Live badge and no line badge');
   return facts;
 }
 

@@ -31,6 +31,13 @@ export const tripWords = Object.freeze({
   deleteTrip: 'Delete trip',
   deleteTripHint: 'Removes this saved trip and its reminders',
   cancel: 'Cancel',
+  /** mfix7, the add-trip pickers: Leaving from with a location, and Going to's trailing group. */
+  nearestFirst: 'Nearest first',
+  needsTransfer: 'Needs a transfer',
+  stationCount: (count: number) => (count === 1 ? '1 station' : `${count} stations`),
+  showTransfersHint: 'Shows the stations a trip from here would need a transfer to reach',
+  hideTransfersHint: 'Hides the stations that need a transfer',
+  transferRouteOptionsHint: 'Shows route options from this station, which can plan a trip with a transfer',
 });
 
 export type Timed = Extract<TripStatus, { readonly kind: 'leave' }>;

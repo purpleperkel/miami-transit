@@ -167,6 +167,7 @@ export function PlanBody({ origin, destination, plan, options, network, names, c
   if (origin.kind === 'failed') {
     return <PlanUnavailable reason={origin.message} destination={destination} />;
   }
+  // An answer's direct walks are options too (mfix7), so an ok answer with none had no itinerary AND no walk.
   if (plan.kind === 'unavailable' || (plan.kind === 'ok' && options.length === 0)) {
     return <PlanUnavailable reason={plan.kind === 'unavailable' ? plan.reason : copy.noRoutes} destination={destination} />;
   }

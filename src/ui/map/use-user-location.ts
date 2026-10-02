@@ -105,30 +105,33 @@ export type Fix = { readonly coordinate: LatLon; readonly takenAtMs: number };
  */
 export function currentFix(): Promise<Result<Fix, string>> {
   invariant(typeof Location.getCurrentPositionAsync === 'function', 'expo-location reads a position');
-  const read = Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }).then(timedFixOf, failureOf);
+  const read = Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }).then((fix) => timedFixOf(fix, Date.now()), failureOf);
   invariant(typeof read.then === 'function', 'the fix arrives later');
   return read;
 }
 
-/** A one-shot answer read defensively: a fix needs its coordinates AND the time it was taken (or it cannot be weighed). */
-function timedFixOf(fix: Location.LocationObject | undefined): Result<Fix, string> {
+/**
+ * A one-shot answer read defensively: a fix needs its coordinates. Its time is the answer's own; an answer without a
+ * usable time is timed when it arrived (`receivedAtMs`), since a one-shot fix is fresh by definition. The time only
+ * decides where the route chips walk from, so it never costs the rider their plan.
+ */
+function timedFixOf(fix: Location.LocationObject | undefined, receivedAtMs: number): Result<Fix, string> {
+  invariant(Number.isFinite(receivedAtMs) && receivedAtMs > 0, 'the answer arrives at a real instant');
   const position = positionOf(fix);
-  const takenAtMs = takenAtOf(fix);
   if (!position.ok) {
     return position;
   }
-  const timed = takenAtMs === null ? err('the position came back without the time it was taken') : ok({ coordinate: position.value, takenAtMs });
-  invariant(!timed.ok || timed.value.coordinate === position.value, 'the fix is where the answer put the rider');
-  invariant(!timed.ok || timed.value.takenAtMs === fix?.timestamp, 'the fix is timed by the answer');
-  return timed;
+  const timed: Fix = { coordinate: position.value, takenAtMs: takenAtOf(fix) ?? receivedAtMs };
+  invariant(isLatLon(timed.coordinate), 'a fix is a real coordinate');
+  return ok(timed);
 }
 
 /** When expo-location took `fix` (LocationObject.timestamp, epoch ms), read defensively: null when it carries no usable time. */
 export function takenAtOf(fix: Location.LocationObject | undefined): number | null {
   const stamp: unknown = fix?.timestamp;
+  invariant(fix === undefined || (fix !== null && typeof fix === 'object'), 'expo-location answers with an object, or nothing');
   const takenAtMs = typeof stamp === 'number' && Number.isFinite(stamp) && stamp >= 0 ? stamp : null;
-  invariant(takenAtMs === null || fix !== undefined, 'only a real answer has a time');
-  invariant(takenAtMs === null || takenAtMs === fix?.timestamp, 'the time is the answer\'s own');
+  invariant(takenAtMs === null || takenAtMs >= 0, 'a fix is never timed before the epoch');
   return takenAtMs;
 }
 

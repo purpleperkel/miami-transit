@@ -4,12 +4,9 @@ import type { LatLon } from '../../../lib/geo';
 
 /**
  * What a test's labelled expo-location mock (the NATIVE module) answers, for screens rendered inside the app's ONE
- * UserLocationProvider (mfix7; one-watch.test's pattern, shared). The test file mocks expo-location as
- *
- *   // test-time mock of native module
- *   jest.mock('expo-location', () => ({ Accuracy: { Balanced: 3 }, requestForegroundPermissionsAsync: jest.fn(), watchPositionAsync: jest.fn() }));
- *
- * and, before each render, says where the rider is: `locateAt(Location, point)` grants and fixes the one watch at
+ * UserLocationProvider (mfix7; one-watch.test's pattern, shared). The test file mocks expo-location with a labelled
+ * native-module mock whose Accuracy, requestForegroundPermissionsAsync and watchPositionAsync are jest functions (the
+ * exact mock is one-watch.test.tsx's), and, before each render, says where the rider is: `locateAt(Location, point)` grants and fixes the one watch at
  * the point at once; `locateAt(Location, null)` refuses, so there is no watch and no fix.
  */
 export function locateAt(location: typeof Location, at: LatLon | null): void {

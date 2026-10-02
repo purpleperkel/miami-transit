@@ -184,9 +184,9 @@ function replanIfLeft(watched: { current: Watched | null }, itineraries: readonl
  * the RIDER makes the train. The app's ONE location watch (mfix6) follows them while the sheet is open, at no
  * cost. A "Route from here" plan starts at the station (mfix5), which is no fix of the rider: the watch's fix
  * wins whenever there is one. A plan from the rider's own location starts at the ONE fix the sheet took when it
- * opened, and the watch reports only every WATCH_DISTANCE_M (= CHIP_ROUTED_START_M), at the same Balanced
- * accuracy: its latest fix may be older than the sheet's, and off the plan's start by more than the jitter of a
- * rider who has not moved. So the watch's fix wins only once it was taken AFTER the sheet's (mfix8). Without a
+ * opened, and the watch reports a new fix only after the rider moves WATCH_DISTANCE_M, at the same Balanced
+ * accuracy: its latest fix may be older than the sheet's and off the plan's start by up to that much plus the jitter,
+ * for a rider who has not moved (enough, past CHIP_ROUTED_START_M, to drop the routed walk). So the watch's fix wins only once it was taken AFTER the sheet's (mfix8). Without a
  * fix the chip walks from the plan's start. That is what lets route-options.ts keep the routed first walk while
  * the rider is within CHIP_ROUTED_START_M of the itinerary's start, and fall back to the straight line from the
  * rider once they have walked off.
@@ -194,10 +194,8 @@ function replanIfLeft(watched: { current: Watched | null }, itineraries: readonl
 export function useChipPosition(start: PlanOrigin | null): LatLon | null {
   const rider = useUserPosition();
   const position = rider.coordinate !== null && (start === null || watchIsFresher(rider, start)) ? rider.coordinate : (start?.coordinate ?? null);
-  invariant(
-    rider.coordinate === null ? position === (start?.coordinate ?? null) : position === rider.coordinate || position === start?.coordinate,
-    'located, the chip walks from the rider\'s fix, or from the plan\'s own when that is the fresher; unlocated, from the plan\'s start',
-  );
+  invariant(rider.coordinate !== null || position === (start?.coordinate ?? null), 'unlocated, the chip walks from the plan\'s start');
+  invariant(rider.coordinate === null || start === null || start.takenAtMs !== null || position === rider.coordinate, 'from a station, a located rider walks from their own fix');
   invariant(position === null || isLatLon(position), 'the chip walks from a real coordinate, or from nowhere yet');
   return position;
 }
@@ -206,7 +204,7 @@ export function useChipPosition(start: PlanOrigin | null): LatLon | null {
  * The watch's fix is fresher than the plan's start: the start is a station (no fix of the rider), or the watch took
  * its fix after the sheet took the plan's. Against the plan's timed fix, a watch fix without a time never counts.
  */
-function watchIsFresher(rider: UserPosition, start: PlanOrigin): boolean {
+export function watchIsFresher(rider: UserPosition, start: PlanOrigin): boolean {
   invariant(rider.coordinate !== null, 'only a fix of the rider can be the fresher');
   invariant(start.takenAtMs === null || Number.isFinite(start.takenAtMs), 'a plan\'s fix is taken at an instant');
   return start.takenAtMs === null || (rider.takenAtMs !== null && rider.takenAtMs > start.takenAtMs);

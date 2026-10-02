@@ -7,6 +7,7 @@ import type { TripVerdict } from '../hurry/trip-verdict';
 import type { CountdownState } from '../trips/countdown';
 import type { TripCardModel } from '../trips/trip-card';
 import { heroOf } from '../trips/trip-copy';
+import type { SavedTripWalk } from '../trips/trip-walk';
 import type { ActiveTrip, HomeContext } from './homeContext';
 import { type AccessoryPlacement, fitsPlacement, type NowText, REGULAR_LINE_MAX_CHARS } from './now-text';
 
@@ -20,9 +21,11 @@ import { type AccessoryPlacement, fitsPlacement, type NowText, REGULAR_LINE_MAX_
  *
  * Above the tab bar the first line names what the bar is about — a saved trip's DESTINATION, whole (never the
  * free-text trip name, which can run to 60 characters) — and every line fits REGULAR_LINE_MAX_CHARS; inline,
- * every text fits INLINE_MAX_CHARS (ruling R1). A near trip's walk shows as "~5 min walk" either way; VoiceOver hears
- * "an estimated 5-minute walk" ONLY when it is m7c's straight-line estimate, and "a 5-minute walk along streets" when
- * it is Transitous's street-routed walk (mfix9). VoiceOver always hears the whole of it.
+ * every text fits INLINE_MAX_CHARS (ruling R1). A near trip's walk is the trip's ONE walk (mfix11, trip-walk.ts), in
+ * the minutes its card shows: "~5 min walk" for a measured walk, "5 min walk" (no "~": Jamie's own number) for the
+ * trip's own minutes. VoiceOver hears "an estimated 5-minute walk" ONLY for m7c's straight-line estimate, "a 5-minute
+ * walk along streets" for Transitous's street-routed walk (mfix9) and "your 5-minute walk" for the trip's own minutes.
+ * VoiceOver always hears the whole of it.
  */
 
 /** Where a tap on the bar goes. */
@@ -86,25 +89,26 @@ export function tripText(trip: ActiveTrip, nowS: number, placement: AccessoryPla
  */
 export function nearTripText(card: TripCardModel, judged: TripVerdict, placement: AccessoryPlacement): NowText {
   invariant(card.toName.length > 0 && card.fromName.length > 0, 'a saved trip names its stations');
-  const minutes = Math.ceil(judged.verdict.walkS / 60);
+  const minutes = judged.walk.minutes;
   const inline = hurryInline(judged.verdict, judged.ctx);
-  const walk = `~${minutes} min walk`;
+  const walk = judged.walk.source === 'override' ? `${minutes} min walk` : `~${minutes} min walk`;
   const status = [`${hurryShort(judged.verdict, judged.ctx)} · ${walk}`, `${inline} · ${walk}`].find((line) => [...line].length <= REGULAR_LINE_MAX_CHARS);
   invariant(status !== undefined, `some status line for ${judged.verdict.kind} fits ${REGULAR_LINE_MAX_CHARS} characters`);
-  const label = `${hurrySentence(judged.verdict, judged.ctx)} ${tripPhrase(card)}, ${walkPhrase(minutes, judged.walkSource)}. Opens the trip.`;
+  const label = `${hurrySentence(judged.verdict, judged.ctx)} ${tripPhrase(card)}, ${walkPhrase(minutes, judged.walk.source)}. Opens the trip.`;
   return { lines: placement === 'inline' ? [inline] : [card.toName, status], label };
 }
 
 /**
  * What VoiceOver hears of the walk: "an estimated 5-minute walk" ONLY for the straight-line estimate, "a 5-minute walk
  * along streets" for a routed one — "an" before a number said with a vowel first ("an 8-minute", "an 11-minute"; a
- * bar's walk is well under the 11,000 minutes where that rule would need more than the first digits).
+ * bar's walk is well under the 11,000 minutes where that rule would need more than the first digits) — and "your
+ * 5-minute walk" for the trip's own minutes (mfix11).
  */
-function walkPhrase(minutes: number, source: 'routed' | 'estimated'): string {
+function walkPhrase(minutes: number, source: SavedTripWalk['source']): string {
   invariant(Number.isSafeInteger(minutes) && minutes >= 0 && minutes < 11_000, `a walk is a whole number of minutes, got ${minutes}`);
   const article = String(minutes).startsWith('8') || minutes === 11 || minutes === 18 ? 'an' : 'a';
-  const phrase = source === 'routed' ? `${article} ${minutes}-minute walk along streets` : `an estimated ${minutes}-minute walk`;
-  invariant(phrase.includes('estimated') === (source === 'estimated'), 'only an estimated walk is called estimated');
+  const phrase = { override: `your ${minutes}-minute walk`, routed: `${article} ${minutes}-minute walk along streets`, estimated: `an estimated ${minutes}-minute walk` }[source];
+  invariant(phrase.includes('estimated') === (source === 'estimated') && phrase.startsWith('your') === (source === 'override'), 'only an estimated walk is called estimated, and only the trip\'s own minutes yours');
   return phrase;
 }
 

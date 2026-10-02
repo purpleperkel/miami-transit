@@ -33,8 +33,9 @@ import { useHomeContext } from './useHomeContext';
  * never in the bar. The home context is published to the Now store, where the Map tab reads whether to
  * auto-present the station the rider is at (useAutoPresent.ts).
  *
- * A near trip's walk (mfix9) is the street-routed walk to its boarding platform when the app's RoutedWalkProvider knows
- * one (useNearTripWalk), else m7c's straight-line estimate; VoiceOver hears which.
+ * A near trip's walk is the trip's ONE walk (mfix11, src/ui/trips/trip-walk.ts), the one its card shows: the trip's own
+ * walk minutes when it has them, else the street-routed walk to its boarding platform when the app's RoutedWalkProvider
+ * knows one (mfix9, useNearTripWalk), else m7c's straight-line estimate; VoiceOver hears which.
  *
  *   NowAccessory (placement, the home context, the near trip's walk and verdict) → NowAccessoryView (props only, rendered in tests)
  */

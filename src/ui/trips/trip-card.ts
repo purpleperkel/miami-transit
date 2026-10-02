@@ -2,13 +2,15 @@ import type { SavedTrip } from '../../data/saved-trips-repo';
 import type { CalendarGap, RidesQueryOutcome, UnknownStation } from '../../data/schedule-repo';
 import type { StationListing } from '../../data/schedule-queries';
 import { type ServiceDayResolution, type TimeWindow, windowFrom } from '../../domain/gtfs/service-day';
+import type { Platform } from '../../domain/hurry/platform';
 import type { Ride } from '../../domain/schedule/rides';
 import { leaveByEpoch, nextLeave } from '../../domain/trips/leave-by';
-import { estimateWalk } from '../../domain/trips/walk-estimate';
-import { haversineMeters, type LatLon } from '../../lib/geo';
+import type { WalkTo } from '../../domain/walk/walk-cache';
+import type { LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
 import type { Result } from '../../lib/result';
 import { formatClockFromServiceSec } from '../format';
+import { boardingPlatforms, savedTripWalk, type SavedTripWalk } from './trip-walk';
 
 /**
  * Plan M7.8: the Trips tab's cards, as data. For each saved trip: the walk to its boarding station, the
@@ -17,9 +19,11 @@ import { formatClockFromServiceSec } from '../format';
  * The cards come sorted by leave-by, soonest first; cards with nothing to count to follow, in saved order.
  *
  * ONE walking pace (arbiter ruling 2026-10-01): the walk uses Jamie's pace from Data & Settings
- * (readWalkingPace().walkMps, passed in), never m7a's pure default. The walk is, in order: the trip's
- * own walk minutes; the distance from its saved start; the distance from where the phone is now; else
- * unknown (the countdown then runs to the platform buffer alone, and the card says the walk is missing).
+ * (readWalkingPace().walkMps, passed in), never m7a's pure default. ONE walk (mfix11): the walk is the trip's
+ * own, decided by trip-walk.ts savedTripWalk to the platform its rides board at — the trip's own walk minutes,
+ * else the street walk from the rider (mfix9's useWalkTo, passed in as `walk`), else the estimate from the
+ * rider or, with no fix, from the saved start; else unknown (the countdown then runs to the platform buffer
+ * alone, and the card says the walk is missing). The Now bar's verdict walks the same walk.
  *
  * At night nothing departs the origin, and the card says `no-service` — never "transfer" (m3a's input):
  * `needs-transfer` is only for a pair no single vehicle joins while trains do run.
@@ -31,6 +35,7 @@ export const TRIP_HORIZON_S = 3 * 60 * 60;
 /** What the cards read from the schedule (ScheduleRepo fits). */
 export type TripSource = {
   stations(): readonly StationListing[];
+  platforms(): readonly Platform[];
   serviceDays(window: TimeWindow): ServiceDayResolution;
   tripRides(fromKey: string, toKey: string, window: TimeWindow): Result<RidesQueryOutcome, UnknownStation>;
 };
@@ -41,12 +46,11 @@ export type TripCardInput = {
   readonly walkMps: number;
   /** Seconds on the platform before the train (the trip settings' boardBufferS). */
   readonly bufferS: number;
-  /** Where the phone is, for trips that start wherever the rider is; null without a fix. */
+  /** The rider's latest fix, where a walk starts; null without one. */
   readonly position: LatLon | null;
+  /** mfix9's useWalkTo over the trips' origin platforms: the street walk from the rider, when one is known. */
+  readonly walk?: WalkTo;
 };
-
-/** Where the walk figure comes from: the trip's own minutes, its saved start, the phone's position now. */
-export type TripWalk = { readonly walkS: number; readonly source: 'override' | 'start' | 'here' };
 
 /** One ride a card can count to, with its times as clocks (the schedule's own service-day bases). */
 export type TimedRide = {
@@ -71,8 +75,8 @@ export type TripCardModel = {
   /** The stations' display names (the keys themselves for a station the timetable no longer has). */
   readonly fromName: string;
   readonly toName: string;
-  /** The walk to the boarding station; null when nothing tells how far it is. */
-  readonly walk: TripWalk | null;
+  /** The trip's one walk (savedTripWalk); null when nothing tells how far it is. */
+  readonly walk: SavedTripWalk | null;
   readonly status: TripStatus;
 };
 
@@ -113,7 +117,7 @@ function departAt(card: TripCardModel): number {
   return at;
 }
 
-/** One trip's card: its walk, then the ride it counts to or why there is none. */
+/** One trip's card: its rides, its one walk to the platform they board at, then the ride it counts to or why there is none. */
 function tripCard(source: TripSource, stations: ReadonlyMap<string, StationListing>, trip: SavedTrip, input: TripCardInput): TripCardModel {
   invariant(trip.fromStationKey !== trip.toStationKey, 'a trip joins two stations');
   const from = stations.get(trip.fromStationKey);
@@ -122,32 +126,21 @@ function tripCard(source: TripSource, stations: ReadonlyMap<string, StationListi
   if (from === undefined || to === undefined) {
     return { trip, ...names, walk: null, status: { kind: 'unknown-station', stationKey: from === undefined ? trip.fromStationKey : trip.toStationKey } };
   }
-  const walk = tripWalk(trip, from.coordinate, input);
-  const status = tripStatus(source, trip, { walkS: walk?.walkS ?? 0, bufferS: input.bufferS }, input.nowS);
+  const window = windowFrom(input.nowS, TRIP_HORIZON_S);
+  const outcome = source.tripRides(trip.fromStationKey, trip.toStationKey, window);
+  const rides = outcome.ok && outcome.value.kind === 'rides' ? outcome.value.rides : [];
+  const platforms = boardingPlatforms(source.platforms(), trip.fromStationKey, rides);
+  const walk = savedTripWalk(trip, { platforms, position: input.position, walkMps: input.walkMps, walk: input.walk });
+  const status = tripStatus(source, outcome, { walkS: walk?.walkS ?? 0, bufferS: input.bufferS }, window);
   invariant(status.kind !== 'leave' || status.current.leaveByEpoch <= status.current.ride.depEpoch, 'nobody leaves after the train');
   return { trip, ...names, walk, status };
 }
 
-/** The walk to the boarding station: the trip's minutes, else from its start, else from here; null when unknown. */
-export function tripWalk(trip: SavedTrip, station: LatLon, input: Pick<TripCardInput, 'walkMps' | 'position'>): TripWalk | null {
-  invariant(input.walkMps > 0, 'a walking pace moves');
-  const from = trip.start ?? input.position;
-  const estimate = estimateWalk({ straightMeters: from === null ? null : haversineMeters(from, station), overrideMin: trip.walkOverrideMin, paceMps: input.walkMps });
-  if (estimate === null) {
-    return null;
-  }
-  const source = estimate.source === 'override' ? 'override' : trip.start !== null ? 'start' : 'here';
-  invariant(Number.isSafeInteger(estimate.walkS) && estimate.walkS >= 0, 'a walk is whole seconds');
-  return { walkS: estimate.walkS, source };
-}
-
 type Lead = { readonly walkS: number; readonly bufferS: number };
 
-/** The ride the trip counts to now (and the one after it), or why there is none. */
-function tripStatus(source: TripSource, trip: SavedTrip, lead: Lead, nowS: number): TripStatus {
+/** The ride the trip counts to from the start of `window` (and the one after it), or why there is none. */
+function tripStatus(source: TripSource, outcome: Result<RidesQueryOutcome, UnknownStation>, lead: Lead, window: TimeWindow): TripStatus {
   invariant(Number.isSafeInteger(lead.walkS + lead.bufferS) && lead.walkS >= 0 && lead.bufferS >= 0, 'the walk and buffer are whole seconds');
-  const window = windowFrom(nowS, TRIP_HORIZON_S);
-  const outcome = source.tripRides(trip.fromStationKey, trip.toStationKey, window);
   if (!outcome.ok) {
     return { kind: 'unknown-station', stationKey: outcome.error.stationKey };
   }
@@ -158,7 +151,8 @@ function tripStatus(source: TripSource, trip: SavedTrip, lead: Lead, nowS: numbe
   if (rides.kind !== 'rides') {
     return { kind: 'gap', gap: rides };
   }
-  const plan = nextLeave(rides.rides, nowS, lead.walkS, lead.bufferS);
+  invariant(rides.rides.every((ride) => ride.depEpoch >= window.fromEpoch && ride.depEpoch <= window.toEpoch), 'the trip rides are the window\'s');
+  const plan = nextLeave(rides.rides, window.fromEpoch, lead.walkS, lead.bufferS);
   if (plan === null) {
     return { kind: 'out-of-reach' };
   }

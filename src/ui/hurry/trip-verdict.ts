@@ -1,19 +1,21 @@
+import type { SavedTrip } from '../../data/saved-trips-repo';
 import type { DeparturesOutcome, RidesQueryOutcome, UnknownStation } from '../../data/schedule-repo';
 import { type ServiceDayResolution, type TimeWindow, windowFrom } from '../../domain/gtfs/service-day';
 import { hurryDepartures } from '../../domain/hurry/board';
-import { nearestPlatform, type Platform } from '../../domain/hurry/platform';
+import type { Platform } from '../../domain/hurry/platform';
 import { type HurryDeparture, hurryVerdict, type HurryVerdict } from '../../domain/hurry/verdict';
 import { mergeDepartures } from '../../domain/live/merge-departures';
 import type { LiveBatch, LivePrediction } from '../../domain/live/types';
 import type { Departure } from '../../domain/schedule/departures';
 import type { Ride } from '../../domain/schedule/rides';
-import { type WalkEstimate, walkFor, type WalkTo } from '../../domain/walk/walk-cache';
+import type { WalkTo } from '../../domain/walk/walk-cache';
 import type { LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
 import type { Result } from '../../lib/result';
 import type { WalkingPace } from '../settings/walking-pace';
 import { SHEET_LEAD_S } from '../stations/station-sheet';
 import { TRIP_HORIZON_S } from '../trips/trip-card';
+import { savedTripWalk, type SavedTripWalk } from '../trips/trip-walk';
 import type { HurryCopyContext } from './copy';
 import { clockFor, liveIsStale } from './hurry-reading';
 
@@ -31,11 +33,12 @@ import { clockFor, liveIsStale } from './hurry-reading';
  *            or later, so a train scheduled 7:59:40 and predicted for 8:02 is still caught at 8:00:00, while one
  *            scheduled before now with no prediction is gone. A canceled ride drops out; live data past its
  *            provider's fresh limit is stale
- *   walk     to the nearest (straight line) boarding platform of the rides still to come (the origin's nearest
- *            platform when none is), at Jamie's paces: the street-routed walk when the caller's `walk` (mfix9, the
- *            Now bar's useWalkTo) knows one, else the straight line with m7c's 1.3 detour — an ESTIMATE, and the
- *            bar says so
- *   verdict  m7c's hurryVerdict over those departures
+ *   walk     mfix11: the trip's ONE walk (trip-walk.ts savedTripWalk), the walk its card shows: the trip's own
+ *            minutes, walked in exactly that time (and jogged in walkS x walkMps / jogMps); else from the rider to
+ *            the nearest (straight line) boarding platform of the rides still to come (the origin's nearest platform
+ *            when none is) — the street-routed walk when the caller's `walk` (mfix9, the Now bar's useWalkTo) knows
+ *            one, else the straight line with m7c's 1.3 detour, an ESTIMATE, and the bar says so
+ *   verdict  m7c's hurryVerdict over those departures, at Jamie's paces
  *
  * Two halves, so the Now bar reads the schedule once a minute (as the station sheet's stationTimetable does) yet
  * judges every tick with the latest live batch, position and instant (useNearTripVerdict):
@@ -52,10 +55,10 @@ import { clockFor, liveIsStale } from './hurry-reading';
 export type TripVerdict = {
   readonly verdict: HurryVerdict;
   readonly ctx: HurryCopyContext;
-  /** Straight-line metres to the boarding platform (the verdict walks `walkSource`'s distance there). */
-  readonly walkMeters: number;
-  /** mfix9: what the verdict walked — Transitous's street-routed walk ('routed') or the straight line with m7c's detour ('estimated'). */
-  readonly walkSource: WalkEstimate['source'];
+  /** Straight-line metres to the boarding platform walked to (`walk.stopId`); null for the trip's own minutes, which walk to none. */
+  readonly walkMeters: number | null;
+  /** mfix11: what the verdict walked — the trip's one walk (savedTripWalk), the one its card shows; `walk.source` says whose. */
+  readonly walk: SavedTripWalk;
 };
 
 /** What the trip verdict reads from the schedule (ScheduleRepo fits). */
@@ -77,7 +80,12 @@ export type TripVerdictInput = {
   readonly batch: LiveBatch<LivePrediction> | null;
   /** mfix9: the walk to an origin platform (the Now bar's useWalkTo); absent, the straight line with m7c's detour. */
   readonly walk?: WalkTo;
+  /** mfix11: the saved trip's own walk minutes and saved start, which savedTripWalk weighs; absent, neither (mfix8's callers). */
+  readonly trip?: Pick<SavedTrip, 'start' | 'walkOverrideMin'>;
 };
+
+/** A trip with neither its own walk minutes nor a saved start: its walk starts at the rider. */
+const WALKS_FROM_THE_RIDER: Pick<SavedTrip, 'start' | 'walkOverrideMin'> = Object.freeze({ start: null, walkOverrideMin: null });
 
 /** The schedule's half of a trip's verdict, read once over `window` and judged at any instant whose verdictWindow it holds. */
 export type TripTimetable = {
@@ -139,11 +147,21 @@ export function judgeTrip(timetable: TripTimetable, input: TripVerdictInput): Tr
   invariant(holds(timetable.window, window), 'the timetable holds every ride the instant weighs');
   const coming = comingDepartures(timetable, window, input);
   const platforms = coming.stopIds.size > 0 ? timetable.platforms.filter((platform) => coming.stopIds.has(platform.stopId)) : timetable.platforms;
-  const nearest = nearestPlatform(input.position, platforms, null);
-  invariant(nearest !== null, `${input.from} has a platform to walk to`);
-  const walk = input.walk === undefined ? walkFor(null, nearest.platform, input.position) : input.walk(nearest.platform);
-  const verdict = hurryVerdict({ now: input.nowS, departures: coming.departures, ...input.pace, walkMeters: walk.walkMeters, detour: walk.detour });
-  return { verdict, ctx: { now: input.nowS, clock: clockFor(timetable.bases) }, walkMeters: nearest.walkMeters, walkSource: walk.source };
+  const walk = savedTripWalk(input.trip ?? WALKS_FROM_THE_RIDER, { platforms, position: input.position, walkMps: input.pace.walkMps, walk: input.walk });
+  invariant(walk !== null, 'a located rider always has a walk');
+  const verdict = hurryVerdict({ now: input.nowS, departures: coming.departures, ...input.pace, walkMeters: walkedMeters(walk, input.pace.walkMps), detour: 1 });
+  return { verdict, ctx: { now: input.nowS, clock: clockFor(timetable.bases) }, walkMeters: walk.straightM, walk };
+}
+
+/**
+ * The metres the verdict walks (detour included, so the engine adds none): a measured walk's own, unrounded — mfix9's
+ * verdicts unchanged — and for the trip's own minutes the distance Jamie covers in exactly that time at his pace.
+ */
+function walkedMeters(walk: SavedTripWalk, walkMps: number): number {
+  invariant(Number.isFinite(walkMps) && walkMps > 0, 'the walk is at Jamie\'s pace, a real speed');
+  const metres = walk.source === 'override' ? walk.walkS * walkMps : walk.walkedM;
+  invariant(Number.isFinite(metres) && metres >= 0 && Math.abs(metres / walkMps - walk.walkS) < 1, 'the verdict walks the seconds the card shows, to within the card\'s rounding');
+  return metres;
 }
 
 /** The departures still to come, and the platforms they board at. */

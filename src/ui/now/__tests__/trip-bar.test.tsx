@@ -264,11 +264,18 @@ function everyVerdict(): TripVerdict[] {
   const departures = [[600], [450], [300, 1200], [100, 180], [1500, 1800], [150, 900], [100, 110, 120, 2000], [], [7200]];
   const walks = [[0, PACE.walkMps], [400, PACE.walkMps], [NEAR_TRIP_M, PACE.walkMps], [NEAR_TRIP_M, PACE_RANGE_MPS.min]] as const;
   const all = walks.flatMap(([walkMeters, walkMps]) =>
-    departures.map((epochs): TripVerdict => ({ verdict: hurryVerdict({ now: 0, walkMeters, walkMps, jogMps: walkMps * 2, departures: epochs.map((epoch) => ({ epoch, live: false, lineId: 'ORANGE', headsign: null })) }), ctx, walkMeters, walkSource: 'estimated' })),
+    departures.map((epochs): TripVerdict => estimatedOver(hurryVerdict({ now: 0, walkMeters, walkMps, jogMps: walkMps * 2, departures: epochs.map((epoch) => ({ epoch, live: false, lineId: 'ORANGE', headsign: null })) }), ctx, walkMeters)),
   );
   expect(new Set(all.map(({ verdict }) => verdict.kind))).toEqual(new Set<HurryVerdict['kind']>(['CHILL', 'JOG', 'NOT_WORTH_IT', 'MISSED', 'NO_SERVICE']));
   expect(Math.max(...all.map(({ verdict }) => Math.ceil(verdict.walkS / 60)))).toBeGreaterThan(100);
   return all;
+}
+
+/** `verdict` over m7c's estimate of a walk `walkMeters` in a straight line (× 1.3), carrying that walk as the bar shows it (mfix11). */
+function estimatedOver(verdict: HurryVerdict, ctx: TripVerdict['ctx'], walkMeters: number): TripVerdict {
+  expect(Number.isFinite(verdict.walkS) && verdict.walkS >= 0).toBe(true);
+  expect(walkMeters).toBeGreaterThanOrEqual(0);
+  return { verdict, ctx, walkMeters, walk: { source: 'estimated', from: 'here', walkS: Math.ceil(verdict.walkS), minutes: Math.ceil(verdict.walkS / 60), stopId: '9514', walkedM: walkMeters * 1.3, straightM: walkMeters } };
 }
 
 /** A ride leaving at `depEpoch` (every clock the longest, 12:59 PM), to leave for 5 min before it. */

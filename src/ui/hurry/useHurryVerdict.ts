@@ -87,7 +87,8 @@ function useHurryVerdict(stationKey: string, clock: () => number = wallClockNowS
  * the verdict is judged at the context's instant with the latest batch and position, on every home tick. It reads
  * the same schedule, position and instant the context was worked out from, so a near trip the schedule can judge
  * always comes with its verdict. `walk` is the bar's useWalkTo over the trip's origin platforms (mfix9,
- * useNearTripWalk); without it, the straight line with m7c's detour.
+ * useNearTripWalk); without it, the straight line with m7c's detour. mfix11: the verdict walks the trip's ONE walk
+ * (savedTripWalk, given the trip) — its own minutes when it has them — the walk its card shows.
  */
 export function useNearTripVerdict(context: HomeContext, walk?: WalkTo): TripVerdict | null {
   const db = useScheduleDb();
@@ -135,7 +136,7 @@ function useTripTimetable(repo: TripVerdictSource | null, near: NearTrip | null)
 function judgeNearTrip(timetable: TripTimetable, near: NearTrip, rider: Pick<TripVerdictInput, 'position' | 'pace' | 'batch' | 'walk'>): TripVerdict {
   const { fromStationKey, toStationKey } = near.card.trip;
   invariant(fromStationKey !== toStationKey, 'a saved trip joins two stations');
-  const judged = judgeTrip(timetable, { from: fromStationKey, to: toStationKey, nowS: near.nowS, ...rider });
+  const judged = judgeTrip(timetable, { from: fromStationKey, to: toStationKey, trip: near.card.trip, nowS: near.nowS, ...rider });
   invariant(judged.ctx.now === near.nowS, 'the trip is judged at the context\'s instant');
   return judged;
 }

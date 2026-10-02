@@ -30,7 +30,7 @@ import { REMINDER_STATUS, type ReminderStatusStore } from './reminder-status';
 
 /** What one sync reads. */
 export type SyncInput = {
-  readonly repo: Pick<ScheduleRepo, 'stations' | 'serviceDays' | 'tripRides'>;
+  readonly repo: Pick<ScheduleRepo, 'stations' | 'platforms' | 'serviceDays' | 'tripRides'>;
   readonly trips: readonly SavedTrip[];
   readonly settings: TripSettings;
   readonly nowS: number;

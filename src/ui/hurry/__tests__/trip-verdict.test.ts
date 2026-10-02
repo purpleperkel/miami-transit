@@ -27,7 +27,7 @@ afterAll(() => closeTripDbs());
 function judge(batch: LiveBatch<LivePrediction> | null, extra: Partial<TripVerdictInput> = {}): TripVerdict | null {
   const judged = tripVerdict(realScheduleRepo(), { from: BCC, to: BAYFRONT, position: P, nowS: WED_0800, pace: PACE, batch, ...extra });
   expect(judged === null || judged.ctx.now === (extra.nowS ?? WED_0800)).toBe(true);
-  expect(judged === null || judged.walkMeters > 0).toBe(true);
+  expect(judged === null || (judged.walkMeters !== null && judged.walkMeters > 0)).toBe(true);
   return judged;
 }
 

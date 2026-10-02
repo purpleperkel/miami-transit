@@ -277,7 +277,7 @@ function jogToDadeland(): TripVerdict {
   const verdict = hurryVerdict({ now: 0, walkMeters: 400, departures });
   expect(verdict.kind).toBe('JOG');
   expect(verdict.spareS).toBeCloseTo(77.4, 1);
-  return { verdict, ctx: { now: 0, clock: () => '2:14' }, walkMeters: 400, walkSource: 'estimated' };
+  return { verdict, ctx: { now: 0, clock: () => '2:14' }, walkMeters: 400, walk: { source: 'estimated', from: 'here', walkS: Math.ceil(verdict.walkS), minutes: Math.ceil(verdict.walkS / 60), stopId: '9514', walkedM: 400 * 1.3, straightM: 400 } };
 }
 
 describe('the Now strip (M7c.3, mfix8): inline and full', () => {

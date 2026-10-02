@@ -1,7 +1,8 @@
 import { invariant } from '../../lib/invariant';
 import { copy } from '../copy';
 import { type Countdown, countdown } from './countdown';
-import { TRIP_HORIZON_S, type TimedRide, type TripCardModel, type TripStatus, type TripWalk } from './trip-card';
+import { TRIP_HORIZON_S, type TimedRide, type TripCardModel, type TripStatus } from './trip-card';
+import type { SavedTripWalk } from './trip-walk';
 
 /**
  * The trip card's words (plan §4 "Sheets": the hero "Leave in 6 min" and its states), built on M7.2's
@@ -81,7 +82,7 @@ function heroText(left: Countdown, current: TimedRide, next: TimedRide | null): 
 }
 
 /** The line under the hero: the train it counts to, and the walk it allows for. */
-export function rideLine(status: Timed, walk: TripWalk | null): string {
+export function rideLine(status: Timed, walk: SavedTripWalk | null): string {
   invariant(status.current.departClock.length > 0, 'a ride has a departure clock');
   const walkPart = walk === null ? 'walk time unknown until the phone knows where you are' : walkText(walk);
   const line = `${status.current.departClock} train, arrives ${status.current.arriveClock} · ${walkPart}`;
@@ -89,11 +90,12 @@ export function rideLine(status: Timed, walk: TripWalk | null): string {
   return line;
 }
 
-function walkText(walk: TripWalk): string {
-  invariant(walk.walkS >= 0, 'a walk is never negative');
-  const minutes = Math.max(1, Math.round(walk.walkS / 60));
-  const text = walk.source === 'here' ? `a ${minutes} min walk from here` : walk.source === 'start' ? `a ${minutes} min walk from your start` : `a ${minutes} min walk (your setting)`;
-  invariant(text.includes(`${minutes} min`), 'the walk is said in minutes');
+/** The trip's one walk in the minutes every screen shows (mfix11: the Now bar's minutes too), and where it starts. */
+function walkText(walk: SavedTripWalk): string {
+  invariant(Number.isSafeInteger(walk.minutes) && walk.minutes * 60 >= walk.walkS, 'a walk is shown in whole minutes that never understate it');
+  const where = walk.from === 'here' ? 'from here' : walk.from === 'start' ? 'from your start' : '(your setting)';
+  const text = `a ${walk.minutes} min walk ${where}`;
+  invariant((walk.from === 'setting') === (walk.source === 'override'), 'only the trip\'s own minutes are said to be your setting');
   return text;
 }
 

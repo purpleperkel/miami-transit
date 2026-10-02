@@ -5,6 +5,7 @@ import type { SavedTrip } from '@/data/saved-trips-repo';
 import { type ScheduleDbState, useScheduleDb } from '@/data/schedule-db-provider';
 import type { TripSettings } from '@/data/settings-repo';
 import { useUserDb } from '@/data/user-db-provider';
+import type { WalkTo } from '@/domain/walk/walk-cache';
 import type { LatLon } from '@/lib/geo';
 import { invariant } from '@/lib/invariant';
 
@@ -23,6 +24,7 @@ import { tripWords } from './trip-copy';
 import { openTrip, startAddTrip } from './trip-routes';
 import { TripCard } from './TripCard';
 import { TripsScreen } from './TripsScreen';
+import { useSavedTripsWalk } from './use-saved-trips-walk';
 
 /**
  * The Trips tab (plan M7.8): with trips saved, one TripCard per trip, sorted by leave-by (soonest first),
@@ -30,7 +32,10 @@ import { TripsScreen } from './TripsScreen';
  * trip saved (or outside the user DB's provider) it is the tab's empty state, TripsScreen ("No trips yet"),
  * with its own actions — and nothing else runs: it reads no position and ticks no clock.
  *
- *   TripsTab (user DB) → SavedTrips (schedule DB, position, pace, clock) → TripsView (props only, rendered in tests)
+ *   TripsTab (user DB) → SavedTrips (schedule DB, position, walks, pace, clock) → TripsView (props only, rendered in tests)
+ *
+ * Each card walks the trip's ONE walk (mfix11, trip-walk.ts): the street walk from the rider's latest fix when the
+ * app's RoutedWalkProvider knows it (useSavedTripsWalk), the walk the Now bar shows for the same trip.
  */
 
 /** The countdowns move with this tick ("Leave now" is cued within a few seconds of its moment). */
@@ -63,12 +68,13 @@ export function TripsTab({ clock = wallClockNowS }: TripsTabProps) {
 
 type SavedTripsProps = { readonly trips: readonly SavedTrip[]; readonly settings: TripSettings; readonly clock: () => number };
 
-/** The saved trips' cards, live: re-read every tick, every new fix and when the schedule opens. */
+/** The saved trips' cards, live: re-read every tick, every new fix or street walk, and when the schedule opens. */
 function SavedTrips({ trips, settings, clock }: SavedTripsProps) {
   const schedule = useScheduleDb();
   const position = useUserPosition();
+  const walk = useSavedTripsWalk(trips);
   const nowS = useNowS(TRIPS_TICK_MS, clock);
-  const state = useMemo(() => tripsViewState({ trips, settings, schedule, position: position.coordinate, nowS }), [trips, settings, schedule, position.coordinate, nowS]);
+  const state = useMemo(() => tripsViewState({ trips, settings, schedule, position: position.coordinate, nowS, walk }), [trips, settings, schedule, position.coordinate, nowS, walk]);
   const reminderProblem = useReminderStatus();
   invariant(trips.length > 0, 'the list is for saved trips');
   invariant(reminderProblem === null || reminderProblem.length > 0, 'a reminder problem says why');
@@ -81,17 +87,19 @@ export type TripsInput = {
   readonly schedule: ScheduleDbState;
   readonly position: LatLon | null;
   readonly nowS: number;
+  /** The trips' street walks from the rider (useSavedTripsWalk); absent, the estimate. */
+  readonly walk?: WalkTo;
 };
 
-/** What the list shows for the saved trips, the schedule, the rider's position and the time. */
-export function tripsViewState({ trips, settings, schedule, position, nowS }: TripsInput): TripsViewState {
+/** What the list shows for the saved trips, the schedule, the rider's position, their walks and the time. */
+export function tripsViewState({ trips, settings, schedule, position, nowS, walk }: TripsInput): TripsViewState {
   invariant(Number.isSafeInteger(nowS), 'the tab is read at a whole second');
   invariant(trips.length > 0, 'the list is for saved trips');
   if (schedule.kind !== 'ready') {
     return { kind: 'waiting', trips, message: schedule.kind === 'failed' ? schedule.message : copy.sheetOpeningMessage };
   }
   const { walkMps } = readWalkingPace();
-  const cards = tripCards(schedule.repo, trips, { nowS, walkMps, bufferS: settings.boardBufferS, position });
+  const cards = tripCards(schedule.repo, trips, { nowS, walkMps, bufferS: settings.boardBufferS, position, walk });
   invariant(cards.length === trips.length, 'one card per saved trip');
   return { kind: 'cards', cards, nowS };
 }

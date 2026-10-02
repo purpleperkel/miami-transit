@@ -19,6 +19,7 @@ import { tripWords } from './trip-copy';
 import { openDirections } from './trip-routes';
 import { TripCard } from './TripCard';
 import { TRIPS_TICK_MS, tripsViewState } from './TripsTab';
+import { useSavedTripsWalk } from './use-saved-trips-walk';
 
 /**
  * A saved trip's own screen (M7.9, src/app/trip/[tripId].tsx): its card — the countdown, or why there is
@@ -49,8 +50,10 @@ export type TripDetailProps = { readonly trip: SavedTrip; readonly settings: Tri
 export function TripDetail({ trip, settings, remove, clock }: TripDetailProps) {
   const schedule = useScheduleDb();
   const position = useUserPosition();
+  const trips = useMemo(() => [trip], [trip]);
+  const walk = useSavedTripsWalk(trips);
   const nowS = useNowS(TRIPS_TICK_MS, clock);
-  const state = useMemo(() => tripsViewState({ trips: [trip], settings, schedule, position: position.coordinate, nowS }), [trip, settings, schedule, position.coordinate, nowS]);
+  const state = useMemo(() => tripsViewState({ trips, settings, schedule, position: position.coordinate, nowS, walk }), [trips, settings, schedule, position.coordinate, nowS, walk]);
   const station = schedule.kind === 'ready' ? schedule.repo.stations().find((s) => s.stationKey === trip.fromStationKey) : undefined;
   const onRoute = useCallback(() => openPlanSheet({ fromStation: trip.fromStationKey }), [trip.fromStationKey]);
   const onDelete = useCallback(() => (remove(trip.id) ? router.back() : undefined), [remove, trip.id]);

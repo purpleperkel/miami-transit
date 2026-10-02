@@ -5,15 +5,15 @@ import { invariant } from '@/lib/invariant';
 import { TText } from '../primitives/TText';
 import { SPACING } from '../tokens';
 import type { CountdownState } from './countdown';
-import type { TripWalk } from './trip-card';
 import { heroOf, rideLine, type Timed } from './trip-copy';
+import type { SavedTripWalk } from './trip-walk';
 import { departureKey, useLeaveNowCue } from './useLeaveNowCue';
 
 export type CountdownHeroProps = {
   readonly tripId: string;
   readonly tripName: string;
   readonly status: Timed;
-  readonly walk: TripWalk | null;
+  readonly walk: SavedTripWalk | null;
   readonly nowS: number;
 };
 

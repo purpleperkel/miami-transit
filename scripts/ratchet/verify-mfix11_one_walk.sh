@@ -555,9 +555,11 @@ const W: LL = { latitude: 25.7760455, longitude: -80.200887 };
 /**
  * B: the bar's COUNTDOWN walks the Trips tab's walk too (the home context's cards). The saved trip Vizcaya -> Dadeland
  * South, the rider at O (> NEAR_TRIP_M from every Vizcaya platform, so the bar counts down instead of judging), and a
- * street walk 1.6 x the straight line (the walk server is the oracle's own injected fetchWalk: no network). T puts the
- * routed leave-by 5 min out; the estimate's countdown would differ (premise). The bar's "Leave in N min" is the Trips
- * tab's and the trip screen's hero, and their walk is the routed one.
+ * street walk 1.6 x the straight line (the walk server
+ * routed leave-by 5 min out. ARBITER RULING (mfix11 review, 2026-10-02): street walks are asked only for origins within
+ * HURRY_RANGE_M (2 km) of the rider (nobody walks further; routing far origins would cost Transitous a request a minute
+ * while riding). So this far trip asks the walk server for NOTHING, and the bar's "Leave in N min" is the Trips tab's
+ * and the trip screen's hero, all over the ESTIMATE. Consistency is still the claim; only its walk source changed.
  */
 async function farCountdown(walkMps: number) {
   const { tripCards } = load('src/ui/trips/trip-card', ['tripCards']);
@@ -567,7 +569,6 @@ async function farCountdown(walkMps: number) {
   const repo = db().realScheduleRepo();
   const VIZ = 'rail:vizcaya', DADS2 = 'rail:dadeland-south';
   if (!platformsOf(VIZ).every((p: any) => haversineMeters(O, p) > NEAR_TRIP_M)) fail(`premise: every Vizcaya platform is more than ${NEAR_TRIP_M} m from O`);
-  const street = (stop: { stopId: string }) => ({ walkMeters: 1.6 * haversineMeters(O, platform(stop.stopId)), detour: 1, source: 'routed' }); // mfix9's WalkTo: asked with the stop
   const calls: string[] = [];
   const fetchWalk = (request: { url: string }) => {
     calls.push(String(request?.url));
@@ -579,20 +580,27 @@ async function farCountdown(walkMps: number) {
   if (!rides.ok || rides.value.kind !== 'rides' || rides.value.rides.length === 0) fail('premise: Vizcaya -> Dadeland South has direct rides after 09:00 on Wednesday');
   const far = db().savedTrip('far', VIZ, DADS2, { createdEpoch: 1_790_000_200 });
   const first = rides.value.rides[0];
-  const routedS = Math.ceil((1.6 * haversineMeters(O, platform(first.boardStopId))) / walkMps);
-  const T = first.depEpoch - routedS - SETTINGS.boardBufferS - 300;
-  const card = (w: unknown) => tripCards(repo, [far], { nowS: T, walkMps, bufferS: SETTINGS.boardBufferS, position: O, ...(w === undefined ? {} : { walk: w }) })[0];
-  const routed = card(street), estimated = card(undefined);
-  if (routed?.status.kind !== 'leave' || estimated?.status.kind !== 'leave') fail('premise: the far trip counts down at T with either walk');
-  const want = heroOf(routed.status, T).text;
-  if (want === heroOf(estimated.status, T).text || !/^Leave in \d+ min$/.test(want)) fail(`premise: at T the routed countdown (${want}) is live and differs from the estimate's (${heroOf(estimated.status, T).text})`);
+  const cardAt = (at: number) => tripCards(repo, [far], { nowS: at, walkMps, bufferS: SETTINGS.boardBufferS, position: O })[0];
+  // T: the instant the estimate's own countdown for the FIRST ride reads exactly "Leave in 5 min" (a bounded search
+  // back from the train, whatever the estimate's walk works out to).
+  let T = Number.NaN;
+  for (let m = 1; m <= 240 && Number.isNaN(T); m += 1) {
+    const at = first.depEpoch - m * 60;
+    const c = cardAt(at);
+    if (c?.status.kind === 'leave' && c.status.current.ride.depEpoch === first.depEpoch && heroOf(c.status, at).text === 'Leave in 5 min') T = at;
+  }
+  if (Number.isNaN(T)) fail('premise: within 4 h before the first ride the far trip counts down "Leave in 5 min" for it over the estimate');
+  const estimated = cardAt(T);
+  if (estimated?.status.kind !== 'leave') fail('premise: the far trip counts down at T over the estimate');
+  const want = heroOf(estimated.status, T).text;
   const tree = await scene(far, T, fetchWalk);
-  await untilCalls(calls, 1);
+  await settle();
+  if (calls.length !== 0) fail(`a trip more than 2 km away asks the walk server for nothing (arbiter ruling), got ${calls.length} request(s)`);
   const button = hostsByTestID(tree.root, 'now-accessory')[0];
   const bar = button === undefined ? [] : linesOf(button);
   const heroes = hostsByTestID(tree.root, 'countdown-hero').map((h: any) => linesOf(h));
-  const walkMin = routed.walk?.minutes;
-  if (show(bar) !== show(['Dadeland South', want]) || heroes.length !== 2 || heroes.some((h: string[]) => h[0] !== want || !(h[1] ?? '').endsWith(`a ${walkMin} min walk from here`))) fail(`a trip the rider is not near, at ${walkMps} m/s: the bar's countdown is the Trips tab's and the trip screen's, over the routed walk (${show(['Dadeland South', want])}, cards "${want}" / "a ${walkMin} min walk from here"); got bar ${show(bar)}, cards ${show(heroes)} (the estimate's countdown is ${show(heroOf(estimated.status, T).text)})`);
+  const walkMin = estimated.walk?.minutes;
+  if (show(bar) !== show(['Dadeland South', want]) || heroes.length !== 2 || heroes.some((h: string[]) => h[0] !== want || !(h[1] ?? '').endsWith(`a ${walkMin} min walk from here`))) fail(`a trip the rider is not near, at ${walkMps} m/s: the bar's countdown is the Trips tab's and the trip screen's, over the estimate (${show(['Dadeland South', want])}, cards "${want}" / "a ${walkMin} min walk from here"); got bar ${show(bar)}, cards ${show(heroes)}`);
   await unmountAll();
 }
 
@@ -887,7 +895,7 @@ mfix11_oracle precedence
 jest_cases "$MFIX11_WALK_TEST" 'a saved trip walks its override, else the routed walk, else the estimate'
 
 # --- (B, C) Every place that shows or uses a saved trip's walk shows the same one -------------------------------
-# 3. Oracle, ONE tree of the REAL Now bar + Trips tab + trip screen (saved trip Fifth Street -> Bayfront Park, rider at stop 815, T = the first 805 ride - 430 s): the bar's "~N min walk" / "N min walk" equals both cards' "a N min walk ..." for the override 7 min (no provider: 7, no "~", "(your setting)"), the estimate (no provider: 6, "from here"), the routed fixture (mfix9's provider, exactly ONE request for all three screens: 9) and the override while a routed walk is known (7); and tripCards' walk is savedTripWalk's (source, walkS 420 / 527 / 330, minutes) with the leave-by m7a's nextLeave gives that walk + the 120 s buffer. And for a trip the rider is NOT near (Vizcaya -> Dadeland South, a street walk 1.6 x the straight line from the oracle's own injected fetchWalk), the bar's countdown ("Leave in N min", from the home context's cards) is the Trips tab's and the trip screen's hero over the routed walk, where the estimate's would differ; and a Government Center -> Dadeland South trip walks to its boarding platform 9512 (not the centre, not northbound 9513) on the bar, both cards and in tripCards, from a rider due east where the minutes split; and when the one watch reports a newer fix (the rider moves from P, 100 m due south of 805, to O: 2 min -> 6 min) the bar and both cards walk from the LATEST fix, never the first one seen.
+# 3. Oracle, ONE tree of the REAL Now bar + Trips tab + trip screen (saved trip Fifth Street -> Bayfront Park, rider at stop 815, T = the first 805 ride - 430 s): the bar's "~N min walk" / "N min walk" equals both cards' "a N min walk ..." for the override 7 min (no provider: 7, no "~", "(your setting)"), the estimate (no provider: 6, "from here"), the routed fixture (mfix9's provider, exactly ONE request for all three screens: 9) and the override while a routed walk is known (7); and tripCards' walk is savedTripWalk's (source, walkS 420 / 527 / 330, minutes) with the leave-by m7a's nextLeave gives that walk + the 120 s buffer. And for a trip the rider is NOT near (Vizcaya -> Dadeland South, its origin more than 2 km away: arbiter ruling, no street walk is asked for it, so the oracle's injected fetchWalk gets no request), the bar's countdown ("Leave in N min", from the home context's cards) is the Trips tab's and the trip screen's hero over the estimate; and a Government Center -> Dadeland South trip walks to its boarding platform 9512 (not the centre, not northbound 9513) on the bar, both cards and in tripCards, from a rider due east where the minutes split; and when the one watch reports a newer fix (the rider moves from P, 100 m due south of 805, to O: 2 min -> 6 min) the bar and both cards walk from the LATEST fix, never the first one seen.
 mfix11_oracle consistency
 # 4. One passing test (src/ui/trips/__tests__/one-walk.test.tsx).
 jest_cases "$MFIX11_ONE_WALK_TEST" 'the bar and the trip card show the same walk for every source'

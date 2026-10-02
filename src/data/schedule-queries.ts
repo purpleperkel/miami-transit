@@ -3,6 +3,7 @@ import { LINE_IDS, type LineId } from '../domain/lines/line-catalog';
 import type { LineTrack } from '../domain/live/types';
 import type { Mode } from '../domain/network/stations';
 import type { StopVisit } from '../domain/schedule/departures';
+import type { ModeCalendar, ModeStart, ModeTrip } from '../domain/schedule/mode-status';
 import type { RunStop, TripRun } from '../domain/schedule/next-stops';
 import type { ScheduledTrip, ShapePath, TripStop } from '../domain/schedule/positions';
 import type { RideCandidate } from '../domain/schedule/rides';
@@ -197,6 +198,50 @@ const TRIP_RUN_SQL = `
   JOIN station AS x ON x.station_idx = s.station_idx
   WHERE t.trip_idx = :trip_idx
   ORDER BY st.seq`;
+
+/**
+ * Every trip of one service day running at some point in [from_s, to_s], with its mode (mfix4: is a
+ * mode running, or starting soon?). Narrowed by trip_by_service_start (start_s <= to_s).
+ */
+const MODE_TRIPS_AROUND_SQL = `
+  SELECT l.mode, t.start_s, t.end_s
+  FROM trip AS t
+  JOIN service_day_active AS a ON a.service_idx = t.service_idx AND a.date = :date
+  JOIN pattern AS p ON p.pattern_idx = t.pattern_idx
+  JOIN line AS l ON l.line_id = p.line_id
+  WHERE t.start_s <= :to_s AND t.end_s >= :from_s
+  ORDER BY l.mode, t.start_s, t.trip_idx`;
+
+/** Each mode's first trip on one service day starting after :after_s (trip_by_service_start: start_s > after_s). */
+const MODE_STARTS_AFTER_SQL = `
+  SELECT l.mode, min(t.start_s) AS start_s
+  FROM trip AS t
+  JOIN service_day_active AS a ON a.service_idx = t.service_idx AND a.date = :date
+  JOIN pattern AS p ON p.pattern_idx = t.pattern_idx
+  JOIN line AS l ON l.line_id = p.line_id
+  WHERE t.start_s > :after_s
+  GROUP BY l.mode
+  ORDER BY l.mode`;
+
+/**
+ * Each mode's FIRST trip start on every service day of the calendar (mfix4: when a closed mode opens
+ * again), in mode then date order: each service's first start per mode, then each date's earliest over
+ * its active services. One scan of the trips, read once per DB (~1,260 rows on the 2026 feed).
+ */
+const MODE_CALENDAR_SQL = `
+  WITH service_mode AS (
+    SELECT t.service_idx, l.mode, min(t.start_s) AS first_s
+    FROM trip AS t
+    JOIN pattern AS p ON p.pattern_idx = t.pattern_idx
+    JOIN line AS l ON l.line_id = p.line_id
+    GROUP BY t.service_idx, l.mode
+  )
+  SELECT sm.mode, a.date, sd.base_epoch, min(sm.first_s) AS start_s
+  FROM service_day_active AS a
+  JOIN service_mode AS sm ON sm.service_idx = a.service_idx
+  JOIN service_day AS sd ON sd.date = a.date
+  GROUP BY sm.mode, a.date
+  ORDER BY sm.mode, a.date`;
 
 /** line.mode as the schema stores it (scripts/gtfs/schema.ts MODE_CODES: rail 0, mover 1). */
 const MODES_BY_CODE: ReadonlyMap<number, Mode> = new Map<number, Mode>([
@@ -426,6 +471,49 @@ export function readTripRun(db: SqlExecutor, tripIdx: number): TripRun | null {
   invariant(next === null || (typeof next === 'number' && Number.isSafeInteger(next)), 'next_trip_idx is a trip index or null');
   const stops = rows.map((row): RunStop => ({ seq: int(row, 'seq'), stationKey: text(row, 'station_key'), name: text(row, 'name'), arrS: int(row, 'arr_s'), depS: int(row, 'dep_s') }));
   return { tripIdx, stops, nextTripIdx: next };
+}
+
+/** One service day's trips running at some point inside `seconds`, each with its mode (mfix4). */
+export function readModeTripsAround(db: SqlExecutor, day: ServiceDay, seconds: DaySeconds): ModeTrip[] {
+  invariant(seconds.fromS <= seconds.toS, 'the day window is ordered');
+  const trips = db.all(MODE_TRIPS_AROUND_SQL, { date: day.date, from_s: seconds.fromS, to_s: seconds.toS }).map(
+    (row): ModeTrip => ({ mode: modeOf(row), startS: int(row, 'start_s'), endS: int(row, 'end_s') }),
+  );
+  invariant(trips.every((trip) => trip.startS <= seconds.toS && trip.endS >= seconds.fromS), 'every trip runs inside the day window');
+  return trips;
+}
+
+/** Each mode's first trip on one service day starting after `afterS` of that day (mfix4); a mode with none is absent. */
+export function readModeStartsAfter(db: SqlExecutor, day: ServiceDay, afterS: number): ModeStart[] {
+  invariant(Number.isSafeInteger(afterS), `a day second is whole, got ${afterS}`);
+  const starts = db.all(MODE_STARTS_AFTER_SQL, { date: day.date, after_s: afterS }).map(
+    (row): ModeStart => ({ mode: modeOf(row), serviceDate: day.date, baseEpoch: day.baseEpoch, startS: int(row, 'start_s') }),
+  );
+  invariant(starts.every((start) => start.startS > afterS), 'every start is after the instant');
+  return starts;
+}
+
+/** Each mode's first trip start on every service day of the calendar, in date order (mfix4). */
+export function readModeCalendar(db: SqlExecutor): ModeCalendar {
+  const calendar: Record<Mode, ModeStart[]> = { rail: [], mover: [] };
+  for (const row of db.all(MODE_CALENDAR_SQL)) {
+    const mode = modeOf(row);
+    calendar[mode].push({ mode, serviceDate: int(row, 'date'), baseEpoch: int(row, 'base_epoch'), startS: int(row, 'start_s') });
+  }
+  invariant(calendar.rail.length + calendar.mover.length > 0, 'the schedule DB has service days with trips');
+  invariant(
+    Object.values(calendar).every((days) => days.every((start, i) => i === 0 || days[i - 1]!.serviceDate < start.serviceDate)),
+    'each mode lists its service days once, in date order',
+  );
+  return calendar;
+}
+
+/** The row's line.mode as a Mode. */
+function modeOf(row: SqlRow): Mode {
+  const mode = MODES_BY_CODE.get(int(row, 'mode'));
+  invariant(mode !== undefined, `line.mode ${String(row.mode)} is rail (0) or mover (1)`);
+  invariant(mode === 'rail' || mode === 'mover', 'a mode is rail or mover');
+  return mode;
 }
 
 function toStationListing(row: SqlRow): StationListing {

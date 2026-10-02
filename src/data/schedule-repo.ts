@@ -8,6 +8,7 @@ import {
 } from '../domain/gtfs/service-day';
 import { assembleDepartures, type Departure, firstPerDirection, type ServiceDayVisits } from '../domain/schedule/departures';
 import { LINE_IDS, type LineId } from '../domain/lines/line-catalog';
+import { type ModeCalendar, type ModeStatuses, modeStatuses, STARTING_SOON_S } from '../domain/schedule/mode-status';
 import { type NextStop, nextStops } from '../domain/schedule/next-stops';
 import type { Mode } from '../domain/network/stations';
 import {
@@ -29,6 +30,9 @@ import {
   findStation,
   readCalendarBounds,
   readMeta,
+  readModeCalendar,
+  readModeStartsAfter,
+  readModeTripsAround,
   readNextDepartures,
   readRideCandidates,
   readServiceDays,
@@ -124,6 +128,9 @@ export type NextStopsOutcome =
   | { readonly kind: 'not-running'; readonly vehicleKey: string }
   | CalendarGap;
 
+/** Whether rail and the Mover run at an instant by the timetable (mfix4), or why the calendar cannot say. */
+export type ModeStatusOutcome = ({ readonly kind: 'mode-status' } & ModeStatuses) | CalendarGap;
+
 export class ScheduleRepo {
   readonly meta: ScheduleMeta;
   private readonly db: SqlExecutor;
@@ -138,6 +145,8 @@ export class ScheduleRepo {
   private destinations: ReadonlyMap<string, string> | null = null;
   /** Every station's lines, read on first use and kept. */
   private lineMap: ReadonlyMap<string, readonly LineId[]> | null = null;
+  /** Each mode's first trip start on every service day (~1,260 rows), read on first use and kept. */
+  private modeDays: ModeCalendar | null = null;
 
   private constructor(db: SqlExecutor, meta: ScheduleMeta, bounds: ServiceCalendarBounds) {
     invariant(meta.schemaVersion === SCHEDULE_SCHEMA_VERSION, 'the repo reads only the schema it was written for');
@@ -356,6 +365,37 @@ export class ScheduleRepo {
     invariant(lineId !== undefined, `trip ${placed.trip.tripId} runs a catalog line`);
     const destination = current.stops[current.stops.length - 1]?.name ?? '';
     return { kind: 'next-stops', vehicleKey, lineId, mode: placed.trip.mode, destination, stops };
+  }
+
+  /**
+   * Whether rail and the Mover run at `epoch` by the timetable (mfix4, mode-status.ts decides): each
+   * running, closed until its next trip (later this service day, or on a later one), or past its
+   * bundled timetable — or why the calendar has no service day then. Reads each running day's trips
+   * around [epoch, epoch + STARTING_SOON_S] and each mode's next start that day (two small statements
+   * per day, on trip_by_service_start); later days come from the mode calendar, read once.
+   */
+  modeStatusAt(epoch: number): ModeStatusOutcome {
+    invariant(Number.isSafeInteger(epoch), `modeStatusAt needs a whole epoch second, got ${epoch}`);
+    const window = windowFrom(epoch, STARTING_SOON_S);
+    const resolution = this.serviceDays(window);
+    if (resolution.kind !== 'active') {
+      return resolution;
+    }
+    const days = resolution.days.map((day) => {
+      const seconds = daySeconds(day, window);
+      return { day, trips: readModeTripsAround(this.db, day, seconds), startsAfter: readModeStartsAfter(this.db, day, seconds.fromS) };
+    });
+    const statuses = modeStatuses(epoch, { days, calendar: this.modeCalendar() });
+    invariant(Object.values(statuses).every((status) => status.kind !== 'closed' || status.nextStart.epoch > epoch), 'a closed mode opens after the instant');
+    return { kind: 'mode-status', ...statuses };
+  }
+
+  private modeCalendar(): ModeCalendar {
+    const calendar = this.modeDays ?? readModeCalendar(this.db);
+    this.modeDays = calendar;
+    invariant(calendar.rail.length + calendar.mover.length > 0, 'the schedule DB has service days with trips');
+    invariant(this.modeDays === calendar, 'the mode calendar is read once, then kept');
+    return calendar;
   }
 
   private shapePaths(): ReadonlyMap<number, ShapePath> {

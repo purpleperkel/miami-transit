@@ -17,6 +17,7 @@ import { MapControlStack } from './MapControlStack';
 import type { MapRegion, ZoomBucket } from './mapGeometry';
 import { MapLegend } from './MapLegend';
 import { captionText } from './mapTaps';
+import { ModeStatusChip } from './ModeStatusChip';
 import { StationMarker } from './StationMarker';
 import { useMapTaps } from './use-map-taps';
 import { type UserLocation, useUserLocation } from './use-user-location';
@@ -29,8 +30,8 @@ import { MIN_HIT_AREA_PT } from './vehicleVisual';
  * of interest, buildings and pitch off, drawing the lines (LinePolylines), the stations
  * (StationMarker) and the moving vehicles (VehicleMarker) — each filtered and dimmed by the emphasis
  * (layers + focus). Every piece of schedule and live data arrives as a prop; use-live-map.ts reads the
- * schedule DB and the live context and wires them in. `pointsOfInterestFilter` is never set, because
- * it overrides `showsPointsOfInterests`.
+ * schedule DB and the live context and wires them in — all but the mode-status chip (mfix4), which reads
+ * its own. `pointsOfInterestFilter` is never set, because it overrides `showsPointsOfInterests`.
  *
  * The map's own interactions live here too (mfix3 §5): a caption naming what a tap hit (use-map-taps),
  * the floating control stack with the legend (ⓘ) and locate-me buttons, the legend sheet, and
@@ -135,7 +136,10 @@ type MapChromeProps = {
   readonly onDismiss: () => void;
 };
 
-/** What floats over the map: the control stack (top right), the caption (below the status pill), and the legend sheet when open. */
+/**
+ * What floats over the map: the control stack (top right); below the status pill, the caption — or, with
+ * no caption up, the mode-status chip (mfix4); and the legend sheet when open.
+ */
 function MapChrome({ props, location, caption, onLocate, onDismiss }: MapChromeProps) {
   const [legendOpen, setLegendOpen] = useState(false);
   const openLegend = useCallback(() => setLegendOpen(true), []);
@@ -149,6 +153,7 @@ function MapChrome({ props, location, caption, onLocate, onDismiss }: MapChromeP
         <MapControlStack onLegend={openLegend} onLocate={onLocate} />
       </View>
       {caption === null ? null : <MapCaption text={caption} topPt={topPt + MIN_HIT_AREA_PT + SPACING.xs} onDismiss={onDismiss} />}
+      {caption === null ? <ModeStatusChip topPt={topPt + MIN_HIT_AREA_PT + SPACING.xs} /> : null}
       {legendOpen ? <MapLegend scheme={props.scheme} location={location} onClose={closeLegend} /> : null}
     </>
   );

@@ -6,6 +6,7 @@ import {
   dueTasks,
   finishPoll,
   type PollOutcome,
+  releasePoll,
   resumeAll,
   type SchedulerState,
   startPoll,
@@ -118,5 +119,23 @@ describe('poll scheduler (M4.5): background and task changes', () => {
     expect(finishPoll(synced, 'vehicles', 'ok', T0 + 41)).toBe(synced);
     expect(syncTasks(state, [SWIFTLY], T0 + 40).get('vehicles')).toEqual(state.get('vehicles'));
     expect(syncTasks(state, [{ id: 'vehicles', cadenceS: 60 }], T0 + 40).get('vehicles')).toMatchObject({ cadenceS: 60, inFlight: true });
+  });
+});
+
+describe('poll scheduler (mfix10): a poll that counts for nothing', () => {
+  it('releasePoll ends a poll with the task\'s failures and interval as they were: idle, due one interval later', () => {
+    const failedTwice = poll(poll(createScheduler([SWIFTLY], T0), 'vehicles', T0, 'failed', 0), 'vehicles', T0 + 30, 'failed', 0);
+    const before = failedTwice.get('vehicles');
+    expect([before?.failures, before?.intervalS]).toEqual([2, 30]);
+    const released = releasePoll(startPoll(failedTwice, 'vehicles', T0 + 60), 'vehicles', T0 + 62);
+    expect(released.get('vehicles')).toEqual({ ...before, inFlight: false, lastStartedAt: T0 + 60, dueAt: T0 + 92 });
+    expect(finishPoll(startPoll(failedTwice, 'vehicles', T0 + 60), 'vehicles', 'failed', T0 + 62).get('vehicles')?.intervalS).toBe(60); // what counting it would have grown
+  });
+
+  it('releasePoll leaves a task dropped mid-poll dropped, and refuses a task that was not in flight', () => {
+    const state = startPoll(createScheduler([SWIFTLY], T0), 'vehicles', T0);
+    const dropped = syncTasks(state, [], T0 + 1);
+    expect(releasePoll(dropped, 'vehicles', T0 + 2)).toBe(dropped);
+    expect(() => releasePoll(createScheduler([SWIFTLY], T0), 'vehicles', T0 + 2)).toThrow(InvariantError);
   });
 });

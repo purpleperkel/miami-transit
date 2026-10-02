@@ -1,7 +1,6 @@
 import { act } from 'react-test-renderer';
 
-import { LIVE_TRIP_UPDATES_FIXTURE_BYTES, LIVE_VEHICLES_FIXTURE_BYTES } from '../../../domain/gtfsrt/__fixtures__/live-feeds.fixture';
-import { FakeNetwork, FakeServer, SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL, TL_VEHICLES_URL } from '../../../live/__tests__/live-fakes';
+import { bothProviders, FakeNetwork } from '../../../live/__tests__/live-fakes';
 import type { KvStoreFake } from './native-fakes';
 import { FAKE_KEY, type LiveRig, liveRig, renderSettings, type SettingsScreen, settle, unmountAll } from './settings-rig';
 
@@ -29,31 +28,20 @@ afterEach(async () => {
   await unmountAll();
 });
 
-/** Both providers' vehicles and Swiftly's trip updates answer from the fake server (Transitland's departures are not watched here). */
-function bothProviders(): FakeServer {
-  const server = new FakeServer({
-    [SWIFTLY_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES },
-    [SWIFTLY_TRIP_UPDATES_URL]: { status: 200, body: LIVE_TRIP_UPDATES_FIXTURE_BYTES },
-    [TL_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES },
-  });
-  expect(server.requests).toEqual([]);
-  expect(typeof server.fetch).toBe('function');
-  return server;
-}
-
 /**
- * One heartbeat (resume() the first time, as the app does on becoming active: the network is read
- * afresh, so that first tick runs with no reading, off Wi-Fi); then the clock moves on and the screen redraws.
+ * One heartbeat — or, `first`, the app becoming active: resume() asks the network afresh and holds the
+ * poller, so nothing is polled or published until the next heartbeat finds the answer in. Then the
+ * clock moves on and the screen redraws.
  */
 async function beat(rig: LiveRig, screen: SettingsScreen, first: boolean, thenAdvanceS: number): Promise<void> {
   expect(rig.runtime.isStarted()).toBe(true);
+  expect(thenAdvanceS).toBeGreaterThanOrEqual(0); // the clock never runs backwards
   await act(async () => {
     rig.runtime[first ? 'resume' : 'tick']();
     await settle();
   });
   rig.clock.now += thenAdvanceS;
   await screen.refresh();
-  expect(thenAdvanceS).toBeGreaterThanOrEqual(0);
 }
 
 /** Toggles the switch as a tap would, then redraws. */
@@ -67,11 +55,10 @@ async function toggle(screen: SettingsScreen, value: boolean): Promise<void> {
 
 /** The index of the first host node matching `pred`, in document order (-1 when none does). */
 function hostIndex(screen: SettingsScreen, pred: (props: Record<string, unknown>, text: string) => boolean): number {
+  expect(screen.tree().toJSON()).not.toBeNull(); // the screen is mounted
   const hosts = screen.tree().root.findAll((node) => typeof node.type === 'string');
-  const index = hosts.findIndex((node) => pred(node.props, typeof node.props.children === 'string' ? node.props.children : ''));
   expect(hosts.length).toBeGreaterThan(0);
-  expect(index).toBeGreaterThanOrEqual(-1);
-  return index;
+  return hosts.findIndex((node) => pred(node.props, typeof node.props.children === 'string' ? node.props.children : ''));
 }
 
 describe('Data & Settings (mfix10): the Wi-Fi only switch', () => {
@@ -102,6 +89,7 @@ describe('Data & Settings (mfix10): the Wi-Fi only switch', () => {
     expect([...rig.kv.map].filter(([key]) => key.startsWith('settings.'))).toEqual([[ITEM, 'false']]);
     expect(screen.prop('swiftly-wifi-only', 'value')).toBe(false);
     await beat(rig, screen, true, 0);
+    await beat(rig, screen, false, 0);
     expect(rig.latest().swiftlyGated).toBe(false);
     await toggle(screen, true);
     expect([rig.kv.map.get(ITEM), screen.prop('swiftly-wifi-only', 'value')]).toEqual(['true', true]);
@@ -124,7 +112,7 @@ describe('Data & Settings (mfix10): the Wi-Fi only switch', () => {
 describe('Data & Settings (mfix10): the status rows and the footer', () => {
   it('a gated swiftly row reads paused not on wi-fi', async () => {
     const network = new FakeNetwork('WIFI');
-    const rig = await liveRig({ keychain: BOTH_KEYS, fetch: bothProviders().fetch, network });
+    const rig = await liveRig({ keychain: BOTH_KEYS, fetch: bothProviders([]).fetch, network });
     const screen = await renderSettings(rig);
     await beat(rig, screen, true, 0);
     await beat(rig, screen, false, 5);
@@ -137,11 +125,11 @@ describe('Data & Settings (mfix10): the status rows and the footer', () => {
 
   it('transitland shows its own live health while it serves for a gated swiftly', async () => {
     const network = new FakeNetwork('WIFI');
-    const rig = await liveRig({ keychain: BOTH_KEYS, fetch: bothProviders().fetch, network });
+    const rig = await liveRig({ keychain: BOTH_KEYS, fetch: bothProviders([]).fetch, network });
     const screen = await renderSettings(rig);
     await beat(rig, screen, true, 0);
     await beat(rig, screen, false, 5);
-    expect(screen.textOf('provider-status-transitland')).toMatch(/^Standby · Swiftly serves( · |$)/);
+    expect(screen.textOf('provider-status-transitland')).toBe('Standby · Swiftly serves');
     await act(async () => network.emit('CELLULAR'));
     await beat(rig, screen, false, 12);
     expect(screen.textOf('provider-status-transitland')).toMatch(LIVE_HEALTH);

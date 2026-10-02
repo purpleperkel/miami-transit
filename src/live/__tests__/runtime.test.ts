@@ -11,7 +11,9 @@ import { FakeNetwork, FakeServer, runtimeNetwork, SWIFTLY_VEHICLES_URL, TL_VEHIC
  * over a fake server, an in-memory Keychain and quota store, and a manual clock. Keys are fake. The
  * phone is on Wi-Fi and "Use Swiftly only on Wi-Fi" is at its default (ON, mfix10), so a keyed Swiftly
  * serves as it always has; swiftly-wifi-chain.test.ts covers the phone off Wi-Fi. The runtime reads the
- * network on resume (the app becoming active); a test that only ticks hears Wi-Fi from a network event.
+ * network on resume (the app becoming active) and holds its poller until a heartbeat finds the answer
+ * in, so a resume here is followed by a tick (`resumed`); a test that only ticks hears Wi-Fi from a
+ * network event.
  */
 
 const OCT_1 = Date.UTC(2026, 9, 1, 12) / 1000;
@@ -58,6 +60,17 @@ async function settle(): Promise<void> {
   expect(typeof before).toBe('number');
 }
 
+/** The app becomes active: the runtime asks the network and holds its poller; the next heartbeat finds the answer in and resumes it. */
+async function resumed({ runtime, server }: Pick<Rig, 'runtime' | 'server'>): Promise<void> {
+  const before = server.requests.length;
+  runtime.resume();
+  await settle();
+  expect(server.requests).toHaveLength(before); // held: nothing starts until a heartbeat finds the answer in
+  runtime.tick();
+  await settle();
+  expect(runtime.isStarted()).toBe(true);
+}
+
 function latest(states: readonly LiveState[]): LiveState {
   const state = states[states.length - 1];
   expect(state).toBeDefined();
@@ -81,8 +94,7 @@ describe('LiveRuntime (M4.9): start and polling', () => {
     const { runtime, states, server, quota } = rig();
     runtime.start();
     await settle();
-    runtime.resume();
-    await settle();
+    await resumed({ runtime, server });
     const state = latest(states);
     expect(server.requests).toEqual([{ url: TL_VEHICLES_URL, headers: { apikey: TL_KEY } }]);
     expect(state.vehicles?.items).toEqual(vehiclesFromFeed(LIVE_VEHICLES_FIXTURE_DECODED, runtimeNetwork()).items);
@@ -96,8 +108,7 @@ describe('LiveRuntime (M4.9): start and polling', () => {
     const { runtime, states, server } = rig(undefined, { 'quota.transitland.202610': 9_500 });
     runtime.start();
     await settle();
-    runtime.resume();
-    await settle();
+    await resumed({ runtime, server });
     expect(server.requests).toEqual([]);
     expect(latest(states).status.vehicles.provider).toBe('none');
     expect(latest(states).callsThisMonth.transitland).toBe(9_500);
@@ -144,8 +155,7 @@ describe('LiveRuntime (M4.9): keys and lifecycle', () => {
     expect(states).toHaveLength(published);
     runtime.start();
     await settle();
-    runtime.resume();
-    await settle();
+    await resumed({ runtime, server });
     expect(server.urls()).toContain(TL_VEHICLES_URL);
     expect(latest(states).vehicles?.provider).toBe('transitland');
   });

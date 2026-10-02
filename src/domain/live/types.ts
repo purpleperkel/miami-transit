@@ -118,12 +118,18 @@ export type LiveBatch<T> = MappedFeed<T> & {
 export const LIVE_ERROR_KINDS = ['no-key', 'network', 'timeout', 'http', 'decode'] as const;
 export type LiveErrorKind = (typeof LIVE_ERROR_KINDS)[number];
 
-export type LiveError =
+/**
+ * How a fetch failed. `reused` (mfix10) marks a failure a provider hands out AGAIN, from a download
+ * another poll started (Swiftly shares each download for its 30 s cache term, providers/swiftly.ts):
+ * the poll that started the download records the failure; the polls that reuse it record nothing.
+ */
+export type LiveError = (
   | { readonly kind: 'no-key'; readonly message: string }
   | { readonly kind: 'network'; readonly message: string }
   | { readonly kind: 'timeout'; readonly message: string }
   | { readonly kind: 'http'; readonly status: number; readonly message: string }
-  | { readonly kind: 'decode'; readonly message: string };
+  | { readonly kind: 'decode'; readonly message: string }
+) & { readonly reused?: true };
 
 export type LiveResult<T> = Result<LiveBatch<T>, LiveError>;
 

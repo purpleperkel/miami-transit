@@ -27,10 +27,12 @@ jest.mock('expo-sqlite', () => jest.requireActual('../../data/__tests__/schedule
 
 /**
  * mfix10: the app's ONE network watch, through the REAL LiveDataProvider over the REAL ScheduleDbProvider
- * (the committed schedule DB). The native modules are stand-ins: expo-network gives the first reading
- * and plays network changes to its listeners, expo/fetch answers both providers from a fake server
- * (recording each request's instant), the Keychain holds both (fake) keys, and the kv store holds the
- * setting. The app is active, and jest's fake clock is stepped one second per act (the repo's act() trap).
+ * (the committed schedule DB). The native modules are stand-ins: expo-network answers every ask with
+ * the test's network (the app asks once per resume: on mount, as the app is active, the runtime asks
+ * and holds its poller until a heartbeat finds that answer in) and plays network changes to its
+ * listeners; expo/fetch answers both providers from a fake server (recording each request's instant),
+ * the Keychain holds both (fake) keys, and the kv store holds the setting. The app is active, and jest's
+ * fake clock is stepped one second per act (the repo's act() trap).
  */
 
 const STATION = 'mover:government-center';
@@ -38,16 +40,16 @@ const T0_MS = Date.UTC(2026, 9, 1, 12);
 
 type Provider = 'swiftly' | 'transitland';
 type Listener = { readonly listener: (state: NetworkState) => void; readonly remove: jest.Mock };
-const mockNet = { first: 'CELLULAR', asks: 0, listeners: [] as Listener[] };
+const mockNet = { answer: 'CELLULAR', asks: 0, listeners: [] as Listener[] };
 const mockHttp: { server: FakeServer | null; requests: { url: string; atS: number }[] } = { server: null, requests: [] };
 const trees: ReactTestRenderer[] = [];
 
-/** expo-network's first answer: networkState(mockNet.first). */
-function mockGetNetworkState(): Promise<NetworkState> {
+/** expo-network's answer to an ask: networkState(mockNet.answer). */
+function mockGetNetworkState(...args: unknown[]): Promise<NetworkState> {
   mockNet.asks += 1;
-  expect(mockNet.first.length).toBeGreaterThan(0);
+  expect(args).toEqual([]); // expo-network's getNetworkStateAsync takes nothing
   expect(mockNet.listeners.filter((entry) => entry.remove.mock.calls.length === 0)).toHaveLength(1); // asked only while the one watch listens
-  return Promise.resolve(networkState(mockNet.first));
+  return Promise.resolve(networkState(mockNet.answer));
 }
 
 /** expo-network's listener, handing back a subscription whose remove() is counted. */
@@ -89,14 +91,14 @@ afterEach(async () => {
 
 afterAll(closeScheduleCopy);
 
-/** Watches the station, as the Stations tab would. */
+/** Watches the station, as the Stations tab would; checks the published gate's contract on every render. */
 function Watcher(): null {
-  const { runtime } = useLive();
+  const { runtime, state } = useLive();
   useEffect(() => {
     runtime?.watchStations([STATION]);
   }, [runtime]);
-  expect(STATION).toMatch(/^mover:/);
-  expect(typeof useLive).toBe('function');
+  expect(state === null || !state.swiftlyGated || state.hasKey.swiftly).toBe(true); // the gate holds back only a keyed Swiftly
+  expect(state === null || runtime?.isStarted() === true).toBe(true); // a published state comes from the running runtime
   return null;
 }
 
@@ -109,7 +111,7 @@ async function flush(): Promise<void> {
     }
   });
   expect(Date.now()).toBe(before);
-  expect(trees.length).toBeGreaterThanOrEqual(0);
+  expect(mockNet.listeners.filter((entry) => entry.remove.mock.calls.length === 0).length).toBeLessThanOrEqual(1); // never a second watch, at any instant
 }
 
 /** Steps the fake clock `seconds` seconds, one second per act. */
@@ -124,9 +126,9 @@ async function stepS(seconds: number): Promise<void> {
   expect(Date.now() % 1000).toBe(0);
 }
 
-/** The real live provider (both keys saved) over the committed schedule DB, on a network whose first answer is `first`. */
-async function mountLive(first: string): Promise<ReactTestRenderer> {
-  mockNet.first = first;
+/** The real live provider (both keys saved) over the committed schedule DB, on a network that answers every ask with `answer`. */
+async function mountLive(answer: string): Promise<ReactTestRenderer> {
+  mockNet.answer = answer;
   mockHttp.server = new FakeServer({
     [SWIFTLY_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES },
     [SWIFTLY_TRIP_UPDATES_URL]: { status: 200, body: LIVE_TRIP_UPDATES_FIXTURE_BYTES },
@@ -166,29 +168,30 @@ function providerOf(url: string): Provider {
 
 /** Who the first request after request number `from` matching `capability` went to, or null before there is one. */
 function firstTo(from: number, capability: RegExp): Provider | null {
-  const first = mockHttp.requests.slice(from).find((request) => capability.test(request.url));
   expect(from).toBeLessThanOrEqual(mockHttp.requests.length);
-  expect(first === undefined || capability.test(first.url)).toBe(true);
+  const after = mockHttp.requests.slice(from);
+  expect(after.every((request, i) => i === 0 || (after[i - 1]?.atS ?? request.atS) <= request.atS)).toBe(true); // in time order: the fake clock never runs backwards
+  const first = after.find((request) => capability.test(request.url));
   return first === undefined ? null : providerOf(first.url);
 }
 
 /** Steps (at most `maxS` s) until both capabilities have a request after request number `from`; who each first one went to. */
 async function nextFetches(from: number, maxS: number): Promise<{ vehicles: Provider | null; predictions: Provider | null }> {
+  expect(maxS).toBeGreaterThan(0);
+  expect(from).toBeGreaterThanOrEqual(0);
   const [VEHICLES, PREDICTIONS] = [/vehicle/, /trip-updates|\/departures/];
   for (let s = 0; s < maxS && (firstTo(from, VEHICLES) === null || firstTo(from, PREDICTIONS) === null); s += 1) {
     await stepS(1);
   }
-  expect(maxS).toBeGreaterThan(0);
-  expect(from).toBeGreaterThanOrEqual(0);
   return { vehicles: firstTo(from, VEHICLES), predictions: firstTo(from, PREDICTIONS) };
 }
 
 /** How many requests Swiftly has seen since request number `from`. */
 function swiftlyCalls(from: number): number {
-  const calls = mockHttp.requests.slice(from).filter((request) => providerOf(request.url) === 'swiftly').length;
   expect(from).toBeLessThanOrEqual(mockHttp.requests.length);
-  expect(calls).toBeGreaterThanOrEqual(0);
-  return calls;
+  const urls = mockHttp.requests.slice(from).map((request) => request.url).filter((url) => providerOf(url) === 'swiftly');
+  expect(urls.every((url) => url === SWIFTLY_VEHICLES_URL || url === SWIFTLY_TRIP_UPDATES_URL)).toBe(true); // Swiftly is asked for its two feeds only
+  return urls.length;
 }
 
 /** Steps until Swiftly's next poll is ONE second away, so a gate read late would let that poll through. */

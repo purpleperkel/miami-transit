@@ -49,9 +49,14 @@ SDK 57; never trust memory for Expo APIs).
 - Network (mfix10, 2026-10-02): the live runtime owns the app's ONE expo-network watch (src/live/network-watch.ts),
   which LiveDataProvider hands it. Any test that renders the real `LiveDataProvider` needs a labelled
   `// test-time mock of native module` expo-network mock whose `addNetworkStateListener` returns a subscription with
-  `remove()`: jest-expo's automock returns a Promise instead, and the watch refuses it with an invariant. The watch
-  asks `getNetworkStateAsync` on every resume (the mount while active included) and discards the old reading first,
-  so the resume tick itself always runs with no reading (off Wi-Fi: Swiftly gated).
+  `remove()`: jest-expo's automock returns a Promise instead, and the watch refuses it with an invariant. On every
+  resume (the mount while active included) the runtime asks `getNetworkStateAsync` and HOLDS its poller: no tick, no
+  provider switch, the published gate as it was, until a heartbeat finds the answer in (or `RESUME_READING_TIMEOUT_MS`,
+  3 s, passes: no reading, so off Wi-Fi). A test that calls `runtime.resume()` by hand must tick once after the answer
+  lands before anything polls. Swiftly never starts a request to an endpoint within 30 s of its last start there
+  (providers/swiftly.ts), whatever the scheduler asks. KNOWN UPSTREAM LIMIT (expo-network 57.0.2,
+  ios/NetworkModule.swift): its one NWPathMonitor is cancelled when the last listener goes and cannot restart, so after
+  a runtime stop and start in one app session listener events stop until relaunch; resume asks still run.
 - `babel.config.js` exists because jest-expo 57.0.5's `jest-expo/ios` preset needs Expo's babel preset
   to parse React Native's jest setup. TypeScript 6 defaults `types` to `[]` — the tsconfigs set it explicitly.
 

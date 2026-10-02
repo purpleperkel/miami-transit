@@ -166,7 +166,62 @@ describe('Swiftly provider (M4.9)', () => {
     const provider = createSwiftlyProvider(providerDeps(server));
     const results = [await provider.fetchPredictions('rail:brickell', signal()), await provider.fetchPredictions('rail:government-ctr', signal())];
     expect(results.map((r) => !r.ok && r.error.kind === 'http' && r.error.status)).toEqual([403, 403]);
+    expect(results.map((r) => !r.ok && r.error.reused === true)).toEqual([false, true]); // only the fetch that started it records it
     expect(server.urls()).toHaveLength(1);
+  });
+});
+
+describe('Swiftly provider (mfix10): the 30 s floor at the source', () => {
+  it('vehicles: a fetch less than 30 s after the last download started reads that download, unmetered; at 30 s it downloads afresh', async () => {
+    const server = new FakeServer({ [SWIFTLY_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES } });
+    const deps = providerDeps(server);
+    const provider = createSwiftlyProvider(deps);
+    const first = await provider.fetchVehicles(signal());
+    deps.clock.now += 29;
+    const reread = await provider.fetchVehicles(signal());
+    expect([server.urls(), deps.calls]).toEqual([[SWIFTLY_VEHICLES_URL], ['swiftly']]);
+    expect(reread.ok && first.ok && reread.value).toBe(first.ok && first.value); // the same batch, not a new download
+    deps.clock.now += 1;
+    await provider.fetchVehicles(signal());
+    expect([server.urls(), deps.calls]).toEqual([[SWIFTLY_VEHICLES_URL, SWIFTLY_VEHICLES_URL], ['swiftly', 'swiftly']]);
+  });
+
+  it('vehicles: a failure handed out again inside the floor is marked reused; the fetch that started the download gets it as it came', async () => {
+    const server = new FakeServer({ [SWIFTLY_VEHICLES_URL]: { status: 503, body: new Uint8Array(0) } });
+    const deps = providerDeps(server);
+    const provider = createSwiftlyProvider(deps);
+    const own = await provider.fetchVehicles(signal());
+    deps.clock.now += 5;
+    const reused = await provider.fetchVehicles(signal());
+    expect(own).toEqual({ ok: false, error: { kind: 'http', status: 503, message: 'api.goswift.ly answered HTTP 503' } });
+    expect(reused).toEqual({ ok: false, error: { kind: 'http', status: 503, message: 'api.goswift.ly answered HTTP 503', reused: true } });
+    expect(server.urls()).toHaveLength(1);
+  });
+
+  it('a new agency key is a new endpoint, so it downloads at once', async () => {
+    const MDT = 'https://api.goswift.ly/real-time/mdt-test/gtfs-rt-vehicle-positions';
+    const server = new FakeServer({ [SWIFTLY_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES }, [MDT]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES } });
+    let keys: LiveKeys = FAKE_KEYS;
+    const deps: Deps = { ...providerDeps(server), keys: () => keys };
+    const provider = createSwiftlyProvider(deps);
+    await provider.fetchVehicles(signal());
+    keys = { ...FAKE_KEYS, swiftlyAgency: 'mdt-test' };
+    await provider.fetchVehicles(signal());
+    expect(server.urls()).toEqual([SWIFTLY_VEHICLES_URL, MDT]);
+    expect(deps.calls).toEqual(['swiftly', 'swiftly']); // each download metered once
+  });
+
+  it('the floor is measured on a clock that never runs backwards: a wall-clock step back neither stretches nor shortens it', async () => {
+    const server = new FakeServer({ [SWIFTLY_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES } });
+    const deps = providerDeps(server);
+    const provider = createSwiftlyProvider(deps);
+    await provider.fetchVehicles(signal());
+    deps.clock.now -= 3_600; // the phone's clock is corrected an hour back
+    await provider.fetchVehicles(signal());
+    expect(server.urls()).toHaveLength(1);
+    deps.clock.now += 30;
+    await provider.fetchVehicles(signal());
+    expect(server.urls()).toHaveLength(2);
   });
 });
 

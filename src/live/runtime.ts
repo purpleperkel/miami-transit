@@ -1,5 +1,6 @@
 import type { RuntimeNetwork } from '../data/live-network';
 import type { ProviderStanding, Standings } from '../domain/live/chain';
+import { HEARTBEAT_MS } from '../domain/live/constants';
 import { isOnWifi, swiftlyAllowed } from '../domain/live/network-gate';
 import type { LiveRequest } from '../domain/live/transports';
 import { type ChainProviderId, type LiveProvider, PROVIDER_IDS, type ProviderId } from '../domain/live/types';
@@ -25,23 +26,39 @@ import { readSwiftlyWifiOnly } from './swiftly-wifi';
  * publishes its LiveState; use-live-polling.ts starts and stops it.
  *
  * mfix10 "Use Swiftly only on Wi-Fi": the runtime owns the app's one network watch (network-watch.ts,
- * over the `networkSource` live-context.tsx passes: expo-network), starts and stops it with itself, and
- * refreshes it on every resume: back from the background the reading is discarded (so Swiftly is gated)
- * and asked afresh, since the phone may have left Wi-Fi while the app was suspended. A runtime given
- * no source has no reading, so the phone counts as off Wi-Fi. Every time the chain takes the
- * providers' standings (each poll tick, each finished poll) the gate is read afresh: the rider's
- * setting from its kv item (swiftly-wifi.ts, ON by default) and the watch's latest reading. With the
- * setting on and the phone off Wi-Fi, Swiftly stands in the chain exactly as if it had no key, for
- * both capabilities: no request starts, no call is metered, no failure or backoff accrues, and
- * Transitland serves. The Keychain still holds the key, so `hasKey` and `keyHints` still show it, and
- * `swiftlyGated` says why it is not serving. A request already in flight when the gate closes may
- * finish, and the chain records nothing for it (poller.ts finish).
+ * over the `networkSource` live-context.tsx passes: expo-network) and starts and stops it with itself.
+ * A runtime given no source has no reading, so the phone counts as off Wi-Fi. Every time the chain
+ * takes the providers' standings (each poll tick, each finished poll) the gate is read afresh: the
+ * rider's setting from its kv item (swiftly-wifi.ts, ON by default) and the watch's latest reading.
+ * With the setting on and the phone off Wi-Fi, Swiftly stands in the chain exactly as if it had no
+ * key, for both capabilities: no request starts, no call is metered, no failure or backoff accrues,
+ * and Transitland serves. The Keychain still holds the key, so `hasKey` and `keyHints` still show it,
+ * and `swiftlyGated` says why it is not serving. A request already in flight when the gate closes may
+ * finish, and it leaves no trace (poller.ts settle).
+ *
+ * HOLD ON RESUME (arbiter, mfix10 fix round 2). iOS suspends the app's JavaScript in the background,
+ * so the phone may have changed networks with no listener event reaching the app. On every resume
+ * (the mount while active included) the runtime asks the network afresh and HOLDS the poller: no
+ * resume tick, no provider switch, the published gate and status as they were. The hold lasts until
+ * the fresh answer (or a listener event) is in, or until RESUME_READING_TIMEOUT_MS passes; then the
+ * poller resumes on that reading — at the first heartbeat that finds it in, so a fetch never starts
+ * at the very instant the reading lands, and the hold never ends while the app is in the background
+ * (the heartbeat runs only while it is active). A timeout means no reading: not Wi-Fi.
  *
  * LIFECYCLE: constructing a runtime does nothing observable. `start()` makes a fresh poller, loads
  * the keys and begins publishing; `stop()` aborts the poller's requests and publishing stops. A
  * stopped runtime can start again (React may run an effect twice). What outlives a stop: the keys,
  * the watched stations, the byte counter, and the quota (persisted).
  */
+
+/** How long a resume holds the poller for the network's fresh answer (arbiter judgment constant, mfix10 fix round 2). */
+export const RESUME_READING_TIMEOUT_MS = 3_000;
+
+/** The heartbeats a resume holds the poller at most: RESUME_READING_TIMEOUT_MS of them. */
+const RESUME_HOLD_BEATS = Math.ceil(RESUME_READING_TIMEOUT_MS / HEARTBEAT_MS);
+
+/** A resume waiting for the network's fresh answer: the heartbeats it has counted, and the Swiftly gate as it stood. */
+type ResumeHold = { beats: number; readonly gate: boolean };
 
 export type LiveState = LiveSnapshot & {
   /** Response bytes per provider this session (Diagnostics: bytes per poll, falsifier R19). */
@@ -57,7 +74,10 @@ export type LiveState = LiveSnapshot & {
   readonly keysError: KeyError | null;
   /** The latest BUG in the live runtime (a broken invariant in a poll or a key load), or null (detach.ts). */
   readonly internalError: string | null;
-  /** Swiftly has a key, but "Use Swiftly only on Wi-Fi" holds it back: the setting is on and the phone is off Wi-Fi. */
+  /**
+   * Swiftly has a key, but "Use Swiftly only on Wi-Fi" holds it back: the setting is on and the phone is
+   * off Wi-Fi. While a resume holds the poller it reads as it stood when the app came back.
+   */
   readonly swiftlyGated: boolean;
 };
 
@@ -92,6 +112,8 @@ export class LiveRuntime {
   private poller: LivePoller | null = null;
   /** The gate as last published, so a tick that moved no chain status still shows a toggle or a network change. */
   private publishedGate = false;
+  /** Set from a resume until the network's fresh answer is in (or the timeout): the poller is held meanwhile. */
+  private hold: ResumeHold | null = null;
   private readonly counter = new ByteCounter();
   private readonly providers: Readonly<Record<ChainProviderId, LiveProvider>>;
   private readonly keychain: SecretStore;
@@ -124,6 +146,7 @@ export class LiveRuntime {
     invariant(!started || this.poller instanceof LivePoller, 'a started runtime has its poller');
     invariant(started || this.poller === null, 'a stopped runtime has none');
     invariant(this.watch === null || this.watch.listening === started, 'the network watch listens exactly while the runtime runs');
+    invariant(this.hold === null || (started && this.watch !== null), 'only a running runtime with a network watch holds on resume');
     return started;
   }
 
@@ -150,29 +173,50 @@ export class LiveRuntime {
     const poller = this.poller;
     invariant(poller !== null, 'only a started runtime stops');
     this.poller = null;
+    this.hold = null;
     poller.dispose();
     this.watch?.stop();
     invariant(!this.isStarted(), 'the runtime is stopped');
   }
 
-  /** The 1 s heartbeat (use-live-polling.ts, while the app is active); the chain reads the Swiftly gate afresh. */
+  /**
+   * The 1 s heartbeat (use-live-polling.ts, while the app is active). Unheld, the poller ticks and the
+   * chain reads the Swiftly gate afresh. Held, the heartbeat only counts toward the hold's end: the
+   * first one that finds the network's fresh answer in, or that comes RESUME_READING_TIMEOUT_MS after
+   * the resume, lifts the hold and resumes the poller on the reading then (none after a timeout).
+   */
   tick(): void {
-    invariant(this.poller !== null, 'only a started runtime ticks');
-    this.poller.tick();
+    const poller = this.poller;
+    invariant(poller !== null, 'only a started runtime ticks');
+    if (this.hold === null) {
+      poller.tick();
+    } else if (this.holdOver(this.hold)) {
+      this.hold = null; // first: the gate is read afresh from here on
+      poller.resume();
+    } else {
+      return; // still held: no poll starts, and nothing is published
+    }
     this.publishGateMove();
     invariant(this.isStarted(), 'a tick keeps the runtime started');
   }
 
   /**
-   * Back from the background (and on mount, as the app becomes active): the network reading is
-   * discarded and asked afresh, so Swiftly stays gated until a fresh answer says Wi-Fi; then every
-   * task is due again and the chain resolves at once.
+   * The app is active again (and on mount, as it becomes active). With a network watch the runtime asks
+   * the network afresh and HOLDS the poller until tick() finds the answer in (or the timeout passes);
+   * a resume during a hold asks again and starts the hold over, the gate kept as it stood. Without a
+   * watch there is no reading to wait for, and the poller resumes at once.
    */
   resume(): void {
-    invariant(this.poller !== null, 'only a started runtime resumes');
-    this.watch?.refresh();
-    this.poller.resume();
-    this.publishGateMove();
+    const poller = this.poller;
+    invariant(poller !== null, 'only a started runtime resumes');
+    if (this.watch === null) {
+      poller.resume();
+      this.publishGateMove();
+    } else {
+      this.hold = { beats: 0, gate: this.hold?.gate ?? this.publishedGate };
+      poller.hold();
+      this.watch.refresh();
+    }
     invariant(this.isStarted(), 'resuming keeps the runtime started');
   }
 
@@ -244,6 +288,15 @@ export class LiveRuntime {
     this.emit();
   }
 
+  /** Counts one heartbeat of `hold`; whether it is over: the network has answered since the resume, or the timeout has passed. */
+  private holdOver(hold: ResumeHold): boolean {
+    const watch = this.watch;
+    invariant(watch !== null, 'only a runtime with a network watch holds on resume');
+    hold.beats += 1;
+    invariant(hold.beats <= RESUME_HOLD_BEATS, 'no hold outlasts RESUME_READING_TIMEOUT_MS: the heartbeat that reaches it lifts the hold');
+    return !watch.pending || hold.beats === RESUME_HOLD_BEATS;
+  }
+
   /**
    * A bug surfaced by a detached task (detach.ts): kept in the state as internalError, so it shows in every build. The
    * app's other detached work reports here too — the routed-walk runtime (src/ui/walk/RoutedWalkProvider.tsx) — so a
@@ -265,14 +318,18 @@ export class LiveRuntime {
 
   /**
    * Whether "Use Swiftly only on Wi-Fi" holds a keyed Swiftly back now: the setting is on and the phone
-   * is off Wi-Fi (or has no reading: none yet, or discarded by a resume). Read afresh on every call,
-   * never cached: the setting from its kv item (only when Swiftly has a key), the network from the
-   * watch's latest reading.
+   * is off Wi-Fi (or has no reading: none yet, or none since a resume timed out). Read afresh on every
+   * call, never cached: the setting from its kv item (only when Swiftly has a key), the network from
+   * the watch's latest reading. While a resume holds the poller, the gate stays as it stood when the
+   * app came back (so the published state does not move until the fresh reading is in).
    */
   private swiftlyGated(): boolean {
     invariant(this.watch === null || this.watch.listening, 'the gate is read only while the runtime runs, its network watch listening');
     if (this.keys.swiftly === null) {
       return false; // nothing to hold back, so the setting is not even read
+    }
+    if (this.hold !== null) {
+      return this.hold.gate;
     }
     const wifiOnly = this.wifiOnly();
     invariant(typeof wifiOnly === 'boolean', 'the Wi-Fi only setting reads on or off');
@@ -282,16 +339,16 @@ export class LiveRuntime {
   /** Publishes when the Swiftly gate moved but no chain status did (e.g. Swiftly benched for failing: Transitland serves either way). */
   private publishGateMove(): void {
     invariant(this.poller !== null, 'only a running runtime publishes');
-    const gated = this.swiftlyGated();
-    if (gated !== this.publishedGate) {
+    invariant(this.hold === null, 'the gate moves only once a resume\'s hold has lifted');
+    if (this.swiftlyGated() !== this.publishedGate) {
       this.emit();
     }
-    invariant(this.publishedGate === gated, 'the published state shows the gate in effect');
   }
 
   /** Every provider's standing for the chain: key present (a gated Swiftly stands as key-less), capabilities, calls this month. */
   private standings(): Standings {
     invariant(this.poller !== null, 'the chain takes standings only while the runtime runs');
+    invariant(this.hold === null, 'the poller is held while the runtime holds, so the chain never resolves on a held gate');
     const nowS = this.nowS();
     const gated = this.swiftlyGated();
     const standings = { swiftly: this.standing('swiftly', nowS, gated), transitland: this.standing('transitland', nowS, false) };
@@ -302,13 +359,11 @@ export class LiveRuntime {
   private standing(provider: ProviderId, nowS: number, gated: boolean): ProviderStanding {
     invariant(Number.isFinite(nowS), 'a standing is taken at an instant');
     invariant(!gated || provider === 'swiftly', 'only Swiftly is gated');
-    const standing: ProviderStanding = {
+    return {
       hasKey: this.keys[provider] !== null && !gated,
       capabilities: this.providers[provider].capabilities,
       callsThisMonth: callsThisMonth(this.quota, provider, nowS),
     };
-    invariant(standing.capabilities === this.providers[provider].capabilities, 'a standing carries the provider\'s own capabilities');
-    return standing;
   }
 
   private emit(): void {

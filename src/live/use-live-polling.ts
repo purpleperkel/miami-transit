@@ -8,7 +8,9 @@ import { invariant } from '../lib/invariant';
  * Plan M4.9 / §4 Polling: "one 1 s heartbeat, only while the app is active". The hook starts the
  * live runtime for as long as the component is mounted, and ties its heartbeat to AppState:
  *
- *   active               → resume() (everything due again, cadence floors kept), then tick() every 1 s
+ *   active               → resume() (everything due again, cadence floors kept), then tick() every 1 s;
+ *                          the live runtime first holds its poller until a heartbeat finds the fresh
+ *                          network reading in (mfix10, runtime.ts), so no request starts on a stale one
  *   inactive, background → the heartbeat stops: no new request starts until the app is active again
  *
  * A request already in flight when the app leaves the foreground ends by itself (8 s abort at most).

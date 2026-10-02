@@ -1,8 +1,9 @@
 import { type ChainResolution, type ChainState, initialChainState, recordPoll, resolveChain, type Standings } from '../domain/live/chain';
 import { PROVIDER_CONFIG } from '../domain/live/constants';
-import { dueTasks, finishPoll, type PollOutcome, type PollTask, resumeAll, type SchedulerState, startPoll, syncTasks } from '../domain/live/scheduler';
-import type { Capability, ChainProviderId, LiveBatch, LiveError, LivePrediction, LiveProvider, LiveResult, LiveVehicle, ProviderId } from '../domain/live/types';
+import { dueTasks, finishPoll, type PollOutcome, type PollTask, releasePoll, resumeAll, type SchedulerState, startPoll, syncTasks } from '../domain/live/scheduler';
+import type { Capability, ChainProviderId, LiveBatch, LiveError, LivePrediction, LiveProvider, LiveVehicle, ProviderId } from '../domain/live/types';
 import { invariant } from '../lib/invariant';
+import { ok, type Result } from '../lib/result';
 import { detach } from './detach';
 
 /**
@@ -18,8 +19,18 @@ import { detach } from './detach';
  *    once. Each task polls at its provider's cadence, never overlapping, backing off on failure
  *    (m4a scheduler.ts; a 429 doubles the interval).
  *  - Every finished poll is recorded in the chain (3 failures in a row → failing / failover) and
- *    published as a new immutable snapshot through `onChange` — except a poll whose provider stands
- *    key-less when it ends (mfix10: Swiftly gated off Wi-Fi meanwhile), which the chain never records.
+ *    published as a new immutable snapshot through `onChange`.
+ *  - mfix10 (fix round 2): a poll COUNTS only when its provider still stands keyed when it ends and
+ *    its failure, if any, is its own. A poll that does not count leaves no trace: no lastError (so no
+ *    'offline' flash), nothing in the chain, and its task is released with its failures and interval
+ *    as they were (scheduler.ts releasePoll). That is a Swiftly gated off Wi-Fi meanwhile (the poll
+ *    started while it was allowed, and leaving Wi-Fi may have cut the download), a key removed
+ *    meanwhile, or a failure `reused` from a download another poll started (Swiftly's 30 s share:
+ *    one cut download is one failure, recorded by the poll that started it). A batch it brought back
+ *    is still shown: fresh data the phone has already fetched.
+ *  - HOLD (mfix10 fix round 2): the runtime holds the poller while it waits for a fresh network
+ *    reading on resume. A held poller is not ticked, and a poll that ends meanwhile is settled when
+ *    `resume()` lifts the hold, on the standings then — so nothing moves until the reading is in.
  *  - When a capability's serving provider CHANGES (failover, a re-probe of the primary after 300 s,
  *    a better provider's key pasted), each idle task of it is due at once: the new provider owes
  *    nothing to the old one's backoff or cadence, so a failover never waits out a dead provider.
@@ -75,6 +86,12 @@ export const EMPTY_SNAPSHOT: LiveSnapshot = Object.freeze({
   status: Object.freeze({ vehicles: IDLE_STATUS, predictions: IDLE_STATUS }),
 });
 
+/** A poll's Result: on success, the step that shows its batch (the vehicles, or its station's predictions). */
+type Polled = Result<() => void, LiveError>;
+
+/** A poll that has ended: its task, what it polled from whom, and its Result (null: it broke by a bug). */
+type EndedPoll = { readonly id: string; readonly capability: Capability; readonly provider: ProviderId; readonly polled: Polled | null };
+
 /** Seconds from a wall clock that never run backwards: a backwards step is absorbed into an offset. */
 export class MonotonicClock {
   private offset = 0;
@@ -109,6 +126,9 @@ export class LivePoller {
   private readonly clock: MonotonicClock;
   private readonly abort = new AbortController();
   private disposed = false;
+  /** Held by the runtime until a resume's network reading is in: not ticked, and ended polls wait in `ended`. */
+  private held = false;
+  private readonly ended: EndedPoll[] = [];
 
   constructor(private readonly deps: PollerDeps) {
     invariant(typeof deps.onChange === 'function', 'the poller publishes its snapshots');
@@ -126,6 +146,7 @@ export class LivePoller {
   /** The heartbeat: re-resolve both chains, then start every due poll whose capability has a provider. */
   tick(): void {
     invariant(!this.disposed, 'a disposed poller does not tick');
+    invariant(!this.held, 'a held poller does not tick: nothing starts until the hold lifts');
     const nowS = this.clock.now();
     const resolutions = this.resolve(nowS);
     this.syncTasks(this.tasks(resolutions), resolutions, nowS);
@@ -143,9 +164,27 @@ export class LivePoller {
     invariant(dueTasks(this.scheduler, nowS).every((id) => resolutions[capabilityOf(id)].provider === 'none'), 'only tasks without a provider stay due');
   }
 
-  /** Back from the background: every task is due again (never sooner than one cadence after its last start), then a tick. */
+  /**
+   * Holds the poller (the runtime waits for a fresh network reading on resume): it is not ticked, and a
+   * poll that ends meanwhile waits to be settled until `resume()`. Holding a held poller keeps it held.
+   */
+  hold(): void {
+    invariant(!this.disposed, 'a disposed poller is not held');
+    invariant(this.held || this.ended.length === 0, 'ended polls wait only while the poller is held');
+    this.held = true;
+  }
+
+  /**
+   * Back from the background (lifting a hold, if any): the polls that ended while held are settled on
+   * the standings now, every task is due again (never sooner than one cadence after its last start),
+   * then a tick.
+   */
   resume(): void {
     invariant(!this.disposed, 'a disposed poller does not resume');
+    this.held = false;
+    for (const ended of this.ended.splice(0)) {
+      this.settle(ended);
+    }
     const nowS = this.clock.now();
     this.scheduler = resumeAll(this.scheduler, nowS);
     invariant([...this.scheduler.values()].every((task) => task.inFlight || task.dueAt <= nowS + task.cadenceS), 'every idle task is due within one cadence');
@@ -188,6 +227,7 @@ export class LivePoller {
   dispose(): void {
     invariant(!this.disposed, 'a poller is disposed once');
     this.disposed = true;
+    this.ended.splice(0); // nothing is settled after dispose()
     this.abort.abort();
     invariant(this.abort.signal.aborted, 'polls in flight see the abort');
   }
@@ -231,57 +271,77 @@ export class LivePoller {
   private async poll(id: string, capability: Capability, provider: ProviderId): Promise<void> {
     invariant(this.scheduler.get(id)?.inFlight === true, `task ${id} was started`);
     invariant(capability === 'vehicles' || id.startsWith(STATION_TASK_PREFIX), 'a predictions task names its station');
-    let outcome: PollOutcome = 'failed';
+    let polled: Polled | null = null;
     try {
-      outcome = capability === 'vehicles' ? await this.pollVehicles(provider) : await this.pollStation(provider, id.slice(STATION_TASK_PREFIX.length));
+      polled = capability === 'vehicles' ? await this.pollVehicles(provider) : await this.pollStation(provider, id.slice(STATION_TASK_PREFIX.length));
     } finally {
-      this.finish(id, capability, provider, outcome);
+      this.end({ id, capability, provider, polled });
     }
   }
 
-  private async pollVehicles(provider: ProviderId): Promise<PollOutcome> {
+  private async pollVehicles(provider: ProviderId): Promise<Polled> {
     invariant(this.deps.providers[provider].capabilities.vehicles, `${provider} offers vehicles`);
     const result = await this.deps.providers[provider].fetchVehicles(this.abort.signal);
-    if (!this.disposed) {
-      this.lastError.vehicles = result.ok ? null : result.error;
-      this.current = { ...this.current, vehicles: result.ok ? result.value : this.current.vehicles };
-    }
     invariant(!result.ok || result.value.provider === provider, 'the batch is the polled provider\'s');
-    return outcomeOf(result);
+    if (!result.ok) {
+      return result;
+    }
+    const batch = result.value;
+    return ok(() => {
+      this.current = { ...this.current, vehicles: batch };
+    });
   }
 
-  private async pollStation(provider: ProviderId, stationKey: string): Promise<PollOutcome> {
+  private async pollStation(provider: ProviderId, stationKey: string): Promise<Polled> {
     invariant(this.deps.providers[provider].capabilities.predictions, `${provider} offers predictions`);
     const result = await this.deps.providers[provider].fetchPredictions(stationKey, this.abort.signal);
-    if (!this.disposed) {
-      this.lastError.predictions = result.ok ? null : result.error;
-      if (result.ok && this.stations.includes(stationKey)) {
-        this.current = { ...this.current, predictions: new Map(this.current.predictions).set(stationKey, result.value) };
-      }
-    }
     invariant(!result.ok || result.value.provider === provider, 'the batch is the polled provider\'s');
-    return outcomeOf(result);
+    if (!result.ok) {
+      return result;
+    }
+    const batch = result.value; // shown only while its station is still watched
+    return ok(() => {
+      this.current = this.stations.includes(stationKey) ? { ...this.current, predictions: new Map(this.current.predictions).set(stationKey, batch) } : this.current;
+    });
   }
 
-  /**
-   * Records a finished poll in the scheduler and the chain, then publishes. Ignored after dispose().
-   * A provider that stands key-less when its poll ends is recorded nowhere in the chain: no failure, no
-   * success, so never benched (mfix10 fix round). That is Swiftly gated off Wi-Fi meanwhile — the poll
-   * started while it was allowed, and leaving Wi-Fi may have cut the download — or a key removed
-   * meanwhile. Its task still finishes in the scheduler, and the next tick hands it to whoever serves.
-   */
-  private finish(id: string, capability: Capability, provider: ProviderId, outcome: PollOutcome): void {
+  /** A poll ended: it is settled now, or when the hold lifts if the poller is held. Ignored after dispose(). */
+  private end(ended: EndedPoll): void {
     if (this.disposed) {
       return;
     }
+    invariant(this.scheduler.get(ended.id)?.inFlight !== false, `task ${ended.id} ends once, from flight (or was dropped meanwhile)`);
+    if (this.held) {
+      this.ended.push(ended);
+    } else {
+      this.settle(ended);
+    }
+    invariant(this.held || this.ended.length === 0, 'ended polls wait only while the poller is held');
+  }
+
+  /**
+   * Records an ended poll in the scheduler and the chain, then publishes. It COUNTS only when its
+   * provider stands keyed now (not gated) and its failure, if any, is its own (not `reused`); a poll
+   * that does not count leaves no trace: no lastError, nothing in the chain, its task released with
+   * its failures and interval unchanged. A batch it brought back is shown either way.
+   */
+  private settle({ id, capability, provider, polled }: EndedPoll): void {
     const nowS = this.clock.now();
     const standings = this.deps.standings();
-    this.scheduler = finishPoll(this.scheduler, id, outcome, nowS);
-    if (standings[provider].hasKey) {
+    const outcome = polled === null ? 'failed' : outcomeOf(polled);
+    const counts = standings[provider].hasKey && (polled === null || polled.ok || polled.error.reused !== true);
+    if (polled?.ok === true) {
+      polled.value();
+    }
+    if (counts && polled !== null) {
+      this.lastError[capability] = polled.ok ? null : polled.error; // a bug leaves the last provider error as it was
+    }
+    if (counts) {
       this.chain = recordPoll(this.chain, capability, provider, outcome === 'ok' ? 'ok' : 'failed', nowS);
     }
+    this.scheduler = counts ? finishPoll(this.scheduler, id, outcome, nowS) : releasePoll(this.scheduler, id, nowS);
     invariant(this.scheduler.get(id)?.inFlight !== true, `task ${id} is no longer in flight`);
-    invariant(outcome !== 'ok' || !standings[provider].hasKey || this.chain[capability][provider].consecutive === 0, 'a recorded success clears the provider\'s failures');
+    invariant(!counts || outcome !== 'ok' || this.chain[capability][provider].consecutive === 0, 'a recorded success clears the provider\'s failures');
     this.publishStatus(this.resolve(nowS, standings), true);
   }
 
@@ -320,7 +380,7 @@ function cadenceOf(provider: ChainProviderId): number {
 }
 
 /** How a poll ended, for the scheduler: a 429 is rate-limited (the interval doubles), any other error a failure. */
-function outcomeOf<T>(result: LiveResult<T>): PollOutcome {
+function outcomeOf(result: Result<unknown, LiveError>): PollOutcome {
   invariant(typeof result.ok === 'boolean', 'a poll ends in a Result');
   const outcome: PollOutcome = result.ok ? 'ok' : result.error.kind === 'http' && result.error.status === 429 ? 'rate-limited' : 'failed';
   invariant(result.ok === (outcome === 'ok'), 'only a success is ok');

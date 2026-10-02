@@ -6,10 +6,11 @@ import { networkState } from './live-fakes';
 
 /**
  * mfix10: the reading rules of the app's one network watch (network-watch.ts), on a stand-in network
- * whose answers land (or fail) only when the test says. Starting only subscribes; every refresh (the
- * runtime's resume) discards the reading and asks afresh; every listener event is the latest reading,
- * an event without a type included; only the answer to the latest ask counts, and only until a
- * listener event overtakes it; a stopped watch forgets its reading and ignores late answers.
+ * whose answers land (or fail) only when the test says. Starting only subscribes (an event fired during
+ * the subscribe itself is kept); every refresh (the runtime's resume) discards the reading, asks
+ * afresh and is pending until the answer or an event is in; every listener event is the latest
+ * reading, an event without a type included; only the answer to the latest ask counts, and only until
+ * a listener event overtakes it; a stopped watch forgets its reading and ignores late answers.
  */
 
 type Settle = { readonly resolve: (state: NetworkState) => void; readonly reject: (error: Error) => void };
@@ -19,7 +20,11 @@ class HandNetwork implements NetworkSource {
   readonly listeners: ((state: NetworkState) => void)[] = [];
   /** Every ask the watch made, in order; ask number n is asked[n - 1]. */
   readonly asked: Settle[] = [];
+  /** The asks already answered (each lands once). */
+  private readonly landed = new Set<number>();
   removals = 0;
+  /** A network type the listener hears DURING the subscribe itself, as a native module may fire at once; null: none. */
+  duringSubscribe: string | null = null;
 
   getNetworkStateAsync(...args: unknown[]): Promise<NetworkState> {
     expect(args).toEqual([]); // expo-network's getNetworkStateAsync takes nothing
@@ -31,6 +36,9 @@ class HandNetwork implements NetworkSource {
     expect(typeof listener).toBe('function');
     expect(this.listeners.length).toBe(this.removals); // one watch: never a second subscription while one is open
     this.listeners.push(listener);
+    if (this.duringSubscribe !== null) {
+      listener(networkState(this.duringSubscribe));
+    }
     return { remove: () => void (this.removals += 1) };
   }
 
@@ -38,13 +46,14 @@ class HandNetwork implements NetworkSource {
   async answer(outcome: string | Error, ask: number = this.asked.length): Promise<void> {
     const settle = this.asked[ask - 1];
     expect(settle).toBeDefined();
+    expect(this.landed.has(ask)).toBe(false); // an ask lands once
+    this.landed.add(ask);
     if (outcome instanceof Error) {
       settle?.reject(outcome);
     } else {
       settle?.resolve(networkState(outcome));
     }
     await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(this.listeners.length).toBeGreaterThan(0);
   }
 
   /** Every listener hears `type` (null: an event without a type). */
@@ -72,9 +81,18 @@ describe('the network watch (mfix10): which reading counts', () => {
     const network = new HandNetwork();
     const watch = new NetworkWatch(network, () => undefined);
     watch.start();
-    expect([watch.listening, network.listeners.length, network.asked.length, watch.reading()]).toEqual([true, 1, 0, null]);
+    expect([watch.listening, network.listeners.length, network.asked.length, watch.reading(), watch.pending]).toEqual([true, 1, 0, null, false]);
     network.emit('WIFI');
     expect(isOnWifi(watch.reading())).toBe(true);
+  });
+
+  it('an event the network fires during the subscribe itself is kept', () => {
+    const network = new HandNetwork();
+    network.duringSubscribe = 'WIFI';
+    const watch = new NetworkWatch(network, () => undefined);
+    watch.start();
+    expect([watch.listening, watch.reading()]).toEqual([true, { type: 'WIFI' }]);
+    expect(network.asked).toHaveLength(0); // the reading is the event's: nothing was asked
   });
 
   it('the answer is the reading until a listener event comes', async () => {
@@ -103,6 +121,22 @@ describe('the network watch (mfix10): which reading counts', () => {
 });
 
 describe('the network watch (mfix10): a refresh, back in the foreground', () => {
+  it('a refresh is pending until the answer to its ask, or a listener event, is in', async () => {
+    const { watch, network } = started();
+    expect(watch.pending).toBe(true);
+    await network.answer('WIFI');
+    expect(watch.pending).toBe(false);
+    watch.refresh();
+    expect(watch.pending).toBe(true);
+    network.emit('CELLULAR');
+    expect([watch.pending, watch.reading()]).toEqual([false, { type: 'CELLULAR' }]);
+    watch.refresh();
+    await network.answer('WIFI', 2); // an older ask: the refresh still waits
+    expect(watch.pending).toBe(true);
+    watch.stop();
+    expect(watch.pending).toBe(false);
+  });
+
   it('a refresh discards the wi-fi reading and asks again; only the fresh answer counts', async () => {
     const { watch, network } = started();
     await network.answer('WIFI');

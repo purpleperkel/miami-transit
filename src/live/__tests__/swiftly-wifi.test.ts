@@ -18,8 +18,8 @@ beforeEach(() => kv.map.clear());
 function memoryStore(refuses = false): SyncKeyValue & { readonly map: Map<string, string> } {
   const map = new Map<string, string>();
   const store = { map, getItemSync: (key: string) => map.get(key) ?? null, setItemSync: (key: string, value: string) => void map.set(key, value) };
-  expect(store.getItemSync(SWIFTLY_WIFI_ONLY_ITEM)).toBeNull();
-  expect(typeof refuses).toBe('boolean');
+  expect(store.getItemSync(SWIFTLY_WIFI_ONLY_ITEM)).toBeNull(); // a fresh store holds no setting: the default-read premise
+  expect(SWIFTLY_WIFI_ONLY_ITEM.startsWith('settings.')).toBe(true); // the namespace Data & Settings' tests read settings under
   return refuses ? { ...store, setItemSync: () => { throw new Error('disk full'); } } : store;
 }
 

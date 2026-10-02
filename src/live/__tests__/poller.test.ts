@@ -307,6 +307,61 @@ describe('LivePoller (M4.9): lifecycle', () => {
   });
 });
 
+/** A Swiftly failure handed out again from a download another poll started (providers/swiftly.ts). */
+const REUSED_NETWORK_DOWN: LiveError = { ...NETWORK_DOWN, reused: true };
+
+describe('LivePoller (mfix10): polls that count for nothing', () => {
+  it('a poll whose provider is gated when it ends leaves no trace: no lastError, no failure, its task not backed off', async () => {
+    const h = new Harness();
+    [h.keys.swiftly, h.swiftly.next, h.swiftly.hold] = [true, NETWORK_DOWN, true];
+    for (const atS of [0, 30, 60]) {
+      await h.step(atS); // Swiftly's poll starts, and hangs
+      h.keys.swiftly = false; // gated off Wi-Fi while it is in flight: it fails
+      h.swiftly.release();
+      await settle();
+      h.keys.swiftly = true; // back before the next tick, so the task is still Swiftly's
+    }
+    [h.swiftly.next, h.swiftly.hold] = ['ok', false];
+    await h.step(100);
+    expect(callTimes(h.swiftly)).toEqual([0, 30, 60, 90]); // at its cadence: 3 counted failures would have backed it off to 60 s
+    expect(h.snapshots.filter((snapshot) => snapshot.status.vehicles.lastError !== null || snapshot.status.vehicles.consecutiveFailures > 0)).toEqual([]);
+  });
+
+  it('a failure reused from another poll\'s download is recorded nowhere: no failure count, no backoff, no lastError', async () => {
+    const h = new Harness();
+    h.keys.swiftly = true;
+    h.swiftly.next = REUSED_NETWORK_DOWN;
+    await h.step(150);
+    expect(callTimes(h.swiftly)).toEqual([0, 30, 60, 90, 120, 150]); // never backed off, never benched
+    expect(h.latest.status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null });
+    h.swiftly.next = NETWORK_DOWN; // its own failure counts
+    await h.step(180);
+    expect(h.latest.status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 1, lastError: NETWORK_DOWN });
+  });
+});
+
+describe('LivePoller (mfix10): the resume hold', () => {
+  it('a held poller is not ticked, and a poll that ended meanwhile is settled when the hold lifts, on the standings then', async () => {
+    const h = new Harness();
+    h.keys.swiftly = true;
+    h.swiftly.next = NETWORK_DOWN;
+    h.swiftly.hold = true;
+    await h.step(0);
+    h.poller.hold();
+    expect(() => h.poller.tick()).toThrow('a held poller does not tick');
+    h.swiftly.release();
+    await settle();
+    const published = h.snapshots.length;
+    expect(h.latest.status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null }); // nothing moved yet
+    h.keys.swiftly = false; // the fresh reading: off Wi-Fi
+    h.now = T0 + 2;
+    h.poller.resume();
+    await settle();
+    expect(h.snapshots.slice(published).filter((snapshot) => snapshot.status.vehicles.lastError !== null || snapshot.status.vehicles.provider === 'swiftly')).toEqual([]);
+    expect(callTimes(h.transitland)).toEqual([2]);
+  });
+});
+
 describe('MonotonicClock (M4.9)', () => {
   it('never runs backwards: a backwards wall-clock step is absorbed, a forward one passes through', () => {
     const wall = { now: 1_000 };

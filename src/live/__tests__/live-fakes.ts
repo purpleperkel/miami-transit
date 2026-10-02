@@ -1,6 +1,8 @@
 import type { NetworkState } from 'expo-network';
 
 import type { RuntimeNetwork } from '../../data/live-network';
+import { LIVE_TRIP_UPDATES_FIXTURE_BYTES, LIVE_VEHICLES_FIXTURE_BYTES } from '../../domain/gtfsrt/__fixtures__/live-feeds.fixture';
+import { DEPARTURES_813, DEPARTURES_9513 } from '../../domain/live/__fixtures__/transitland-departures.fixture';
 import { STOP_STATIONS, testNetwork } from '../../domain/live/__tests__/test-network';
 import type { FetchFn, FetchResponseLike, HttpInit } from '../http';
 import type { LiveKeys } from '../keys';
@@ -102,15 +104,47 @@ export class FakeServer {
 }
 
 /**
- * expo-network's state for a network type, connected unless the type is NONE or UNKNOWN (as on iOS);
- * `null` is a state without a type (connected, type unknown).
+ * A fake server for both providers (mfix10): Swiftly's two feeds and Transitland's vehicles from the
+ * committed synthetic fixtures, plus Transitland's departures for every stop of `stations` (the
+ * sanitized fixtures for 9513 and 813, an empty board for any other stop).
  */
+export function bothProviders(stations: readonly string[]): FakeServer {
+  const stops = stations.flatMap((station) => runtimeNetwork().stopsOfStation(station));
+  expect(stops.length).toBeGreaterThanOrEqual(stations.length); // every station asked for has stops
+  expect(new Set(stops).size).toBe(stops.length); // and no stop belongs to two of them
+  const departures: Record<string, Reply> = {};
+  for (const stop of stops) {
+    departures[departuresUrl(stop)] = { status: 200, body: bytesOf(stop === '9513' ? DEPARTURES_9513 : stop === '813' ? DEPARTURES_813 : { stops: [{ stop_id: stop, departures: [] }] }) };
+  }
+  return new FakeServer({
+    [SWIFTLY_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES },
+    [SWIFTLY_TRIP_UPDATES_URL]: { status: 200, body: LIVE_TRIP_UPDATES_FIXTURE_BYTES },
+    [TL_VEHICLES_URL]: { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES },
+    ...departures,
+  });
+}
+
+/**
+ * The states expo-network reports on iOS (SDK 57 docs: the iOS types are WIFI, CELLULAR, ETHERNET,
+ * NONE and UNKNOWN, and isConnected is false for NONE and UNKNOWN; its NetworkModule.swift reports
+ * isInternetReachable as isConnected). VPN, OTHER, BLUETOOTH and WIMAX are Android-only.
+ */
+const IOS_NETWORK_STATES: ReadonlyMap<string, NetworkState> = new Map(
+  (['WIFI', 'CELLULAR', 'ETHERNET', 'NONE', 'UNKNOWN'] as const).map((type) => {
+    const connected = type !== 'NONE' && type !== 'UNKNOWN';
+    return [type, Object.freeze({ type, isConnected: connected, isInternetReachable: connected }) as NetworkState];
+  }),
+);
+
+/** A listener event without a type: connected, type unknown. */
+const TYPELESS_STATE: NetworkState = Object.freeze({ isConnected: true, isInternetReachable: true });
+
+/** expo-network's iOS state for a network type; `null` is a state without a type (connected, type unknown). */
 export function networkState(type: string | null): NetworkState {
-  const connected = type !== 'NONE' && type !== 'UNKNOWN';
-  const state = (type === null ? { isConnected: true, isInternetReachable: true } : { type, isConnected: connected, isInternetReachable: connected }) as NetworkState;
-  expect(state.type ?? null).toBe(type);
-  expect(typeof state.isConnected).toBe('boolean');
-  return state;
+  const state = type === null ? TYPELESS_STATE : IOS_NETWORK_STATES.get(type);
+  expect(state).toBeDefined(); // a type iOS reports (an Android-only type here is a test's typo)
+  expect(state?.type ?? null).toBe(type); // the table's entry is the type asked for
+  return state as NetworkState;
 }
 
 /** One listener the fake network handed out, and whether its subscription was removed. */
@@ -118,8 +152,8 @@ export type FakeListener = { readonly listener: (state: NetworkState) => void; r
 
 /**
  * The phone's network, standing in for expo-network as a runtime's `networkSource`: every ask
- * (getNetworkStateAsync, made on each resume) answers networkState(`answer`), or never lands for
- * 'never'; a test sets `answer` to move the phone with no listener event (as when the app is in the
+ * (getNetworkStateAsync, made on each resume) answers networkState(`answer`) — iOS's answer always
+ * names a type — or never lands for 'never'; a test sets `answer` to move the phone with no listener event (as when the app is in the
  * background), and `emit` plays a network change to every listener still subscribed. It counts the
  * asks and keeps every listener it handed out.
  */
@@ -127,15 +161,15 @@ export class FakeNetwork implements NetworkSource {
   readonly listeners: FakeListener[] = [];
   asks = 0;
 
-  constructor(public answer: string | null | 'never') {
-    expect(answer === null || answer.length > 0).toBe(true);
-    expect(answer === null || answer === 'never' || /^[A-Z]+$/.test(answer)).toBe(true); // an expo-network type name
+  constructor(public answer: string | 'never') {
+    expect(answer === 'never' || IOS_NETWORK_STATES.has(answer)).toBe(true); // a type iOS reports: its answer always names one
+    expect(answer === 'never' || Object.isFrozen(networkState(answer))).toBe(true); // one state shared by every ask, so never mutable
   }
 
-  getNetworkStateAsync(): Promise<NetworkState> {
+  getNetworkStateAsync(...args: unknown[]): Promise<NetworkState> {
     this.asks += 1;
-    expect(this.answer === null || this.answer.length > 0).toBe(true);
-    expect(this.open().length).toBeGreaterThan(0);
+    expect(args).toEqual([]); // expo-network's getNetworkStateAsync takes nothing
+    expect(this.open().length).toBeGreaterThan(0); // asked only while the one watch listens
     return this.answer === 'never' ? new Promise<NetworkState>(() => undefined) : Promise.resolve(networkState(this.answer));
   }
 
@@ -151,7 +185,7 @@ export class FakeNetwork implements NetworkSource {
   open(): FakeListener[] {
     const open = this.listeners.filter((entry) => !entry.removed);
     expect(open.length).toBeLessThanOrEqual(1); // one watch at a time
-    expect(this.listeners.every((entry) => typeof entry.listener === 'function')).toBe(true);
+    expect(this.listeners.slice(0, -1).every((entry) => entry.removed)).toBe(true); // only the newest subscription can be open
     return open;
   }
 

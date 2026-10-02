@@ -125,27 +125,29 @@ function KeyEditor({ provider, live }: { readonly provider: ProviderId; readonly
 
 /**
  * "Use Swiftly only on Wi-Fi" (mfix10, ON by default): the switch shows the setting in effect and saves
- * each toggle in its kv item. The live runtime reads the setting at every poll tick, so a toggle moves
- * Swiftly in or out of the chain within one cadence; a save the kv store refuses says so and the switch
- * goes back to the setting in effect.
+ * each toggle in its kv item (saveSwiftlyWifiOnly reads it back and asserts the round trip). The live
+ * runtime reads the setting at every poll tick, so a toggle moves Swiftly in or out of the chain within
+ * one cadence; a save the kv store refuses says so and the switch goes back to the setting in effect.
  */
 function WifiOnlySwitch() {
   const [wifiOnly, setWifiOnly] = useState(() => readSwiftlyWifiOnly());
   const [notice, setNotice] = useState<Notice | null>(null);
   invariant(notice === null || notice.tone === 'error', 'the switch speaks up only when a save fails');
   invariant(notice === null || wifiOnly === readSwiftlyWifiOnly(), 'after a refused save the switch shows the setting still in effect');
-  const onValueChange = (value: boolean) => {
-    const saved = saveSwiftlyWifiOnly(value);
-    invariant(!saved.ok || saved.value === value, 'a saved setting reads back as toggled');
-    invariant(saved.ok || saved.error.message.length > 0, 'a refused save explains itself');
-    setWifiOnly(saved.ok ? saved.value : readSwiftlyWifiOnly());
-    setNotice(saved.ok ? null : { tone: 'error', text: `Not saved: ${saved.error.message}.` });
-  };
   return (
     <View style={styles.stack}>
       <View style={styles.controls}>
         <Text style={[styles.label, styles.grow]}>{WIFI_ONLY_LABEL}</Text>
-        <Switch testID="swiftly-wifi-only" accessibilityLabel={WIFI_ONLY_LABEL} value={wifiOnly} onValueChange={onValueChange} />
+        <Switch
+          testID="swiftly-wifi-only"
+          accessibilityLabel={WIFI_ONLY_LABEL}
+          value={wifiOnly}
+          onValueChange={(value) => {
+            const saved = saveSwiftlyWifiOnly(value);
+            setWifiOnly(saved.ok ? saved.value : readSwiftlyWifiOnly());
+            setNotice(saved.ok ? null : { tone: 'error', text: `Not saved: ${saved.error.message}.` });
+          }}
+        />
       </View>
       <NoticeText notice={notice} testID="swiftly-wifi-only-notice" />
     </View>

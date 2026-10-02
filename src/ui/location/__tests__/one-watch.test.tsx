@@ -37,8 +37,8 @@ jest.mock('expo-notifications', () => ({ setNotificationHandler: jest.fn(), getP
  * strips' hurry hook and home context opened 4 watches, and the map asked a 5th time for its blue dot.
  * The platform reports iOS 26 (else jest's Platform.Version is undefined and no accessory mounts at all),
  * the schedule DB is the committed one through node:sqlite, the user DB fails to open, and the live
- * runtime idles in the background (expo-network's first reading never lands), so only the location
- * wiring is counted.
+ * runtime idles in the background (it never resumes, so expo-network is never asked; its stand-in
+ * would never answer anyway), so only the location wiring is counted.
  */
 
 type NodeStatement = { all(...params: unknown[]): unknown[]; get(...params: unknown[]): unknown };

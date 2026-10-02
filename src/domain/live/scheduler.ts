@@ -17,6 +17,9 @@ import { BACKOFF_CAP_S, BACKOFF_FIRST_S } from './constants';
  *  - After the app was in the background, every task is due on resume — but, in the same spirit as
  *    R-b, never sooner than one cadence after its previous poll started (a 10 s trip to another app
  *    does not buy Swiftly an early poll).
+ *  - A poll that counts for nothing (mfix10: its provider was held back by the Wi-Fi gate when it
+ *    ended, or its failure was reused from a download another poll started) is RELEASED, not
+ *    finished: the task is idle again one interval on, its failures and interval as they were.
  */
 
 export type PollOutcome = 'ok' | 'failed' | 'rate-limited';
@@ -114,6 +117,21 @@ export function finishPoll(state: SchedulerState, id: string, outcome: PollOutco
   invariant(task.inFlight && task.lastStartedAt !== null && nowS >= task.lastStartedAt, `task ${id} was in flight since before ${nowS}`);
   const { delayS, failures } = nextWait(task, outcome);
   return new Map(state).set(id, { ...task, inFlight: false, failures, intervalS: delayS, dueAt: nowS + delayS });
+}
+
+/**
+ * Ends a poll at `nowS` that counts for nothing: the task is idle again, due one interval later, with
+ * its failure count and interval as they were (no backoff grows from it). A task dropped meanwhile
+ * stays dropped.
+ */
+export function releasePoll(state: SchedulerState, id: string, nowS: number): SchedulerState {
+  invariant(Number.isFinite(nowS), 'a poll ends at an instant');
+  const task = state.get(id);
+  if (task === undefined) {
+    return state; // the task was dropped (syncTasks) while its poll was in flight
+  }
+  invariant(task.inFlight && task.lastStartedAt !== null && nowS >= task.lastStartedAt, `task ${id} was in flight since before ${nowS}`);
+  return new Map(state).set(id, { ...task, inFlight: false, dueAt: nowS + task.intervalS });
 }
 
 /** Back from the background at `nowS`: every idle task is due now, or one cadence after its last poll started if that is later. */

@@ -10,6 +10,7 @@ import { useNearTripVerdict } from '../hurry/useHurryVerdict';
 import { openPlanSheet } from '../sheets';
 import { countdown } from '../trips/countdown';
 import { openTrip } from '../trips/trip-routes';
+import { useNearTripWalk } from './near-trip-walk';
 import { nowStripText, type StripTarget, stripTarget } from './now-strip';
 import type { AccessoryPlacement, NowText } from './now-text';
 import { NowStripContent, stripEmphasis } from './NowStripContent';
@@ -32,7 +33,10 @@ import { useHomeContext } from './useHomeContext';
  * never in the bar. The home context is published to the Now store, where the Map tab reads whether to
  * auto-present the station the rider is at (useAutoPresent.ts).
  *
- *   NowAccessory (placement, the home context, the near trip's verdict) → NowAccessoryView (props only, rendered in tests)
+ * A near trip's walk (mfix9) is the street-routed walk to its boarding platform when the app's RoutedWalkProvider knows
+ * one (useNearTripWalk), else m7c's straight-line estimate; VoiceOver hears which.
+ *
+ *   NowAccessory (placement, the home context, the near trip's walk and verdict) → NowAccessoryView (props only, rendered in tests)
  */
 
 export type NowAccessoryProps = {
@@ -47,7 +51,8 @@ export function NowAccessory({ clock = wallClockNowS }: NowAccessoryProps) {
   const placement: AccessoryPlacement = NativeTabs.BottomAccessory.usePlacement();
   invariant(placement === 'regular' || placement === 'inline', 'the accessory renders in a known placement');
   const context = useHomeContext(clock);
-  const verdict = useNearTripVerdict(context);
+  const walk = useNearTripWalk(context);
+  const verdict = useNearTripVerdict(context, walk);
   const said = nowStripText(context, verdict, placement);
   invariant(said.lines.length > 0, 'the accessory always says something');
   const state = context.kind === 'trip' ? countdown(context.trip.status.current.leaveByEpoch, context.nowS).state : null;

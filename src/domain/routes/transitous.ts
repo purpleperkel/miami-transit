@@ -9,7 +9,9 @@ import { err, ok, type Result } from '../../lib/result';
  *
  * USAGE TERMS (transitous#2538, approved 2026-10-01): open source, non-commercial, FEW requests, and an
  * identifying User-Agent. Transitous takes no key. The polite client (polite-client.ts) is the only
- * caller that performs these requests; it caches, debounces and keeps one request in flight.
+ * caller that performs these requests; it caches, debounces and keeps one request in flight. The
+ * User-Agent is written once, by transitousUserAgent: /plan and mfix9's one-to-many walk client
+ * (src/domain/walk/one-to-many.ts) both send it.
  *
  * REQUEST: GET https://api.transitous.org/api/v5/plan?fromPlace=<lat>,<lon>&toPlace=<lat>,<lon>
  *   &time=<ISO instant>&arriveBy=<true|false>, written out literally — plain JS number formatting, a
@@ -96,6 +98,14 @@ type RawRecord = Readonly<Record<string, unknown>>;
 /** An ISO 8601 instant with an explicit offset, as MOTIS writes them (Date.parse alone is lenient). */
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 
+/** The User-Agent every Transitous request carries: the app, its version (app.json's, never hardcoded) and this repository. */
+export function transitousUserAgent(appVersion: string): string {
+  invariant(/^\S+$/.test(appVersion), `the app version is one token, got "${appVersion}"`);
+  const agent = `MiamiTransit/${appVersion} (+${APP_REPO_URL})`;
+  invariant(agent.split(' ').length === 2, 'the version token keeps the User-Agent to its product and its comment');
+  return agent;
+}
+
 /** The /plan request for one query, identified by the app's version (never hardcoded here). */
 export function buildPlanRequest(query: PlanQuery, appVersion: string): PlanRequest {
   invariant(isLatLon(query.from) && isLatLon(query.to), 'a plan query runs between two valid coordinates');
@@ -105,7 +115,7 @@ export function buildPlanRequest(query: PlanQuery, appVersion: string): PlanRequ
   const to = `${query.to.latitude},${query.to.longitude}`;
   const time = new Date(query.timeEpoch * 1000).toISOString();
   const url = `${TRANSITOUS_PLAN_URL}?fromPlace=${from}&toPlace=${to}&time=${time}&arriveBy=${query.arriveBy}`;
-  const headers: Record<string, string> = { 'User-Agent': `MiamiTransit/${appVersion} (+${APP_REPO_URL})` };
+  const headers: Record<string, string> = { 'User-Agent': transitousUserAgent(appVersion) };
   invariant(url.startsWith(`${TRANSITOUS_PLAN_URL}?fromPlace=`) && !url.includes('%'), 'the URL is written out literally, never percent-encoded');
   return { url, headers };
 }

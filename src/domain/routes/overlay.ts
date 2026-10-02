@@ -35,7 +35,9 @@ import type { ConnectionRisk, Itinerary, Leg } from './transitous';
  * jog that makes it is JOG. mfix8 (arbiter ruling): a caller whose rider is still where the itinerary starts
  * may opt in to the ROUTED walk instead — the metres Transitous routed for the walk legs before the first
  * ride, with no detour, since they already follow the streets. Opted in without a routed distance (no walk
- * leg before the ride, or one without distanceM), the straight line stands.
+ * leg before the ride, or one without distanceM), the straight line stands. mfix9: a caller may instead hand in
+ * the walk it resolved itself (a FirstLegWalk) — the route chip off the plan start, whose walk is Transitous's
+ * one-to-many street walk from the rider to the boarding stop, or that walk's straight-line estimate.
  */
 
 /** Transitous's trip id prefix: the service day, the trip's first departure, the feed. */
@@ -45,6 +47,16 @@ const FEED_PREFIX = /^[A-Za-z0-9-]+_/;
 
 /** The walking settings the verdict may override (HURRY_DEFAULTS otherwise). */
 export type FirstLegPace = Omit<HurryInput, 'now' | 'walkMeters' | 'departures'>;
+
+/** A walk to the first ride's boarding stop the caller resolved: metres, and the detour m7c's engine puts on them. */
+export type FirstLegWalk = { readonly walkMeters: number; readonly detour: number };
+
+/**
+ * How firstLegVerdict walks to the boarding stop: false (m10a's default) the straight line from the rider with m7c's
+ * detour; true (mfix8, opt-in) the routed walk legs before the ride, when Transitous gave their distances, else
+ * that straight line; a FirstLegWalk (mfix9) the walk the caller resolved.
+ */
+export type FirstLegWalkRule = boolean | FirstLegWalk;
 
 /** trip_id → boarding stop_id → predicted departure (epoch s), from the usable predictions only. */
 type LiveIndex = ReadonlyMap<string, ReadonlyMap<string, number>>;
@@ -145,23 +157,23 @@ function shifted(leg: Leg, byS: number): Leg {
 }
 
 /**
- * m7c's hurry-or-chill verdict for an itinerary's first transit leg, or null for a walk-only itinerary. The
- * walk is the straight line from `position` to the boarding stop; with `routedWalk` (mfix8, opt-in) it is the
- * routed walk legs before the ride, when Transitous gave their distances.
+ * m7c's hurry-or-chill verdict for an itinerary's first transit leg, or null for a walk-only itinerary, walking to
+ * the boarding stop by `walk` (FirstLegWalkRule): by default the straight line from `position`.
  */
-export function firstLegVerdict(itinerary: Itinerary, position: LatLon, now: number, pace: FirstLegPace = {}, routedWalk = false): HurryVerdict | null {
+export function firstLegVerdict(itinerary: Itinerary, position: LatLon, now: number, pace: FirstLegPace = {}, walk: FirstLegWalkRule = false): HurryVerdict | null {
   invariant(isLatLon(position), `the rider's position is a valid coordinate: ${position.latitude},${position.longitude}`);
   invariant(Number.isFinite(now), 'the verdict is taken at an instant');
+  invariant(typeof walk === 'boolean' || (Number.isFinite(walk.walkMeters) && walk.walkMeters >= 0 && walk.detour >= 1), 'a walk handed in is a real distance with a detour of at least 1');
   const first = itinerary.legs.findIndex((candidate) => candidate.tripId !== null);
   const leg = itinerary.legs[first];
   if (leg === undefined) {
     return null;
   }
   const stop: LatLon = { latitude: leg.from.latitude, longitude: leg.from.longitude };
-  const routed = routedWalk ? routedWalkMeters(itinerary.legs.slice(0, first)) : null;
-  const walk = routed === null ? { walkMeters: haversineMeters(position, stop) } : { walkMeters: routed, detour: 1 };
+  const routed = walk === true ? routedWalkMeters(itinerary.legs.slice(0, first)) : null;
+  const walked = typeof walk === 'object' ? walk : routed === null ? { walkMeters: haversineMeters(position, stop) } : { walkMeters: routed, detour: 1 };
   const departure: HurryDeparture = { epoch: leg.from.epoch, live: leg.live, lineId: leg.routeShortName, headsign: leg.headsign };
-  const verdict = hurryVerdict({ ...pace, now, ...walk, departures: [departure] });
+  const verdict = hurryVerdict({ ...pace, now, ...walked, departures: [departure] });
   invariant(verdict.departure === null || verdict.departure.epoch === leg.from.epoch, 'the verdict is about the boarding departure of the first leg');
   return verdict;
 }

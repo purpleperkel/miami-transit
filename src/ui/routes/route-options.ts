@@ -2,8 +2,9 @@ import type { StationListing } from '../../data/schedule-queries';
 import type { HurryVerdict } from '../../domain/hurry/verdict';
 import { type LineId, lineById } from '../../domain/lines/line-catalog';
 import type { LiveBatch, LiveNetwork, LivePrediction } from '../../domain/live/types';
-import { type FirstLegPace, firstLegVerdict, gtfsStopId, gtfsTripId } from '../../domain/routes/overlay';
+import { type FirstLegPace, firstLegVerdict, type FirstLegWalkRule, gtfsStopId, gtfsTripId } from '../../domain/routes/overlay';
 import { isWalkOnly, type Itinerary, type Leg, type LegPlace } from '../../domain/routes/transitous';
+import type { WalkEstimate, WalkStop } from '../../domain/walk/walk-cache';
 import { haversineMeters, isLatLon, type LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
 import { copy } from '../copy';
@@ -28,6 +29,9 @@ import { clockFor } from '../hurry/hurry-reading';
  * Transitous ROUTED along the streets to the boarding stop (its walk legs' metres, no detour factor).
  * Otherwise — the rider has moved on, so the routed legs no longer start where they are — or when no walk leg
  * with a distance comes before the first ride, it is the straight line from the rider (× m7c's 1.3 detour).
+ * mfix9 (Jamie 09:12, "chill" for a walk Google put at 11 min): OFF the start, a context with `walk` (the plan
+ * screen's useWalkTo over firstRideStops) walks to the first ride's boarding stop by walk(<its GTFS stop_id>)
+ * instead — Transitous's one-to-many street walk from the rider when the app knows one, else its estimate.
  *
  * A leg's line comes from the bundled schedule: Transitous's trip id carries the county's GTFS trip_id,
  * and the schedule knows each trip's line by its stop pattern (m3a), so the Orange train and the Brickell
@@ -76,7 +80,16 @@ export type RouteOption = {
  * watch reports after it — the one fix a plan from the rider's own location starts at. Unlocated, the plan's start;
  * null before there is one (use-route-plan.ts useChipPosition).
  */
-export type OptionContext = { readonly position: LatLon | null; readonly nowS: number; readonly pace: FirstLegPace };
+export type OptionContext = {
+  readonly position: LatLon | null;
+  readonly nowS: number;
+  readonly pace: FirstLegPace;
+  /**
+   * mfix9: the walk from `position` to a first ride's boarding stop, by its GTFS stop_id (the plan screen's useWalkTo),
+   * used only OFF the itinerary's start; absent, the chip keeps mfix5's straight line there.
+   */
+  readonly walk?: (stopId: string) => WalkEstimate;
+};
 
 /** An epoch as the rows show it ("2:01", or "in 6 min" without service-day bases). */
 export type RouteClock = (epoch: number) => string;
@@ -116,7 +129,7 @@ function optionOf(id: number, itinerary: Itinerary, network: RouteNetwork, conte
   const walkS = itinerary.legs.filter((leg) => leg.mode === 'WALK').reduce((sum, leg) => sum + leg.durationS, 0);
   const badges = itinerary.legs.map((leg) => legBadge(leg, network)).filter((badge): badge is LegBadge => badge !== null);
   const position = context.position;
-  const verdict = position === null ? null : firstLegVerdict(itinerary, position, context.nowS, context.pace, isAtStart(itinerary, position));
+  const verdict = position === null ? null : chipVerdict(itinerary, position, context);
   const option: RouteOption = {
     id,
     itinerary,
@@ -132,6 +145,44 @@ function optionOf(id: number, itinerary: Itinerary, network: RouteNetwork, conte
   };
   invariant(option.walkS >= 0 && option.badges.length <= itinerary.legs.length, 'an option walks a non-negative time and badges at most every leg');
   return option;
+}
+
+/**
+ * The chip: m10a's firstLegVerdict, walking the routed legs before the ride while the rider is at the itinerary's start
+ * (mfix8); off it, the context's walk to the first ride's boarding stop when there is one (mfix9), else the straight line.
+ */
+function chipVerdict(itinerary: Itinerary, position: LatLon, context: OptionContext): HurryVerdict | null {
+  const atStart = isAtStart(itinerary, position);
+  const boarding = atStart || context.walk === undefined ? null : firstRideStop(itinerary);
+  const walk = boarding === null || context.walk === undefined ? null : context.walk(boarding.stopId);
+  invariant(walk === null || (Number.isFinite(walk.walkMeters) && walk.walkMeters >= 0 && walk.detour >= 1), `the walk to stop ${boarding?.stopId} is a real distance with a detour of at least 1`);
+  const rule: FirstLegWalkRule = atStart || (walk === null ? false : { walkMeters: walk.walkMeters, detour: walk.detour });
+  const verdict = firstLegVerdict(itinerary, position, context.nowS, context.pace, rule);
+  invariant((verdict === null) === itinerary.legs.every((leg) => leg.tripId === null), 'only an itinerary that rides nothing has no chip');
+  return verdict;
+}
+
+/** Where the itinerary's first ride boards: its GTFS stop_id at Transitous's coordinates; null when it rides nothing, or boards off a stop. */
+function firstRideStop(itinerary: Itinerary): WalkStop | null {
+  invariant(itinerary.legs.length > 0, 'an itinerary has legs');
+  const ride = itinerary.legs.find((leg) => leg.tripId !== null);
+  const stop = ride === undefined || ride.from.stopId === null ? null : { stopId: gtfsStopId(ride.from.stopId), latitude: ride.from.latitude, longitude: ride.from.longitude };
+  invariant(stop === null || isLatLon(stop), 'the first ride boards at a real coordinate, which a walk can reach');
+  return stop;
+}
+
+/** What the chips walk to off the plan start: each itinerary's first-ride boarding stop, each stop once, in answer order. */
+export function firstRideStops(itineraries: readonly Itinerary[]): WalkStop[] {
+  const stops = new Map<string, WalkStop>();
+  for (const itinerary of itineraries) {
+    const stop = firstRideStop(itinerary);
+    if (stop !== null && !stops.has(stop.stopId)) {
+      stops.set(stop.stopId, stop);
+    }
+  }
+  invariant(stops.size <= itineraries.length, 'at most one boarding stop per itinerary');
+  invariant(stops.size > 0 || itineraries.every((itinerary) => firstRideStop(itinerary) === null), 'an itinerary that rides from a stop gives the chips a stop to walk to');
+  return [...stops.values()];
 }
 
 /** The rider is still where the itinerary starts (within CHIP_ROUTED_START_M of its first leg's from-place). */

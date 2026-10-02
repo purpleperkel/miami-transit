@@ -8,7 +8,8 @@ import { providerConfig } from '../../domain/live/constants';
 import { mergeDepartures } from '../../domain/live/merge-departures';
 import type { LiveBatch, LivePrediction } from '../../domain/live/types';
 import type { Departure } from '../../domain/schedule/departures';
-import type { LatLon } from '../../lib/geo';
+import { type WalkEstimate, walkFor } from '../../domain/walk/walk-cache';
+import { isLatLon, type LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
 import type { Result } from '../../lib/result';
 import { liveFreshness, predictionsForDirection } from '../departures/direction-board';
@@ -27,7 +28,9 @@ import { actionableVerdict, type HurryCopyContext } from './copy';
  *                     read once a minute (the same trains the sheet lists)
  *   hurryReading      per direction: the nearest platform serving it (walkMeters), the timetable with the
  *                     live predictions merged in (m4a's merge, as the sheet's DirectionGroup does), the
- *                     boardable departures (board.ts) and the verdict (verdict.ts); or why there is none
+ *                     boardable departures (board.ts) and the verdict (verdict.ts); or why there is none.
+ *                     mfix9: the verdict walks to that platform by the reading's `walk` (the sheet's useWalkTo):
+ *                     the street-routed walk when the app knows one, else the straight line with m7c's detour
  *   soonestBoard      the direction whose recommended train leaves first (the Now strip's pick until mfix8;
  *                     kept for the mfix8 verify oracle, see its doc)
  *
@@ -106,6 +109,8 @@ export type ReadingInput = {
   readonly batch: LiveBatch<LivePrediction> | null;
   readonly nowS: number;
   readonly pace: WalkingPace;
+  /** mfix9: the walk to a platform by its GTFS stop_id (useWalkTo); absent, the straight line with m7c's detour. */
+  readonly walk?: (stopId: string) => WalkEstimate;
 };
 
 const OPENING: HurryReading = Object.freeze({ kind: 'opening' });
@@ -140,7 +145,7 @@ export function hurryReading(input: ReadingInput): HurryReading {
 }
 
 type Timetable = Extract<StationTimetable, { readonly kind: 'timetable' }>;
-type BoardInputs = Pick<ReadingInput, 'batch' | 'nowS' | 'pace'>;
+type BoardInputs = Pick<ReadingInput, 'batch' | 'nowS' | 'pace' | 'walk'>;
 
 /** One board per direction with a departure in the window, in direction order; a NO_SERVICE board when none. */
 function hurryBoards(timetable: Timetable, position: LatLon, inputs: BoardInputs): HurryBoard[] {
@@ -148,7 +153,7 @@ function hurryBoards(timetable: Timetable, position: LatLon, inputs: BoardInputs
   if (directions.length === 0) {
     const nearest = nearestPlatform(position, timetable.platforms, null);
     invariant(nearest !== null, 'a station has a platform');
-    const verdict = hurryVerdict({ now: inputs.nowS, walkMeters: nearest.walkMeters, departures: [], ...inputs.pace });
+    const verdict = hurryVerdict({ now: inputs.nowS, departures: [], ...inputs.pace, ...walkTo(nearest.platform, position, inputs) });
     return [{ directionId: null, title: null, walkMeters: nearest.walkMeters, verdict, freshness: SCHEDULED }];
   }
   const boards = directions.map((directionId) => directionBoard(timetable, directionId, position, inputs));
@@ -165,10 +170,18 @@ function directionBoard(timetable: Timetable, directionId: number, position: Lat
   const predictions = predictionsForDirection(scheduled, inputs.batch?.items ?? []);
   const rows = mergeDepartures(scheduled, predictions, timetable.window).rows;
   const departures = hurryDepartures(rows, { stopIds, now: inputs.nowS, liveStale: liveIsStale(inputs.batch, inputs.nowS) });
-  const verdict = hurryVerdict({ now: inputs.nowS, walkMeters: nearest.walkMeters, departures, ...inputs.pace });
+  const verdict = hurryVerdict({ now: inputs.nowS, departures, ...inputs.pace, ...walkTo(nearest.platform, position, inputs) });
   const freshness = actionableVerdict(verdict).live ? liveFreshness(inputs.batch, inputs.nowS) : SCHEDULED;
   invariant((freshness.kind === 'scheduled') === !actionableVerdict(verdict).live, 'the badge follows the train the verdict is about');
   return { directionId, title: directionTitle(scheduled), walkMeters: nearest.walkMeters, verdict, freshness };
+}
+
+/** What a verdict walks to `platform`: the reading's walk (routed, or its estimate), else the straight line with m7c's detour. */
+function walkTo(platform: Platform, position: LatLon, inputs: BoardInputs): { readonly walkMeters: number; readonly detour: number } {
+  invariant(isLatLon(position) && platform.stopId.length > 0, 'a walk runs from a real fix to a platform named by its GTFS stop_id');
+  const walk = inputs.walk === undefined ? walkFor(null, platform, position) : inputs.walk(platform.stopId);
+  invariant(Number.isFinite(walk.walkMeters) && walk.walkMeters >= 0 && walk.detour >= 1, `the walk to ${platform.stopId} is a real distance with a detour of at least 1`);
+  return { walkMeters: walk.walkMeters, detour: walk.detour };
 }
 
 /** The live predictions are older than their provider's fresh limit (mfix3's relative rule). */

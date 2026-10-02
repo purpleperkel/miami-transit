@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import { useScheduleDb } from '@/data/schedule-db-provider';
+import type { Platform } from '@/domain/hurry/platform';
+import type { WalkEstimate } from '@/domain/walk/walk-cache';
+import { haversineMeters, type LatLon } from '@/lib/geo';
 import { invariant } from '@/lib/invariant';
 import { useLive } from '@/live/live-context';
 import type { LiveState } from '@/live/runtime';
@@ -10,7 +13,8 @@ import { useUserPosition } from '../map/use-user-location';
 import { readWalkingPace } from '../settings/walking-pace';
 import type { HomeContext } from '../now/homeContext';
 import { watchStation } from '../stations/use-station-predictions';
-import { type HurryReading, hurryReading, stationTimetable } from './hurry-reading';
+import { useWalkTo } from '../walk/RoutedWalkProvider';
+import { HURRY_RANGE_M, type HurryReading, hurryReading, type HurrySource, stationTimetable } from './hurry-reading';
 import { judgeTrip, tripMinuteWindow, type TripTimetable, tripTimetable, type TripVerdict, type TripVerdictInput, type TripVerdictSource } from './trip-verdict';
 
 /**
@@ -18,7 +22,10 @@ import { judgeTrip, tripMinuteWindow, type TripTimetable, tripTimetable, type Tr
  *   the schedule DB (its platforms and departures), the rider's position (useUserPosition, the app's ONE
  *   location watch, through expo-location), the station's live predictions (the live runtime, m4b),
  *   Jamie's walk and jog paces (m8b's readWalkingPace, Data & Settings) and the clock —
- * into a verdict, recomputed on every tick and every new fix or batch. Two readers:
+ * into a verdict, recomputed on every tick and every new fix or batch. mfix9: each walks to its platform by
+ * useWalkTo (src/ui/walk) — the street-routed walk when the app's RoutedWalkProvider knows one, else the straight line
+ * with m7c's detour: the sheet registers its station's platforms (useStationWalk), the Now bar hands in the walk to its
+ * near trip's origin (src/ui/now/near-trip-walk.ts). Two readers:
  *
  *   useStationHurryVerdict  the station sheet: its station's HurryReading (hurry-reading.ts), one verdict per
  *                           direction, recomputed every HURRY_TICK_MS
@@ -59,11 +66,28 @@ function useHurryVerdict(stationKey: string, clock: () => number = wallClockNowS
   const repo = db.kind === 'ready' ? db.repo : null;
   useEffect(() => (runtime === null ? undefined : watchStation(runtime, stationKey)), [runtime, stationKey]);
   const timetable = useMemo(() => (repo === null ? null : stationTimetable(repo, stationKey, minuteS)), [repo, stationKey, minuteS]);
+  const walk = useStationWalk(repo, stationKey, position.coordinate);
   const batch = state?.predictions.get(stationKey) ?? null;
   const { walkMps, jogMps } = readWalkingPace();
-  const reading = useMemo(() => hurryReading({ db, position, timetable, batch, nowS, pace: { walkMps, jogMps } }), [db, position, timetable, batch, nowS, walkMps, jogMps]);
+  const reading = useMemo(() => hurryReading({ db, position, timetable, batch, nowS, pace: { walkMps, jogMps }, walk }), [db, position, timetable, batch, nowS, walkMps, jogMps, walk]);
   invariant(reading.kind !== 'boards' || reading.stationKey === stationKey, 'the reading is about the station asked for');
   return reading;
+}
+
+const NO_PLATFORMS: readonly Platform[] = Object.freeze([]);
+
+/**
+ * mfix9: the station sheet's walk to its platforms (useWalkTo). They are registered with the app's RoutedWalkProvider
+ * only while the rider is within HURRY_RANGE_M of one — the reading judges nothing farther — so a sheet opened for a
+ * station across town costs Transitous no request.
+ */
+function useStationWalk(repo: HurrySource | null, stationKey: string, rider: LatLon | null): (stopId: string) => WalkEstimate {
+  const platforms = useMemo(() => (repo === null ? NO_PLATFORMS : repo.platforms().filter((platform) => platform.stationKey === stationKey)), [repo, stationKey]);
+  const inRange = rider !== null && platforms.some((platform) => haversineMeters(rider, platform) <= HURRY_RANGE_M);
+  const walk = useWalkTo(inRange ? platforms : NO_PLATFORMS);
+  invariant(platforms.every((platform) => platform.stationKey === stationKey), 'the sheet walks only to its own station\'s platforms');
+  invariant(!inRange || platforms.length > 0, 'a station in range has a platform to walk to');
+  return walk;
 }
 
 /**
@@ -72,9 +96,10 @@ function useHurryVerdict(stationKey: string, clock: () => number = wallClockNowS
  * judged. Null whenever the context is not 'nearTrip'. The trip's rides are read once a minute (useTripTimetable);
  * the verdict is judged at the context's instant with the latest batch and position, on every home tick. It reads
  * the same schedule, position and instant the context was worked out from, so a near trip the schedule can judge
- * always comes with its verdict.
+ * always comes with its verdict. `walk` is the bar's useWalkTo over the trip's origin platforms (mfix9,
+ * useNearTripWalk); without it, the straight line with m7c's detour.
  */
-export function useNearTripVerdict(context: HomeContext): TripVerdict | null {
+export function useNearTripVerdict(context: HomeContext, walk?: (stopId: string) => WalkEstimate): TripVerdict | null {
   const db = useScheduleDb();
   const position = useUserPosition();
   const { state, runtime } = useLive();
@@ -87,8 +112,8 @@ export function useNearTripVerdict(context: HomeContext): TripVerdict | null {
   const timetable = useTripTimetable(repo, near);
   const coordinate = position.coordinate;
   const judged = useMemo(
-    () => (near === null || timetable === null || coordinate === null ? null : judgeNearTrip(timetable, near, { position: coordinate, pace: { walkMps, jogMps }, batch })),
-    [near, timetable, coordinate, walkMps, jogMps, batch],
+    () => (near === null || timetable === null || coordinate === null ? null : judgeNearTrip(timetable, near, { position: coordinate, pace: { walkMps, jogMps }, batch, walk })),
+    [near, timetable, coordinate, walkMps, jogMps, batch, walk],
   );
   invariant(judged === null || near !== null, 'a verdict is about the near trip');
   invariant(context.kind !== 'nearTrip' || repo === null || coordinate === null || judged !== null, 'a near trip the schedule can judge comes with its verdict');
@@ -117,7 +142,7 @@ function useTripTimetable(repo: TripVerdictSource | null, near: NearTrip | null)
 }
 
 /** The near trip's verdict from the rider at the context's instant (trip-verdict.ts). */
-function judgeNearTrip(timetable: TripTimetable, near: NearTrip, rider: Pick<TripVerdictInput, 'position' | 'pace' | 'batch'>): TripVerdict {
+function judgeNearTrip(timetable: TripTimetable, near: NearTrip, rider: Pick<TripVerdictInput, 'position' | 'pace' | 'batch' | 'walk'>): TripVerdict {
   const { fromStationKey, toStationKey } = near.card.trip;
   invariant(fromStationKey !== toStationKey, 'a saved trip joins two stations');
   const judged = judgeTrip(timetable, { from: fromStationKey, to: toStationKey, nowS: near.nowS, ...rider });

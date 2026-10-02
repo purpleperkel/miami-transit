@@ -7,6 +7,7 @@ import { mergeDepartures } from '../../domain/live/merge-departures';
 import type { LiveBatch, LivePrediction } from '../../domain/live/types';
 import type { Departure } from '../../domain/schedule/departures';
 import type { Ride } from '../../domain/schedule/rides';
+import { type WalkEstimate, walkFor } from '../../domain/walk/walk-cache';
 import type { LatLon } from '../../lib/geo';
 import { invariant } from '../../lib/invariant';
 import type { Result } from '../../lib/result';
@@ -30,9 +31,10 @@ import { clockFor, liveIsStale } from './hurry-reading';
  *            or later, so a train scheduled 7:59:40 and predicted for 8:02 is still caught at 8:00:00, while one
  *            scheduled before now with no prediction is gone. A canceled ride drops out; live data past its
  *            provider's fresh limit is stale
- *   walk     the straight line from the rider to the nearest boarding platform of the rides still to come (the
- *            origin's nearest platform when none is), which m7c's engine turns into a walk with its 1.3 detour
- *            at Jamie's paces: an ESTIMATE, and the bar says so
+ *   walk     to the nearest (straight line) boarding platform of the rides still to come (the origin's nearest
+ *            platform when none is), at Jamie's paces: the street-routed walk when the caller's `walk` (mfix9, the
+ *            Now bar's useWalkTo) knows one, else the straight line with m7c's 1.3 detour — an ESTIMATE, and the
+ *            bar says so
  *   verdict  m7c's hurryVerdict over those departures
  *
  * Two halves, so the Now bar reads the schedule once a minute (as the station sheet's stationTimetable does) yet
@@ -50,8 +52,13 @@ import { clockFor, liveIsStale } from './hurry-reading';
 export type TripVerdict = {
   readonly verdict: HurryVerdict;
   readonly ctx: HurryCopyContext;
-  /** Straight-line metres to the boarding platform; the verdict's walk is this with the engine's detour. */
+  /** Straight-line metres to the boarding platform (the verdict walks `walkSource`'s distance there). */
   readonly walkMeters: number;
+  /**
+   * mfix9: what the verdict walked — Transitous's street-routed walk ('routed') or the straight line with m7c's detour
+   * ('estimated'). judgeTrip always says; a verdict made without it is an estimate.
+   */
+  readonly walkSource?: WalkEstimate['source'];
 };
 
 /** What the trip verdict reads from the schedule (ScheduleRepo fits). */
@@ -71,6 +78,8 @@ export type TripVerdictInput = {
   readonly pace: WalkingPace;
   /** The origin station's latest live predictions, or null. */
   readonly batch: LiveBatch<LivePrediction> | null;
+  /** mfix9: the walk to an origin platform by its GTFS stop_id (useWalkTo); absent, the straight line with m7c's detour. */
+  readonly walk?: (stopId: string) => WalkEstimate;
 };
 
 /** The schedule's half of a trip's verdict, read once over `window` and judged at any instant whose verdictWindow it holds. */
@@ -135,8 +144,9 @@ export function judgeTrip(timetable: TripTimetable, input: TripVerdictInput): Tr
   const platforms = coming.stopIds.size > 0 ? timetable.platforms.filter((platform) => coming.stopIds.has(platform.stopId)) : timetable.platforms;
   const nearest = nearestPlatform(input.position, platforms, null);
   invariant(nearest !== null, `${input.from} has a platform to walk to`);
-  const verdict = hurryVerdict({ now: input.nowS, walkMeters: nearest.walkMeters, departures: coming.departures, ...input.pace });
-  return { verdict, ctx: { now: input.nowS, clock: clockFor(timetable.bases) }, walkMeters: nearest.walkMeters };
+  const walk = input.walk === undefined ? walkFor(null, nearest.platform, input.position) : input.walk(nearest.platform.stopId);
+  const verdict = hurryVerdict({ now: input.nowS, departures: coming.departures, ...input.pace, walkMeters: walk.walkMeters, detour: walk.detour });
+  return { verdict, ctx: { now: input.nowS, clock: clockFor(timetable.bases) }, walkMeters: nearest.walkMeters, walkSource: walk.source };
 }
 
 /** The departures still to come, and the platforms they board at. */

@@ -61,10 +61,14 @@ SDK 57; never trust memory for Expo APIs).
   clock (src/live/floor-clock.ts): `performance.now()` plus the sleep inside every spell out of the foreground,
   max(0, wall span − awake span) per spell, never the whole wall span (arbiter-ratified, fix round 5)
   (use-live-polling.ts calls the runtime's `pause()` on leaving, `resume()` on return). `pause()` also ABORTS every poll in
-  flight, to every provider (poller.ts `pauseAll`: a new era as a key change gives, but the chain's failures kept); the
-  aborted polls leave no trace and their tasks start over. Test rigs' held downloads must reject when their request's
-  signal aborts, as a real fetch does (jest's `setSystemTime` moves Date only, so it models a lock: timers and
-  `performance.now()` stand still). RN 0.86's iOS `performance.now()` is
+  flight, to every provider (poller.ts `pauseAll`). A pause is NOT a key change (fix round 6, U1): no new era; the poller
+  marks the signal it aborts for a pause, and a poll ending under a marked signal leaves no trace and changes nothing (its
+  task keeps its failures and its last start: scheduler.ts `interruptPoll`), so the resume holds it to one cadence after the
+  aborted start. A Swiftly download that ended ABORTED is remembered as such: a fetch inside its floor gets a FLOOR-WAIT
+  (types.ts `FloorWait`, `ok: 'floor-wait'`: no data, no failure, no backoff), due when the floor ends; a fetch result's
+  `ok` is therefore true, false or 'floor-wait' — narrow with `=== true`, never on truthiness. Test rigs' held downloads
+  must reject when their request's signal aborts, as a real fetch does (jest's `setSystemTime` moves Date only, so it
+  models a lock: timers and `performance.now()` stand still). RN 0.86's iOS `performance.now()` is
   mach_absolute_time, which pauses while the phone sleeps; jest's modern fake timers fake `performance.now()` from 0 and
   move it with the clock, and `jest.setSystemTime` does not move it (probed 2026-10-02) — a test models sleep by injecting
   `monotonicMs` (e.g. `performance.now()` minus the time asleep). KNOWN UPSTREAM LIMIT (expo-network 57.0.2,

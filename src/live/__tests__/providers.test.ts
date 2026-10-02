@@ -8,14 +8,14 @@ import { testNetwork } from '../../domain/live/__tests__/test-network';
 import { vehiclesFromFeed } from '../../domain/live/from-gtfsrt';
 import { predictionsFromDepartures } from '../../domain/live/from-transitland-departures';
 import type { LiveRequest } from '../../domain/live/transports';
-import type { LivePrediction, LiveProvider, LiveResult, ProviderId } from '../../domain/live/types';
+import type { LiveFetch, LivePrediction, LiveProvider, ProviderId } from '../../domain/live/types';
 import { ByteCounter, httpGet } from '../http';
 import type { LiveKeys } from '../keys';
 import type { ProviderDeps } from '../providers/batches';
 import { NONE_PROVIDER } from '../providers/none';
 import { createSwiftlyProvider } from '../providers/swiftly';
 import { createTransitlandProvider } from '../providers/transitland';
-import { bytesOf, departuresUrl, FAKE_KEYS, FakeServer, runtimeNetwork, SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL, TL_VEHICLES_URL } from './live-fakes';
+import { bytesOf, departuresUrl, FAKE_KEYS, FakeServer, HANGS, runtimeNetwork, SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL, TL_VEHICLES_URL } from './live-fakes';
 
 /**
  * M4.9: the Transitland and Swiftly providers end to end over a fake server — request, quota call,
@@ -59,10 +59,10 @@ function advance(clock: Clocks, seconds: number): void {
 }
 
 /** One fetch of each Swiftly feed — vehicles, then rail:brickell's predictions — in that order. */
-async function fetchBoth(provider: LiveProvider): Promise<LiveResult<unknown>[]> {
-  const results: LiveResult<unknown>[] = [await provider.fetchVehicles(signal()), await provider.fetchPredictions('rail:brickell', signal())];
+async function fetchBoth(provider: LiveProvider): Promise<LiveFetch<unknown>[]> {
+  const results: LiveFetch<unknown>[] = [await provider.fetchVehicles(signal()), await provider.fetchPredictions('rail:brickell', signal())];
   expect(provider.id).toBe('swiftly'); // the feeds are Swiftly's
-  expect(results.every((result) => result.ok)).toBe(true); // the fake server answers both
+  expect(results.every((result) => result.ok === true)).toBe(true); // the fake server answers both
   return results;
 }
 
@@ -88,7 +88,7 @@ describe('Transitland provider (M4.9)', () => {
     const deps = providerDeps(server);
     const result = await createTransitlandProvider(deps).fetchVehicles(signal());
     expect(result.ok).toBe(true);
-    const batch = result.ok ? result.value : null;
+    const batch = result.ok === true ? result.value : null;
     expect(batch?.items).toEqual(vehiclesFromFeed(LIVE_VEHICLES_FIXTURE_DECODED, testNetwork()).items);
     expect(batch).toEqual(expect.objectContaining({ provider: 'transitland', fetchedAt: NOW, bytes: 1_337, feedTimestamp: 1_790_872_200 }));
     expect(server.requests).toEqual([{ url: TL_VEHICLES_URL, headers: { apikey: 'fake-transitland-key' } }]);
@@ -104,8 +104,8 @@ describe('Transitland provider (M4.9)', () => {
     const result = await createTransitlandProvider(deps).fetchPredictions('rail:government-ctr', signal());
     const expected = predictionsFromDepartures(DEPARTURES_9513, deps.network);
     expect(expected.ok && expected.value.items.length).toBeGreaterThan(0);
-    expect(result.ok && rows(result.value.items)).toEqual(expected.ok && rows(expected.value.items));
-    expect(result.ok && result.value.bytes).toBe(bytesOf(EMPTY_9512).byteLength + bytesOf(DEPARTURES_9513).byteLength);
+    expect(result.ok === true && rows(result.value.items)).toEqual(expected.ok && rows(expected.value.items));
+    expect(result.ok === true && result.value.bytes).toBe(bytesOf(EMPTY_9512).byteLength + bytesOf(DEPARTURES_9513).byteLength);
     expect(server.urls()).toEqual([departuresUrl('9512'), departuresUrl('9513')]);
     expect(deps.calls).toEqual(['transitland', 'transitland']);
   });
@@ -148,8 +148,8 @@ describe('Swiftly provider (M4.9)', () => {
     });
     const first = await createSwiftlyProvider(providerDeps(server)).fetchVehicles(signal());
     await createSwiftlyProvider(providerDeps(server, { ...FAKE_KEYS, swiftlyAgency: 'mdt-test' })).fetchVehicles(signal());
-    expect(first.ok && first.value.provider).toBe('swiftly');
-    expect(first.ok && first.value.items.length).toBe(vehiclesFromFeed(LIVE_VEHICLES_FIXTURE_DECODED, testNetwork()).items.length);
+    expect(first.ok === true && first.value.provider).toBe('swiftly');
+    expect(first.ok === true && first.value.items.length).toBe(vehiclesFromFeed(LIVE_VEHICLES_FIXTURE_DECODED, testNetwork()).items.length);
     expect(server.requests.map((r) => r.headers)).toEqual([{ Authorization: 'fake-swiftly-key' }, { Authorization: 'fake-swiftly-key' }]);
     expect(server.urls()[1]).toBe('https://api.goswift.ly/real-time/mdt-test/gtfs-rt-vehicle-positions');
   });
@@ -162,8 +162,8 @@ describe('Swiftly provider (M4.9)', () => {
     advance(deps.clock, 29);
     const mover = await provider.fetchPredictions('mover:government-center', signal());
     // fixture-rail-0845's 9513 update is NO_DATA, which the M4.2 mapper drops (from-gtfsrt.test.ts).
-    expect(rail.ok && rows(rail.value.items)).toEqual([['fixture-rail-0822', '9513'], ['fixture-rail-0830', null]]);
-    expect(mover.ok && rows(mover.value.items)).toEqual([['fixture-rail-0830', null], ['fixture-omni-1630', '813']]); // feed order
+    expect(rail.ok === true && rows(rail.value.items)).toEqual([['fixture-rail-0822', '9513'], ['fixture-rail-0830', null]]);
+    expect(mover.ok === true && rows(mover.value.items)).toEqual([['fixture-rail-0830', null], ['fixture-omni-1630', '813']]); // feed order
     expect(server.urls()).toEqual([SWIFTLY_TRIP_UPDATES_URL]);
     expect(deps.calls).toEqual(['swiftly']);
   });
@@ -175,7 +175,7 @@ describe('Swiftly provider (M4.9)', () => {
     await provider.fetchPredictions('rail:brickell', signal());
     advance(deps.clock, 30);
     const later = await provider.fetchPredictions('rail:brickell', signal());
-    expect(later.ok && later.value.fetchedAt).toBe(NOW + 30);
+    expect(later.ok === true && later.value.fetchedAt).toBe(NOW + 30);
     expect(server.urls()).toEqual([SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_TRIP_UPDATES_URL]);
   });
 
@@ -198,7 +198,7 @@ describe('Swiftly provider (mfix10): the 30 s floor at the source', () => {
     advance(deps.clock, 29);
     const reread = await provider.fetchVehicles(signal());
     expect([server.urls(), deps.calls]).toEqual([[SWIFTLY_VEHICLES_URL], ['swiftly']]);
-    expect(reread.ok && reread.value).toEqual(first.ok && { ...first.value, floorEndsInMs: 1_000 }); // the same download, handed out with the 1 000 ms left on its floor
+    expect(reread.ok === true && reread.value).toEqual(first.ok === true && { ...first.value, floorEndsInMs: 1_000 }); // the same download, handed out with the 1 000 ms left on its floor
     advance(deps.clock, 1);
     await provider.fetchVehicles(signal());
     expect([server.urls(), deps.calls]).toEqual([[SWIFTLY_VEHICLES_URL, SWIFTLY_VEHICLES_URL], ['swiftly', 'swiftly']]);
@@ -254,7 +254,7 @@ describe('Swiftly provider (mfix10): the floor per endpoint, per key, on a monot
     provider.keyChanged(keys.swiftly);
     advance(deps.clock, 28);
     const again = await fetchBoth(provider); // key a again, 29 s after its downloads: inside their floor
-    expect(again.map((result) => result.ok && result.value.floorEndsInMs)).toEqual([1_000, 1_000]);
+    expect(again.map((result) => result.ok === true && result.value.floorEndsInMs)).toEqual([1_000, 1_000]);
     advance(deps.clock, 1);
     await fetchBoth(provider); // 30 s after key a's downloads: their floor has ended
     const sent = server.requests.map((r) => [r.url.slice(r.url.lastIndexOf('/') + 1), r.headers.Authorization]);
@@ -276,6 +276,26 @@ describe('Swiftly provider (mfix10): the floor per endpoint, per key, on a monot
     deps.clock.ms += 1;
     await provider.fetchVehicles(signal());
     expect(server.urls()).toHaveLength(2);
+  });
+});
+
+describe('Swiftly provider (mfix10 fix round 6): an aborted download is no failure to share', () => {
+  it('a fetch inside the floor of an aborted download gets a floor-wait: no data, no failure, unmetered; at the floor\'s end it downloads afresh', async () => {
+    const server = new FakeServer({ [SWIFTLY_VEHICLES_URL]: HANGS });
+    const deps = providerDeps(server);
+    const provider = createSwiftlyProvider(deps);
+    const caller = new AbortController();
+    const own = provider.fetchVehicles(caller.signal);
+    caller.abort(); // the app leaves the foreground (or the key changes): the request is cut
+    expect(await own).toEqual({ ok: false, error: { kind: 'timeout', message: 'the request to api.goswift.ly was cancelled before it finished' } }); // the poll that started it gets it as it came
+    server.on(SWIFTLY_VEHICLES_URL, { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES });
+    advance(deps.clock, 5);
+    expect(await provider.fetchVehicles(signal())).toEqual({ ok: 'floor-wait', floorEndsInMs: 25_000 }); // not the cancelled failure, reused
+    expect([server.urls(), deps.calls]).toEqual([[SWIFTLY_VEHICLES_URL], ['swiftly']]);
+    advance(deps.clock, 25);
+    const fresh = await provider.fetchVehicles(signal());
+    expect(fresh.ok === true && fresh.value.items.length).toBe(vehiclesFromFeed(LIVE_VEHICLES_FIXTURE_DECODED, testNetwork()).items.length);
+    expect([server.urls(), deps.calls]).toEqual([[SWIFTLY_VEHICLES_URL, SWIFTLY_VEHICLES_URL], ['swiftly', 'swiftly']]);
   });
 });
 

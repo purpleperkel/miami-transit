@@ -27,6 +27,12 @@ import { BACKOFF_CAP_S, BACKOFF_FIRST_S } from './constants';
  *    download another poll started, a success) is due again the moment that floor ends — no request
  *    could bring fresher data sooner, and waiting a cadence from now would leave the data a cadence
  *    staler than it has to be. A failure handed back that way is an ordinary failure here (R-b's backoff).
+ *    A FLOOR-WAIT (fix round 6, U2: the floor turned the poll away with nothing to hand back, the
+ *    download it would have shared having ended aborted) is due then too, but it is no success: the
+ *    task's failures and interval stay as they were.
+ *  - A poll INTERRUPTED by leaving the foreground (fix round 6, U1: the runtime aborted it) changes
+ *    nothing: the task is idle again with its failures, interval and last start as they were (the
+ *    interrupted poll's start), due as a resume makes it — so it is neither a failure nor a fresh start.
  */
 
 export type PollOutcome = 'ok' | 'failed' | 'rate-limited';
@@ -137,6 +143,30 @@ export function finishPoll(state: SchedulerState, id: string, outcome: PollOutco
  * lands on the floor's end. A task dropped meanwhile stays dropped.
  */
 export function finishReusedPoll(state: SchedulerState, id: string, nowS: number, floorEndsAtS: number): SchedulerState {
+  const next = turnAway(state, id, nowS, floorEndsAtS, 'ok');
+  const task = next.get(id);
+  invariant(task === undefined || (task.failures === 0 && task.intervalS === task.cadenceS), `task ${id} ends as after a success: no failures, its interval its cadence`);
+  invariant(task === undefined || task.dueAt === floorEndsAtS, `task ${id} is due when the floor ends`);
+  return next;
+}
+
+/**
+ * Ends at `nowS` a poll the provider's floor turned away with NOTHING to hand back (mfix10 fix round
+ * 6, U2, a floor-wait: the download it would have shared ended aborted), whose floor ends at
+ * `floorEndsAtS`. No data and no failure: the task is due when the floor ends, with its failures and
+ * interval as they were (no backoff grows from it); its last start moves to the download's, as for
+ * finishReusedPoll, so a resume lands on the floor's end too. A task dropped meanwhile stays dropped.
+ */
+export function finishFloorWait(state: SchedulerState, id: string, nowS: number, floorEndsAtS: number): SchedulerState {
+  const [before, next] = [state.get(id), turnAway(state, id, nowS, floorEndsAtS, 'floor-wait')];
+  const task = next.get(id);
+  invariant(task === undefined || (task.failures === before?.failures && task.intervalS === before.intervalS), `task ${id} keeps its failures and interval: a floor-wait is no failure and no success`);
+  invariant(task === undefined || task.dueAt === floorEndsAtS, `task ${id} is due when the floor ends`);
+  return next;
+}
+
+/** Ends a poll the provider's floor turned away: due when the floor ends, its last start the download's; a success also clears the failures. */
+function turnAway(state: SchedulerState, id: string, nowS: number, floorEndsAtS: number, outcome: 'ok' | 'floor-wait'): SchedulerState {
   invariant(Number.isFinite(nowS) && Number.isFinite(floorEndsAtS), 'a turned-away poll ends at an instant, and its floor ends at one');
   const task = state.get(id);
   if (task === undefined) {
@@ -144,7 +174,8 @@ export function finishReusedPoll(state: SchedulerState, id: string, nowS: number
   }
   invariant(task.inFlight && task.lastStartedAt !== null && nowS >= task.lastStartedAt, `task ${id} was in flight since before ${nowS}`);
   invariant(floorEndsAtS - task.cadenceS <= nowS, `task ${id} was handed a download that started before now (its floor ends at most one cadence on)`);
-  return new Map(state).set(id, { ...task, inFlight: false, failures: 0, intervalS: task.cadenceS, dueAt: floorEndsAtS, lastStartedAt: floorEndsAtS - task.cadenceS });
+  const success = outcome === 'ok' ? { failures: 0, intervalS: task.cadenceS } : {};
+  return new Map(state).set(id, { ...task, inFlight: false, ...success, dueAt: floorEndsAtS, lastStartedAt: floorEndsAtS - task.cadenceS });
 }
 
 /**
@@ -178,18 +209,45 @@ export function restartTask(state: SchedulerState, id: string, nowS: number): Sc
 }
 
 /**
+ * Ends at `nowS` a poll that leaving the foreground INTERRUPTED (mfix10 fix round 6, U1: the runtime
+ * aborted it). It counts for nothing and changes nothing: the task is idle with its failures, interval
+ * and last start (the interrupted poll's own) as they were, due as a resume makes it — one cadence
+ * after that start, or now if later. So an interrupted retry keeps its backoff, and the request it
+ * aborted is not repeated sooner than R-b allows. A task dropped meanwhile stays dropped.
+ */
+export function interruptPoll(state: SchedulerState, id: string, nowS: number): SchedulerState {
+  invariant(Number.isFinite(nowS), 'a poll ends at an instant');
+  const task = state.get(id);
+  if (task === undefined) {
+    return state; // the task was dropped (syncTasks) while its poll was in flight
+  }
+  invariant(task.inFlight && task.lastStartedAt !== null && nowS >= task.lastStartedAt, `task ${id} was in flight since before ${nowS}`);
+  const idle: TaskState = { ...task, inFlight: false };
+  const interrupted: TaskState = { ...idle, dueAt: resumedDueAt(idle, nowS) };
+  invariant(interrupted.failures === task.failures && interrupted.lastStartedAt === task.lastStartedAt, `task ${id} keeps its failures and its last start`);
+  return new Map(state).set(id, interrupted);
+}
+
+/**
  * Back from the background at `nowS`: every idle task is due now, or one cadence after its last poll
  * started if that is later. A task still in flight is left as it is: the runtime aborts every poll in
- * flight as the app leaves the foreground (mfix10 fix round 5), so such a poll has not ended yet, and
- * its task is due again when it does.
+ * flight as the app leaves the foreground (mfix10 fix round 5), so such a poll has not ended yet; when
+ * it does, its task is due as a resume makes it (interruptPoll, fix round 6).
  */
 export function resumeAll(state: SchedulerState, nowS: number): SchedulerState {
   invariant(Number.isFinite(nowS), 'the app resumes at an instant');
   const next = new Map<string, TaskState>();
   for (const [id, task] of state) {
-    const floor = task.lastStartedAt === null ? nowS : Math.max(nowS, task.lastStartedAt + task.cadenceS);
-    next.set(id, task.inFlight ? task : { ...task, dueAt: floor });
+    next.set(id, task.inFlight ? task : { ...task, dueAt: resumedDueAt(task, nowS) });
   }
   invariant(next.size === state.size, 'resuming keeps every task');
   return next;
+}
+
+/** When an idle task is due after a resume at `nowS`: now, or one cadence after its last poll started if that is later (R-b). */
+function resumedDueAt(task: TaskState, nowS: number): number {
+  invariant(!task.inFlight, `task ${task.id} is idle: a poll in flight is due again only when it ends`);
+  const dueAt = task.lastStartedAt === null ? nowS : Math.max(nowS, task.lastStartedAt + task.cadenceS);
+  invariant(dueAt >= nowS && (task.lastStartedAt === null || dueAt >= task.lastStartedAt + task.cadenceS), `task ${task.id} is due no sooner than now, nor than a cadence after its last start`);
+  return dueAt;
 }

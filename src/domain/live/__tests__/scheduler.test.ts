@@ -4,8 +4,10 @@ import {
   backoffS,
   createScheduler,
   dueTasks,
+  finishFloorWait,
   finishPoll,
   finishReusedPoll,
+  interruptPoll,
   type PollOutcome,
   releasePoll,
   restartTask,
@@ -175,5 +177,42 @@ describe('poll scheduler (mfix10 fix round 4): a poll the provider\'s floor turn
     const dropped = syncTasks(inFlight, [], T0 + 1);
     expect(finishReusedPoll(dropped, 'vehicles', T0 + 2, T0 + 20)).toBe(dropped);
     expect(() => finishReusedPoll(inFlight, 'vehicles', T0 + 2, T0 + 33)).toThrow(InvariantError);
+  });
+});
+
+describe('poll scheduler (mfix10 fix round 6): a poll interrupted by leaving the foreground', () => {
+  it('interruptPoll keeps the task\'s failures, interval and last start, and makes it due a cadence after that start, or now if later', () => {
+    const failedFourTimes = [0, 60, 120, 180].reduce((state, atS) => poll(state, 'vehicles', T0 + atS, 'failed', 0), createScheduler([TRANSITLAND], T0));
+    const before = failedFourTimes.get('vehicles');
+    expect([before?.failures, before?.intervalS, before?.dueAt]).toEqual([4, 120, T0 + 300]); // R-b: Transitland's 4th failure backs off 120 s
+    const inFlight = startPoll(failedFourTimes, 'vehicles', T0 + 300);
+    const interrupted = interruptPoll(inFlight, 'vehicles', T0 + 305);
+    expect(interrupted.get('vehicles')).toEqual({ ...before, inFlight: false, lastStartedAt: T0 + 300, dueAt: T0 + 360 });
+    expect(interruptPoll(inFlight, 'vehicles', T0 + 400).get('vehicles')?.dueAt).toBe(T0 + 400); // it ended after a cadence had passed: due now
+    expect(finishPoll(startPoll(interrupted, 'vehicles', T0 + 360), 'vehicles', 'failed', T0 + 361).get('vehicles')?.intervalS).toBe(120); // the next failure backs off from the 4 kept (a fresh start would wait 60 s)
+  });
+
+  it('interruptPoll leaves a task dropped mid-poll dropped, and refuses a task that was not in flight', () => {
+    const state = startPoll(createScheduler([SWIFTLY], T0), 'vehicles', T0);
+    const dropped = syncTasks(state, [], T0 + 1);
+    expect(interruptPoll(dropped, 'vehicles', T0 + 2)).toBe(dropped);
+    expect(() => interruptPoll(createScheduler([SWIFTLY], T0), 'vehicles', T0 + 2)).toThrow(InvariantError);
+  });
+});
+
+describe('poll scheduler (mfix10 fix round 6): a floor-wait', () => {
+  it('finishFloorWait makes the task due when the floor ends, its failures and interval kept, and a resume lands there too', () => {
+    const failedTwice = poll(poll(createScheduler([SWIFTLY], T0), 'vehicles', T0, 'failed', 0), 'vehicles', T0 + 30, 'failed', 0);
+    const waited = finishFloorWait(startPoll(failedTwice, 'vehicles', T0 + 60), 'vehicles', T0 + 60, T0 + 70); // turned away inside the floor of an aborted download that started at T0 + 40
+    expect(waited.get('vehicles')).toEqual({ id: 'vehicles', cadenceS: 30, dueAt: T0 + 70, inFlight: false, failures: 2, intervalS: 30, lastStartedAt: T0 + 40 });
+    expect(resumeAll(waited, T0 + 65).get('vehicles')?.dueAt).toBe(T0 + 70); // back from the background before the floor ends: due when it ends
+    expect(finishPoll(startPoll(waited, 'vehicles', T0 + 70), 'vehicles', 'failed', T0 + 70).get('vehicles')?.intervalS).toBe(60); // a 3rd failure: R-b's 60 s, the floor-wait counted as nothing
+  });
+
+  it('finishFloorWait leaves a task dropped mid-poll dropped, and refuses a floor that ends more than a cadence after now', () => {
+    const inFlight = startPoll(createScheduler([SWIFTLY], T0), 'vehicles', T0);
+    const dropped = syncTasks(inFlight, [], T0 + 1);
+    expect(finishFloorWait(dropped, 'vehicles', T0 + 2, T0 + 20)).toBe(dropped);
+    expect(() => finishFloorWait(inFlight, 'vehicles', T0 + 2, T0 + 33)).toThrow(InvariantError);
   });
 });

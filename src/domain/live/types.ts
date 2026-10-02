@@ -10,6 +10,7 @@ import type { Mode } from '../network/stations';
  *
  *   LiveProvider { id, capabilities{vehicles,predictions}, fetchVehicles(signal),
  *                  fetchPredictions(stationKey, signal) } → Result<LiveBatch<…>, LiveError>
+ *                                                           (or a FloorWait, mfix10 fix round 6)
  *
  * Vehicles and predictions are separate CAPABILITIES because they come from different endpoints
  * (§3, live-verified 2026-10-01): Transitland's vehicles are `vehicle_positions.pb`, its predictions
@@ -159,11 +160,35 @@ export class ReusedRejection extends Error {
 
 export type LiveResult<T> = Result<LiveBatch<T>, LiveError>;
 
+/**
+ * mfix10 fix round 6 (U2): a fetch the provider's FLOOR turned away with NOTHING to hand out. The
+ * download it would have shared (Swiftly's 30 s floor, providers/swiftly.ts) ended ABORTED — the app
+ * left the foreground, or the credentials changed — so it brought no answer, and the floor still
+ * forbids a new request. A floor-wait is neither data nor a failure: the poller records nothing (no
+ * chain entry, no lastError, no backoff) and makes the task due when the floor ends, `floorEndsInMs`
+ * from now.
+ */
+export type FloorWait = { readonly ok: 'floor-wait'; readonly floorEndsInMs: number };
+
+/** A floor-wait whose floor ends `floorEndsInMs` from now (0: it has just ended). */
+export function floorWait(floorEndsInMs: number): FloorWait {
+  invariant(Number.isFinite(floorEndsInMs) && floorEndsInMs >= 0, `a floor ends now or later, never in the past, got ${floorEndsInMs}`);
+  const wait: FloorWait = Object.freeze({ ok: 'floor-wait', floorEndsInMs });
+  invariant(Object.isFrozen(wait) && wait.ok === 'floor-wait', 'a floor-wait is an immutable value of its own kind');
+  return wait;
+}
+
+/**
+ * What one fetch brings back: a batch (`ok: true`), a failure (`ok: false`), or — from a provider with
+ * a floor at the source, Swiftly — a FloorWait (`ok: 'floor-wait'`), which is neither.
+ */
+export type LiveFetch<T> = LiveResult<T> | FloorWait;
+
 export type LiveProvider = {
   readonly id: ChainProviderId;
   readonly capabilities: Capabilities;
-  fetchVehicles(signal: AbortSignal): Promise<LiveResult<LiveVehicle>>;
-  fetchPredictions(stationKey: string, signal: AbortSignal): Promise<LiveResult<LivePrediction>>;
+  fetchVehicles(signal: AbortSignal): Promise<LiveFetch<LiveVehicle>>;
+  fetchPredictions(stationKey: string, signal: AbortSignal): Promise<LiveFetch<LivePrediction>>;
 };
 
 /**

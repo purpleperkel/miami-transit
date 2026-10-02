@@ -1,5 +1,5 @@
 import type { Standings } from '../../domain/live/chain';
-import type { LiveBatch, LiveError, LivePrediction, LiveProvider, LiveResult, LiveVehicle, ProviderId } from '../../domain/live/types';
+import { type FloorWait, floorWait, type LiveBatch, type LiveError, type LiveFetch, type LivePrediction, type LiveProvider, type LiveVehicle, type ProviderId } from '../../domain/live/types';
 import { err, ok } from '../../lib/result';
 import { LivePoller, type LiveSnapshot, MonotonicClock } from '../poller';
 import { NONE_PROVIDER } from '../providers/none';
@@ -15,8 +15,8 @@ const NETWORK_DOWN: LiveError = { kind: 'network', message: 'offline' };
 const RATE_LIMITED: LiveError = { kind: 'http', status: 429, message: 'HTTP 429' };
 const UNAUTHORIZED: LiveError = { kind: 'http', status: 401, message: 'HTTP 401' };
 
-/** ok, a provider error, or 'reject' — a broken provider that rejects, which the LiveProvider contract forbids. */
-type Answer = 'ok' | 'reject' | LiveError;
+/** ok, a provider error, a floor-wait (mfix10 fix round 6), or 'reject' — a broken provider that rejects, which the LiveProvider contract forbids. */
+type Answer = 'ok' | 'reject' | LiveError | FloorWait;
 
 /**
  * A provider that answers each fetch — immediately, or when released if `hold` — with `script`'s
@@ -38,13 +38,13 @@ class FakeProvider implements LiveProvider {
     expect(['swiftly', 'transitland']).toContain(id);
   }
 
-  fetchVehicles(signal: AbortSignal): Promise<LiveResult<LiveVehicle>> {
+  fetchVehicles(signal: AbortSignal): Promise<LiveFetch<LiveVehicle>> {
     expect(signal).toBeDefined();
     expect(this.capabilities.vehicles).toBe(true);
     return this.answer<LiveVehicle>('vehicles', signal);
   }
 
-  fetchPredictions(stationKey: string, signal: AbortSignal): Promise<LiveResult<LivePrediction>> {
+  fetchPredictions(stationKey: string, signal: AbortSignal): Promise<LiveFetch<LivePrediction>> {
     expect(stationKey).toContain(':');
     expect(this.capabilities.predictions).toBe(true);
     return this.answer<LivePrediction>(stationKey, signal);
@@ -57,10 +57,10 @@ class FakeProvider implements LiveProvider {
     expect(this.held).toEqual([]);
   }
 
-  private answer<T>(what: string, signal: AbortSignal): Promise<LiveResult<T>> {
+  private answer<T>(what: string, signal: AbortSignal): Promise<LiveFetch<T>> {
     this.calls.push({ what, at: this.clock(), signal });
     const answer = this.script.get(what) ?? this.next;
-    expect(typeof answer === 'string' || answer.kind.length > 0).toBe(true);
+    expect(typeof answer === 'string' || ('ok' in answer ? answer.ok === 'floor-wait' : answer.kind.length > 0)).toBe(true);
     expect(this.calls.length).toBeGreaterThan(0);
     if (answer === 'reject') {
       return Promise.reject(new Error('fake provider bug'));
@@ -68,9 +68,9 @@ class FakeProvider implements LiveProvider {
     return this.hold ? new Promise((resolve) => this.held.push(() => resolve(this.result<T>(answer)))) : Promise.resolve(this.result<T>(answer));
   }
 
-  private result<T>(answer: Exclude<Answer, 'reject'>): LiveResult<T> {
-    const result: LiveResult<T> = answer === 'ok' ? ok(this.batch<T>()) : err(answer);
-    expect(result.ok).toBe(answer === 'ok');
+  private result<T>(answer: Exclude<Answer, 'reject'>): LiveFetch<T> {
+    const result: LiveFetch<T> = answer === 'ok' ? ok(this.batch<T>()) : 'ok' in answer ? answer : err(answer);
+    expect(result.ok === true).toBe(answer === 'ok');
     expect(this.calls.length).toBeGreaterThan(0);
     return result;
   }
@@ -357,8 +357,8 @@ describe('LivePoller (mfix10): a key change while a poll is in flight', () => {
   });
 });
 
-describe('LivePoller (mfix10 fix round 5): leaving the foreground', () => {
-  it('pausing aborts every provider\'s polls in flight and keeps their failures; the aborted polls leave no trace and their tasks start over', async () => {
+describe('LivePoller (mfix10 fix rounds 5 and 6): leaving the foreground', () => {
+  it('pausing aborts every provider\'s polls in flight and keeps their failures; the aborted polls leave no trace, and their tasks are due a cadence after the aborted starts', async () => {
     const h = new Harness();
     h.keys.swiftly = true;
     h.poller.watchStations(['rail:government-ctr']);
@@ -370,17 +370,35 @@ describe('LivePoller (mfix10 fix round 5): leaving the foreground', () => {
     expect(inFlight.map((call) => [call?.what, (call?.at ?? T0) - T0])).toEqual([['vehicles', 61], ['rail:government-ctr', 90]]);
     h.poller.pauseAll(); // the app leaves the foreground
     expect(inFlight.map((call) => call?.signal.aborted)).toEqual([true, true]);
-    h.swiftly.release(); // both answer after the abort: an earlier era
+    h.swiftly.release(); // both answer after the abort: interrupted polls
     h.transitland.release();
     await settle();
     [h.swiftly.hold, h.transitland.hold, h.now] = [false, false, T0 + 95];
     h.poller.resume();
     await settle();
-    expect([callTimes(h.transitland), callTimes(h.swiftly, 'rail:government-ctr'), callTimes(h.swiftly)]).toEqual([[61, 95], [0, 30, 60, 90, 95], [0, 30, 60]]); // started over, due at once; Swiftly's vehicles still benched
+    expect([callTimes(h.transitland), callTimes(h.swiftly, 'rail:government-ctr')]).toEqual([[61], [0, 30, 60, 90]]); // nothing at 95: an interrupted poll is not a fresh start (fix round 6, U1)
+    await h.step(121);
+    expect([callTimes(h.transitland), callTimes(h.swiftly, 'rail:government-ctr'), callTimes(h.swiftly)]).toEqual([[61, 121], [0, 30, 60, 90, 120], [0, 30, 60]]); // a cadence after the aborted starts; Swiftly's vehicles still benched
     expect(h.latest.status).toEqual({
       vehicles: { provider: 'transitland', failing: false, consecutiveFailures: 0, lastError: null }, // Swiftly's 3 failures kept: pausing is not a credential change
       predictions: { provider: 'swiftly', failing: false, consecutiveFailures: 0, lastError: null },
     });
+  });
+});
+
+describe('LivePoller (mfix10 fix round 6): a floor-wait', () => {
+  it('a floor-wait records nothing and leaves the last error as it was; its task is due when the floor ends, its failures kept', async () => {
+    const h = new Harness();
+    [h.keys.swiftly, h.keys.transitland] = [true, false]; // Swiftly alone: it keeps serving while it fails
+    h.swiftly.next = NETWORK_DOWN;
+    await h.step(30); // Swiftly fails at 0 and 30: R-b's 30 s each time
+    h.swiftly.next = floorWait(9_500); // at 60 the floor turns the poll away with nothing to hand back: it ends 9.5 s on
+    await h.step(60);
+    expect(h.latest.status.vehicles).toEqual({ provider: 'swiftly', failing: false, consecutiveFailures: 2, lastError: NETWORK_DOWN }); // nothing recorded: no failure, no success, no new error
+    h.swiftly.next = NETWORK_DOWN;
+    await h.step(140);
+    expect(callTimes(h.swiftly)).toEqual([0, 30, 60, 70, 130]); // due when the floor ends (60 + ceil 9.5 s); the 3rd failure backs off 60 s (R-b), its 2 failures kept
+    expect(h.latest.status.vehicles).toEqual({ provider: 'swiftly', failing: true, consecutiveFailures: 4, lastError: NETWORK_DOWN });
   });
 });
 

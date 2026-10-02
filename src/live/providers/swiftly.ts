@@ -1,6 +1,6 @@
 import { PROVIDER_CONFIG } from '../../domain/live/constants';
 import { type LiveRequest, swiftlyTripUpdatesRequest, swiftlyVehiclesRequest } from '../../domain/live/transports';
-import { type Capabilities, type ChainProviderId, type LivePrediction, type LiveProvider, type LiveResult, type LiveVehicle, ReusedRejection } from '../../domain/live/types';
+import { type Capabilities, type ChainProviderId, floorWait, type LiveFetch, type LivePrediction, type LiveProvider, type LiveResult, type LiveVehicle, ReusedRejection } from '../../domain/live/types';
 import { invariant } from '../../lib/invariant';
 import { err, ok } from '../../lib/result';
 import type { HttpBody } from '../http';
@@ -38,33 +38,29 @@ import { type ProviderDeps, stationBatch, tripUpdatesBatch, vehiclesBatch } from
  *    floor ends (fix round 4, S2). A FAILURE handed out that way is marked `reused`, and a rejection (a
  *    bug, e.g. a mapper's broken invariant) is handed out as a ReusedRejection: the poll that started
  *    the download records it in the chain once, and every poll that gets it still backs off (poller.ts).
- *  - An ABORTED download is a start like any other: when Swiftly's credentials change, the poller
- *    aborts the requests out under the old ones (fix round 4, S4), and when the app leaves the
- *    foreground it aborts every request in flight (fix round 5, T1: poller.ts pauseAll). The aborted
- *    download stays remembered, as a failure, until its floor ends, so the polls a resume starts over
- *    are held to that floor: a trip to another app never buys an early request.
+ *  - An ABORTED download is a start like any other, for the floor: when Swiftly's credentials change,
+ *    the poller aborts the requests out under the old ones (fix round 4, S4), and when the app leaves
+ *    the foreground it aborts every request in flight (fix round 5, T1: poller.ts pauseAll). The
+ *    download stays remembered until its floor ends, AS ABORTED (fix round 6, U2): it brought no
+ *    answer, so it is no failure to share. A fetch inside its floor gets a FLOOR-WAIT (types.ts
+ *    FloorWait) carrying the floor's time left: no data, not a failure, so no chain record, no
+ *    lastError and no backoff, and the poller makes the task due when the floor ends — the same
+ *    mechanism as a shared success (S2). The poll that STARTED the download gets its own result, the
+ *    cancelled failure, which the poller never counts (an aborted poll: poller.ts settle). A download
+ *    that genuinely FAILED (not aborted) is shared as a failure, as above (R3, R5).
  *
- * ACCEPTED RESIDUALS (arbiter, mfix10 fix rounds 4 and 5):
+ * ACCEPTED RESIDUALS (arbiter, mfix10 fix rounds 4 to 6):
  *  - S5: agency A → B → A while A's failing download is in flight counts that failure ZERO times: the
  *    change to B aborts it and its poll ends in an earlier credentials era, which leaves no trace; back
- *    on A inside its floor, every fetch reads it reused, which the chain does not count. (Any download
- *    of A in flight at the change ends the same way: read back as a cancelled failure, unrecorded,
- *    its tasks backing off as after any failure.)
+ *    on A inside its floor, every fetch reads it as aborted, a floor-wait (fix round 6), which the chain
+ *    does not count. (Any download of A in flight at the change ends the same way: back on A inside its
+ *    floor, its tasks are due when that floor ends, with no failure and no backoff.)
  *  - R5: every poll that reads a broken download (a rejection, a bug) reports it through onBug, so one
  *    broken download is one report per poll that read it, all with the same text.
- *  - S2 (fix round 5, T3): a poll turned away MID-DOWNLOAD (the download it reads still in flight) ends
- *    when that download does, between heartbeats, and the poller rounds the floor's time left UP to
- *    its whole-second clock: so the poll is due up to one heartbeat after the floor ends, never early.
- *    On the wall clock, with the heartbeat's phase against the second, its request comes up to two
- *    heartbeats after the floor ends; and a heartbeat that finds it due inside the floor's last second
- *    is turned away once more, at no request (a model of 2 000 000 random phases, 2026-10-02: no early
- *    request, at most 1.98 s late, about one in six turned away twice). A poll turned away AT a
- *    heartbeat (the download already in) is due less than one heartbeat after the floor ends.
- *  - T1 (fix round 5): a poll the resume starts over inside the floor of a download that leaving the
- *    foreground aborted reads that download as a cancelled failure, reused: unrecorded, and its task
- *    backs off one cadence (R-b) like any failed poll. So after a short trip to another app the next
- *    request comes a cadence after the first poll back, not at the floor's end; after a lock longer
- *    than 30 s the floor is over and the first poll back downloads afresh.
+ *  - S2 (fix rounds 5 and 6): a poll turned away MID-DOWNLOAD (the download it reads still in flight)
+ *    ends when that download does, between heartbeats, and the poller rounds the floor's time left UP
+ *    to its whole-second clock (a shared success and a floor-wait alike): the task is due never early,
+ *    and at most one heartbeat late on the poller's whole-second clock.
  */
 
 export const SWIFTLY_CAPABILITIES: Capabilities = Object.freeze({ vehicles: true, predictions: true });
@@ -82,8 +78,14 @@ export type SwiftlyLiveProvider = LiveProvider & {
   keyChanged(key: string | null): void;
 };
 
+/**
+ * How a download ended: its result, and whether its request was ABORTED (its signal had aborted when the
+ * request failed: a pause or a credentials change, fix round 6, U2) — then it brought no answer at all.
+ */
+type Downloaded<T> = { readonly result: LiveResult<T>; readonly aborted: boolean };
+
 /** One download of one request (URL, key), shared by every fetch of that request within FLOOR_MS of its start. */
-type Download<T> = { readonly startedAtMs: number; readonly result: Promise<LiveResult<T>> };
+type Download<T> = { readonly startedAtMs: number; readonly ended: Promise<Downloaded<T>> };
 
 /** The downloads of one feed inside their floor, by request identity (identityOf). */
 type Downloads<T> = Map<string, Download<T>>;
@@ -105,7 +107,7 @@ class SwiftlyProvider implements SwiftlyLiveProvider {
     this.clock = new MonotonicClock(deps.monotonicMs);
   }
 
-  async fetchVehicles(signal: AbortSignal): Promise<LiveResult<LiveVehicle>> {
+  async fetchVehicles(signal: AbortSignal): Promise<LiveFetch<LiveVehicle>> {
     invariant(!signal.aborted, 'a poll starts under a live runtime');
     const { swiftly, swiftlyAgency } = this.deps.keys();
     const request = swiftlyVehiclesRequest(swiftly, swiftlyAgency);
@@ -113,11 +115,11 @@ class SwiftlyProvider implements SwiftlyLiveProvider {
       return request;
     }
     const batch = await this.handOut(this.take(this.vehicles, request.value, swiftly, signal, (body) => vehiclesBatch(body, this.deps.network)));
-    invariant(!batch.ok || batch.value.provider === 'swiftly', 'the batch is Swiftly\'s');
+    invariant(batch.ok !== true || batch.value.provider === 'swiftly', 'the batch is Swiftly\'s');
     return batch;
   }
 
-  async fetchPredictions(stationKey: string, signal: AbortSignal): Promise<LiveResult<LivePrediction>> {
+  async fetchPredictions(stationKey: string, signal: AbortSignal): Promise<LiveFetch<LivePrediction>> {
     invariant(this.deps.network.stopsOfStation(stationKey).length > 0, `${stationKey} is a station of the schedule, with stops`);
     const { swiftly, swiftlyAgency } = this.deps.keys();
     const request = swiftlyTripUpdatesRequest(swiftly, swiftlyAgency);
@@ -125,8 +127,8 @@ class SwiftlyProvider implements SwiftlyLiveProvider {
       return request;
     }
     const all = await this.handOut(this.take(this.tripUpdates, request.value, swiftly, signal, (body) => tripUpdatesBatch(body, this.deps.network)));
-    invariant(!all.ok || all.value.provider === 'swiftly', 'the shared feed is Swiftly\'s');
-    return all.ok ? ok(stationBatch(all.value, stationKey)) : all;
+    invariant(all.ok !== true || all.value.provider === 'swiftly', 'the shared feed is Swiftly\'s');
+    return all.ok === true ? ok(stationBatch(all.value, stationKey)) : all;
   }
 
   keyChanged(key: string | null): void {
@@ -147,39 +149,48 @@ class SwiftlyProvider implements SwiftlyLiveProvider {
     prune(downloads, nowMs);
     const identity = identityOf(request.url, key);
     const last = downloads.get(identity);
-    const taken: Taken<T> = last === undefined ? { download: { startedAtMs: nowMs, result: this.download(request, signal, map) }, reused: false } : { download: last, reused: true };
+    const taken: Taken<T> = last === undefined ? { download: { startedAtMs: nowMs, ended: this.download(request, signal, map) }, reused: false } : { download: last, reused: true };
     downloads.set(identity, taken.download);
     invariant(taken.reused ? nowMs - taken.download.startedAtMs < FLOOR_MS : taken.download.startedAtMs === nowMs, 'a fetch reuses only a download inside its floor; any other starts one now');
     return taken;
   }
 
-  /** One request, metered against the quota before it is sent, its body mapped to a batch. */
-  private async download<T>(request: LiveRequest, signal: AbortSignal, map: (body: HttpBody) => LiveResult<T>): Promise<LiveResult<T>> {
+  /**
+   * One request, metered against the quota before it is sent, its body mapped to a batch. A request that
+   * fails while its signal has aborted ended ABORTED (http.ts reads it as a cancelled timeout): it
+   * brought no answer, which is what a fetch sharing it is told (handOut: a floor-wait, U2).
+   */
+  private async download<T>(request: LiveRequest, signal: AbortSignal, map: (body: HttpBody) => LiveResult<T>): Promise<Downloaded<T>> {
     invariant(request.provider === 'swiftly', 'Swiftly downloads only its own requests');
     invariant(!signal.aborted, 'a download starts under a live runtime');
     this.deps.recordCall('swiftly');
     const body = await this.deps.get(request, signal);
-    return body.ok ? map(body.value) : body;
+    const ended: Downloaded<T> = body.ok ? { result: map(body.value), aborted: false } : { result: body, aborted: signal.aborted };
+    invariant(!ended.aborted || !ended.result.ok, 'only a failed request can have been aborted: an answer that arrived is an answer');
+    return ended;
   }
 
   /**
    * A download's result as one fetch gets it: the fetch that started the download gets it as it came.
    * A fetch that reuses it gets a success carrying `floorEndsInMs` (the floor's time left now), a
-   * failure marked `reused`, and a rejection (a bug) as a ReusedRejection.
+   * floor-wait if the download ended aborted (fix round 6, U2: no answer to share, so no data and no
+   * failure), a failure marked `reused`, and a rejection (a bug) as a ReusedRejection.
    */
-  private async handOut<T>({ download, reused }: Taken<T>): Promise<LiveResult<T>> {
-    let result: LiveResult<T>;
+  private async handOut<T>({ download, reused }: Taken<T>): Promise<LiveFetch<T>> {
+    let ended: Downloaded<T>;
     try {
-      result = await download.result;
+      ended = await download.ended;
     } catch (error) {
       throw reused ? new ReusedRejection(error) : error; // a bug either way: the poll reports it, and counts it only if it started the download
     }
+    const { result, aborted } = ended;
     invariant(result.ok ? result.value.floorEndsInMs === undefined : result.error.reused !== true, 'a download\'s own result is never marked as handed out again (the shared result stays as downloaded)');
     invariant(result.ok || result.error.kind !== 'no-key', 'a download fails by the network, the server or the body, never for want of a key');
     if (!reused) {
       return result;
     }
-    return result.ok ? ok({ ...result.value, floorEndsInMs: Math.max(0, download.startedAtMs + FLOOR_MS - this.clock.now()) }) : err({ ...result.error, reused: true as const });
+    const floorEndsInMs = Math.max(0, download.startedAtMs + FLOOR_MS - this.clock.now());
+    return aborted ? floorWait(floorEndsInMs) : result.ok ? ok({ ...result.value, floorEndsInMs }) : err({ ...result.error, reused: true as const });
   }
 }
 

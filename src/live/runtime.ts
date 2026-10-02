@@ -57,7 +57,8 @@ import { readSwiftlyWifiOnly } from './swiftly-wifi';
  * key or a new agency is a new request, and going back to an old one within 30 s repeats nothing.
  * A credentials change aborts the provider's requests still out under the old ones (poller.ts, S4),
  * and leaving the foreground aborts every request in flight, to every provider (fix round 5, T1:
- * poller.ts pauseAll): a request frozen through a lock would end only after the unlock.
+ * poller.ts pauseAll): a request frozen through a lock would end only after the unlock. That abort is
+ * not a key change (fix round 6, U1): an aborted poll's task keeps its failures and its last start.
  *
  * LIFECYCLE: constructing a runtime does nothing observable. `start()` makes a fresh poller, loads
  * the keys and begins publishing; `stop()` aborts the poller's requests and publishing stops. A
@@ -235,9 +236,11 @@ export class LiveRuntime {
    * The floor clock marks the moment, so the phone's sleep while the app is away counts toward
    * Swiftly's 30 s floor when it returns (resume). Leaving again while away keeps the first mark.
    * Every poll in flight is aborted (mfix10 fix round 5, T1: poller.ts pauseAll): on a lock it would be
-   * frozen with the app's JavaScript and end only after the unlock. The aborted polls leave no trace,
-   * the chain's failures stay as they were, and their tasks start over, so the first poll back is
-   * fresh unless Swiftly's floor (on the floor clock, sleep counted) still holds its request back.
+   * frozen with the app's JavaScript and end only after the unlock. A pause is not a key change (fix
+   * round 6, U1): the aborted polls leave no trace and change nothing, each task keeping its failures
+   * and its last start, so the resume makes it due one cadence after the aborted start (at once after
+   * a longer lock). A Swiftly poll back inside the floor of a download the pause aborted is a
+   * floor-wait (U2): due when the floor (on the floor clock, sleep counted) ends, with no failure.
    */
   pause(): void {
     const [started, floorMs] = [this.isStarted(), this.floorClock.now()];

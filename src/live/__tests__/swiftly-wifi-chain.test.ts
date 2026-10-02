@@ -1,3 +1,4 @@
+import { LIVE_VEHICLES_FIXTURE_BYTES } from '../../domain/gtfsrt/__fixtures__/live-feeds.fixture';
 import { HEARTBEAT_MS, PROVIDER_CONFIG } from '../../domain/live/constants';
 import type { FetchFn, FetchResponseLike, HttpInit } from '../http';
 import type { SecretStore } from '../keys';
@@ -5,7 +6,7 @@ import type { SyncKeyValue } from '../quota-store';
 import { LiveRuntime, type LiveState, RESUME_READING_TIMEOUT_MS } from '../runtime';
 import { readSwiftlyWifiOnly, saveSwiftlyWifiOnly } from '../swiftly-wifi';
 import { type AppStateSource, bindRuntime } from '../use-live-polling';
-import { bothProviders, FakeNetwork, runtimeNetwork, SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL, TL_VEHICLES_URL } from './live-fakes';
+import { bothProviders, FakeNetwork, type FakeServer, HANGS, runtimeNetwork, SWIFTLY_TRIP_UPDATES_URL, SWIFTLY_VEHICLES_URL, TL_VEHICLES_URL } from './live-fakes';
 
 /**
  * mfix10 "use Swiftly only on Wi-Fi": the provider chain under the gate, on a REAL LiveRuntime with both
@@ -14,8 +15,9 @@ import { bothProviders, FakeNetwork, runtimeNetwork, SWIFTLY_TRIP_UPDATES_URL, S
  * the setting is the real module over an in-memory kv store; the heartbeat is the real AppState-gated
  * binding on jest's fake clock, stepped one heartbeat (1 s) at a time. The app stays active, unless a
  * test moves it through a HandAppState (a resume then holds the poller until the network's fresh answer
- * is in); a test can hold Swiftly's downloads open and then cut them, as leaving Wi-Fi does. A held
- * download honours its request's abort signal, as a real fetch does.
+ * is in); a test can hold Swiftly's downloads open and then cut them, as leaving Wi-Fi does, or have a
+ * URL of the fake server hang until its request is aborted (HANGS). A held or hanging download honours
+ * its request's abort signal, as a real fetch does.
  */
 
 const STATION = 'rail:government-ctr';
@@ -23,6 +25,8 @@ const STATION = 'rail:government-ctr';
 const THREE_STATIONS = ['rail:government-ctr', 'rail:brickell', 'mover:government-center'];
 const T0_MS = Date.UTC(2026, 9, 1, 12);
 const SWIFTLY_CADENCE_S = PROVIDER_CONFIG.swiftly.cadenceS;
+const TL_CADENCE_S = PROVIDER_CONFIG.transitland.cadenceS;
+const SERVER_DOWN = { status: 503, body: new Uint8Array(0) };
 const ACTIVE: AppStateSource = { currentState: 'active', addEventListener: () => ({ remove: () => undefined }) };
 
 type Provider = 'swiftly' | 'transitland';
@@ -34,6 +38,8 @@ type Chain = {
   readonly runtime: LiveRuntime;
   readonly network: FakeNetwork;
   readonly downloads: HeldDownloads;
+  /** The fake server behind the call spy: a test may change what a URL answers. */
+  readonly server: FakeServer;
   /** The call spy: every fetch the runtime makes, to either provider. */
   readonly fetch: jest.Mock<ReturnType<FetchFn>, Parameters<FetchFn>>;
   readonly requests: Request[];
@@ -169,7 +175,7 @@ function chainRig(first: string | 'never', { wifiOnly, app = ACTIVE, stations = 
   runtime.watchStations(stations);
   teardowns.push(bindRuntime(runtime, app, HEARTBEAT_MS));
   expect(network.open()).toHaveLength(1);
-  return { runtime, network, downloads, fetch, requests, states, quota };
+  return { runtime, network, downloads, server, fetch, requests, states, quota };
 }
 
 /** Steps the fake clock `seconds` heartbeats, one at a time, letting each tick's requests finish. */
@@ -581,6 +587,78 @@ describe('Swiftly only on Wi-Fi (mfix10 fix round 5): leaving the foreground abo
     expect(later.length).toBeGreaterThan(0); // Swiftly polls again within the minute, so the floor check below is not vacuous
     expect(later.filter((request) => request.awakeMs - abortedMs < SWIFTLY_CADENCE_S * 1_000)).toEqual([]); // none within 30 000 floor-ms of the aborted ones
     expect([Date.now() - performance.now(), failureTraces(chain, published)]).toEqual([T0_MS, []]); // wall and awake clocks moved together: the floor clock counted no sleep
+    expectServing(chain, 'swiftly');
+  });
+});
+
+/** When each request to `url` started, in s after T0 (whole seconds unless the test set the wall clock's phase). */
+function startsS(chain: Chain, url: string): number[] {
+  const starts = chain.requests.filter((request) => request.url === url).map((request) => request.atS - T0_MS / 1_000);
+  expect(starts.every((atS) => atS >= 0)).toBe(true);
+  expect(starts).toEqual([...starts].sort((a, b) => a - b));
+  return starts;
+}
+
+describe('Swiftly only on Wi-Fi (mfix10 fix round 6): a poll a pause aborts keeps its task\'s state', () => {
+  it('a transitland poll in flight at a pause is retried no sooner than its cadence', async () => {
+    const app = new HandAppState();
+    const chain = chainRig('CELLULAR', { app }); // Swiftly gated: Transitland serves both capabilities
+    await stepS(1); // the mount's hold lifts: Transitland's vehicles poll at 1 s
+    chain.server.on(TL_VEHICLES_URL, HANGS);
+    await stepS(TL_CADENCE_S); // its next one starts at 61 s, and hangs
+    const published = chain.states.length;
+    app.set('background'); // another app: the poll in flight is aborted
+    chain.server.on(TL_VEHICLES_URL, { status: 200, body: LIVE_VEHICLES_FIXTURE_BYTES });
+    await stepS(5);
+    app.set('active'); // back at 66 s: the hold lifts at 67 s
+    await stepS(TL_CADENCE_S);
+    expect(startsS(chain, TL_VEHICLES_URL)).toEqual([1, 61, 121]); // a cadence after the aborted start, not at the first heartbeat back (67 s): no extra metered call
+    expect(failureTraces(chain, published)).toEqual([]); // the aborted poll left no trace
+    expectServing(chain, 'transitland');
+  });
+
+  it('a pause during a failing provider\'s request keeps its backoff', async () => {
+    const app = new HandAppState();
+    const chain = chainRig('CELLULAR', { app }); // Transitland alone serves, so it keeps serving while it fails
+    chain.server.on(TL_VEHICLES_URL, SERVER_DOWN);
+    await stepS(300); // its vehicles fail at 1, 61, 121 and 181 s; R-b backs the 4th failure off 120 s, to 301 s
+    chain.server.on(TL_VEHICLES_URL, HANGS);
+    await stepS(1); // the 5th try starts at 301 s, and hangs
+    const published = chain.states.length;
+    app.set('background'); // the pause aborts it
+    chain.server.on(TL_VEHICLES_URL, SERVER_DOWN);
+    await stepS(5);
+    app.set('active');
+    await stepS(185); // through 491 s
+    expect(startsS(chain, TL_VEHICLES_URL)).toEqual([1, 61, 121, 181, 301, 361, 481]); // retried a cadence after the aborted start; the next failure backs off 120 s from the 4 kept
+    expect(latest(chain).status.vehicles).toMatchObject({ provider: 'transitland', failing: true, consecutiveFailures: 6, lastError: { kind: 'http', status: 503 } });
+    expect(chain.states.slice(published).filter((state) => state.status.vehicles.lastError?.kind === 'timeout')).toEqual([]); // the aborted request's cancellation never shows
+  });
+});
+
+describe('Swiftly only on Wi-Fi (mfix10 fix round 6): an aborted download inside Swiftly\'s floor is a floor-wait', () => {
+  it('after a short trip away with a swiftly download in flight, fresh data comes when the floor ends, not a cadence later', async () => {
+    jest.setSystemTime(T0_MS + 600); // the wall clock reads x.6 s at every heartbeat; performance.now() and the timers do not move
+    const app = new HandAppState();
+    const chain = chainRig('WIFI', { app });
+    await stepS(SWIFTLY_CADENCE_S); // Swiftly downloads both feeds at the first heartbeat; its next poll is due a cadence on
+    chain.downloads.holding = true;
+    const [held, published] = [chain.requests.length, chain.states.length];
+    await stepS(1); // that poll starts, for both feeds, and hangs
+    expect([swiftlyCalls(chain, held), chain.downloads.open]).toEqual([2, 2]);
+    const abortedMs = Math.max(...chain.requests.slice(held).map((request) => request.awakeMs));
+    app.set('background'); // another app, the phone awake: both requests are aborted
+    await stepS(5); // away 5 s, the heartbeat stopped,
+    await jest.advanceTimersByTimeAsync(400); // and 0.4 s more (steps of <= 1 s): the heartbeat comes back at a new phase against the second (x.0 s)
+    chain.downloads.holding = false;
+    app.set('active');
+    await stepS(2 * SWIFTLY_CADENCE_S + 5); // the first poll back lands 29.4 s into the aborted downloads' floor: turned away with nothing to hand back
+    const freshMs = chain.requests.slice(held + 2).filter((request) => request.provider === 'swiftly').map((request) => request.awakeMs - abortedMs);
+    expect(freshMs.length).toBeGreaterThan(0); // Swiftly downloads again, so the window below is not vacuous
+    const firstMs = Math.min(...freshMs);
+    expect(firstMs).toBeGreaterThanOrEqual(SWIFTLY_CADENCE_S * 1_000); // never inside the floor
+    expect(firstMs).toBeLessThanOrEqual(SWIFTLY_CADENCE_S * 1_000 + HEARTBEAT_MS); // at most one heartbeat after it ends (a backoff would wait a cadence more)
+    expect([chain.downloads.aborted, failureTraces(chain, published)]).toEqual([2, []]); // no failure, bench or error recorded
     expectServing(chain, 'swiftly');
   });
 });

@@ -1,6 +1,6 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite';
 
-import type { SqlExecutor, SqlParams, SqlRow, SqlValue } from '../../src/data/sql-executor';
+import type { SqlParams, SqlRow, SqlValue, WritableSqlExecutor } from '../../src/data/sql-executor';
 import { invariant } from '../../src/lib/invariant';
 import { err, ok, type Result } from '../../src/lib/result';
 
@@ -28,7 +28,10 @@ export type SqlError = { readonly kind: 'sqlite'; readonly path: string; readonl
 
 export type OpenMode = 'read-only' | 'read-write';
 
-export class NodeSqlExecutor implements SqlExecutor {
+/** The `path` an in-memory executor reports (SQLite's own spelling for "no file"). */
+const IN_MEMORY = ':memory:';
+
+export class NodeSqlExecutor implements WritableSqlExecutor {
   private readonly db: DatabaseSync;
   readonly path: string;
 
@@ -44,6 +47,18 @@ export class NodeSqlExecutor implements SqlExecutor {
     invariant(path.length > 0 && path !== ':memory:', 'the pipeline executor opens a file');
     invariant(mode === 'read-only' || mode === 'read-write', 'an open mode is named');
     return sqlResult(path, () => new NodeSqlExecutor(new DatabaseSync(path, { readOnly: mode === 'read-only' }), path));
+  }
+
+  /**
+   * A fresh, empty, read-write in-memory database (M7.3's user-DB suite). It is a separate,
+   * explicit constructor so `open` keeps refusing ':memory:' — a pipeline step handed that path by
+   * mistake would otherwise "succeed" and lose everything it wrote.
+   */
+  static inMemory(): NodeSqlExecutor {
+    const executor = new NodeSqlExecutor(new DatabaseSync(':memory:'), IN_MEMORY);
+    invariant(executor.db.location() === null, 'an in-memory database has no file');
+    invariant(executor.path === IN_MEMORY, 'the executor names itself in-memory');
+    return executor;
   }
 
   /** Every row of a query (column names → values), in the order SQLite returns them. */

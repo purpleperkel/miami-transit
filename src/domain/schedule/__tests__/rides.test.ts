@@ -61,9 +61,15 @@ describe('ride assembly (M3.4, pure)', () => {
   });
 
   it('no ride in the window -> needs-transfer; any ride -> rides', () => {
-    expect(judgeRides([])).toEqual({ kind: 'needs-transfer' });
+    expect(judgeRides([], true)).toEqual({ kind: 'needs-transfer' });
     const rides = assembleRides(windowFrom(WED.baseEpoch + AT_0800, 60), [{ day: WED, candidates: [candidate(1)] }]);
-    expect(judgeRides(rides)).toEqual({ kind: 'rides', rides });
+    expect(judgeRides(rides, true)).toEqual({ kind: 'rides', rides });
+  });
+
+  it('no ride and nothing departing A in the window -> no-service, never needs-transfer', () => {
+    expect(judgeRides([], false)).toEqual({ kind: 'no-service' });
+    const rides = assembleRides(windowFrom(WED.baseEpoch + AT_0800, 60), [{ day: WED, candidates: [candidate(1)] }]);
+    expect(() => judgeRides(rides, false)).toThrow(/departure from A/);
   });
 
   it('a candidate alighting upstream, or boarding at the last stop, breaks the contract', () => {

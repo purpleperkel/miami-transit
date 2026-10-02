@@ -8,6 +8,8 @@
  *
  * This module is types only: no runtime import, so it loads under Metro, jest and Node alike.
  *
+ * `WritableSqlExecutor` (below) adds the write path the user DB needs; both twins implement it.
+ *
  * The contract is SYNCHRONOUS because the node:sqlite executor is, and the schedule reads are
  * small indexed lookups on a ~2 MB read-only DB (one station's stop times for one or two service
  * days); expo-sqlite's `getAllSync` / `getFirstSync` serve them on the phone.
@@ -31,4 +33,20 @@ export interface SqlExecutor {
   all<T extends object = SqlRow>(sql: string, params?: SqlParams): T[];
   /** The first row of a query, or null when it returns none. */
   get<T extends object = SqlRow>(sql: string, params?: SqlParams): T | null;
+}
+
+/**
+ * The write half of the contract (M7.3): the user DB (src/data/user-db.ts — saved trips, settings)
+ * is the one database the app writes. Same twins, same synchronous rule:
+ *   - on the phone, expo-sqlite's `runSync` / `execSync` → src/data/expo-sql-executor.ts
+ *   - on the Mac, node:sqlite's `run` / `exec`           → scripts/lib/node-sql-executor.ts
+ * The schedule DB is only ever read, so its code keeps taking the read-only `SqlExecutor`.
+ */
+export interface WritableSqlExecutor extends SqlExecutor {
+  /** Execute one statement that returns no rows (INSERT / UPDATE / DELETE); the number of rows it changed. */
+  run(sql: string, params?: SqlParams): number;
+  /** Execute SQL text that may hold several statements (a migration's DDL, PRAGMAs). Takes no parameters. */
+  exec(sql: string): void;
+  /** Run `work` inside BEGIN … COMMIT and return its result; a throw rolls back and is rethrown. Never nested. */
+  transaction<T>(work: () => T): T;
 }

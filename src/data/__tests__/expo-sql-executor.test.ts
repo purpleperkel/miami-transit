@@ -4,17 +4,22 @@ import { InvariantError } from '../../lib/invariant';
 import { ExpoSqlExecutor, toExpoParams } from '../expo-sql-executor';
 
 /**
- * M3.1: the on-device executor's binding and delegation. expo-sqlite's native module cannot load
- * under jest, and there is no simulator on this Mac, so the database below is a stand-in; the
- * real expo-sqlite path is exercised on the phone.
+ * M3.1 / M7.3: the on-device executor's binding and delegation, for reads and writes.
+ * expo-sqlite's native module cannot load under jest, and there is no simulator on this Mac, so
+ * the database below is a stand-in; the real expo-sqlite path is exercised on the phone.
  */
 
-type Call = { readonly method: 'getAllSync' | 'getFirstSync'; readonly sql: string; readonly params: unknown };
+type Method = 'getAllSync' | 'getFirstSync' | 'runSync' | 'execSync';
+type Call = { readonly method: Method; readonly sql: string; readonly params?: unknown };
 
-/** test-time mock of native module: an expo-sqlite SQLiteDatabase stand-in that records each call. */
-function recordingDatabase(rows: readonly object[]): { db: SQLiteDatabase; calls: Call[] } {
+/**
+ * test-time mock of native module: an expo-sqlite SQLiteDatabase stand-in that records each call.
+ * `execSync` tracks BEGIN / COMMIT / ROLLBACK so `isInTransactionSync` answers like the real one.
+ */
+function recordingDatabase(rows: readonly object[], changes = 1): { db: SQLiteDatabase; calls: Call[] } {
   expect(Array.isArray(rows)).toBe(true);
   const calls: Call[] = [];
+  let inTransaction = false;
   const db = {
     databasePath: '/data/SQLite/schedule-abc.db',
     getAllSync: (sql: string, params: unknown) => {
@@ -25,6 +30,15 @@ function recordingDatabase(rows: readonly object[]): { db: SQLiteDatabase; calls
       calls.push({ method: 'getFirstSync', sql, params });
       return rows[0] ?? null;
     },
+    runSync: (sql: string, params: unknown) => {
+      calls.push({ method: 'runSync', sql, params });
+      return { changes, lastInsertRowId: 0 };
+    },
+    execSync: (sql: string) => {
+      calls.push({ method: 'execSync', sql });
+      inTransaction = sql === 'BEGIN' ? true : sql === 'COMMIT' || sql === 'ROLLBACK' ? false : inTransaction;
+    },
+    isInTransactionSync: () => inTransaction,
   } as unknown as SQLiteDatabase;
   expect(calls).toHaveLength(0);
   return { db, calls };
@@ -57,5 +71,52 @@ describe('expo-sqlite executor (M3.1)', () => {
     const { db } = recordingDatabase([]);
     expect(new ExpoSqlExecutor(db).get('SELECT 1 WHERE 0')).toBeNull();
     expect(new ExpoSqlExecutor(db).all('SELECT 1 WHERE 0')).toEqual([]);
+  });
+});
+
+describe('expo-sqlite executor, the write half (M7.3)', () => {
+  it('user DB writes go through runSync with the converted parameters', () => {
+    const { db, calls } = recordingDatabase([], 2);
+    const executor = new ExpoSqlExecutor(db);
+    expect(executor.run('UPDATE setting SET value = :value WHERE key = :key', { key: 'boardBufferS', value: 90 })).toBe(2);
+    expect(executor.run('DELETE FROM saved_trip WHERE trip_id = ?', ['work'])).toBe(2);
+    expect(calls).toEqual([
+      { method: 'runSync', sql: 'UPDATE setting SET value = :value WHERE key = :key', params: { ':key': 'boardBufferS', ':value': 90 } },
+      { method: 'runSync', sql: 'DELETE FROM saved_trip WHERE trip_id = ?', params: ['work'] },
+    ]);
+  });
+
+  it('migration DDL goes through execSync, and a transaction commits around its work', () => {
+    const { db, calls } = recordingDatabase([]);
+    const executor = new ExpoSqlExecutor(db);
+    executor.exec('CREATE TABLE t(x INTEGER)');
+    expect(executor.transaction(() => executor.run('INSERT INTO t VALUES (?)', [1]))).toBe(1);
+    expect(calls.map((c) => `${c.method} ${c.sql}`)).toEqual([
+      'execSync CREATE TABLE t(x INTEGER)',
+      'execSync BEGIN',
+      'runSync INSERT INTO t VALUES (?)',
+      'execSync COMMIT',
+    ]);
+    expect(db.isInTransactionSync()).toBe(false);
+  });
+
+  it('a transaction whose work throws rolls back and rethrows the same error', () => {
+    const { db, calls } = recordingDatabase([]);
+    const executor = new ExpoSqlExecutor(db);
+    const failure = new Error('constraint failed');
+    expect(() =>
+      executor.transaction(() => {
+        throw failure;
+      }),
+    ).toThrow(failure);
+    expect(calls.map((c) => c.sql)).toEqual(['BEGIN', 'ROLLBACK']);
+    expect(db.isInTransactionSync()).toBe(false);
+  });
+
+  it('transactions do not nest', () => {
+    const { db } = recordingDatabase([]);
+    const executor = new ExpoSqlExecutor(db);
+    expect(() => executor.transaction(() => executor.transaction(() => 1))).toThrow(/do not nest/);
+    expect(db.isInTransactionSync()).toBe(false);
   });
 });

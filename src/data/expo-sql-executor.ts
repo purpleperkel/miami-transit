@@ -1,12 +1,16 @@
 import type { SQLiteBindParams, SQLiteDatabase } from 'expo-sqlite';
 
 import { invariant } from '../lib/invariant';
-import type { SqlExecutor, SqlParams, SqlRow, SqlValue } from './sql-executor';
+import type { SqlParams, SqlRow, SqlValue, WritableSqlExecutor } from './sql-executor';
 
 /**
  * The on-device SQL executor (M3.1): the SqlExecutor contract over an open expo-sqlite database,
  * using its synchronous API (`getAllSync` / `getFirstSync`, expo-sqlite 57). It is the twin of the
  * Mac's scripts/lib/node-sql-executor.ts; the schedule engine cannot tell them apart.
+ *
+ * It also carries the write half (`WritableSqlExecutor`, M7.3) over `runSync` / `execSync`, for the
+ * user DB (saved trips, settings). The read-only schedule DB never calls it; the write methods
+ * check, when called, that the wrapped database can write.
  *
  * It wraps a database the caller has opened — the schedule-DB provider (M3.8) imports the bundled
  * asset and opens it — and leaves the connection's lifetime to that owner. Only expo-sqlite's
@@ -21,7 +25,7 @@ import type { SqlExecutor, SqlParams, SqlRow, SqlValue } from './sql-executor';
 /** A bare SQL parameter name (no `:` / `@` / `$` prefix). */
 const BARE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-export class ExpoSqlExecutor implements SqlExecutor {
+export class ExpoSqlExecutor implements WritableSqlExecutor {
   private readonly db: SQLiteDatabase;
 
   constructor(db: SQLiteDatabase) {
@@ -42,6 +46,37 @@ export class ExpoSqlExecutor implements SqlExecutor {
     const row = this.db.getFirstSync<T>(sql, toExpoParams(params));
     invariant(row === null || typeof row === 'object', 'getFirstSync returns a row or null');
     return row;
+  }
+
+  run(sql: string, params: SqlParams = []): number {
+    invariant(sql.trim().length > 0, 'a statement has SQL');
+    invariant(typeof this.db.runSync === 'function', 'the wrapped database can write (runSync)');
+    const { changes } = this.db.runSync(sql, toExpoParams(params));
+    invariant(Number.isSafeInteger(changes) && changes >= 0, 'runSync reports a row count');
+    return changes;
+  }
+
+  exec(sql: string): void {
+    invariant(sql.trim().length > 0, 'exec runs SQL');
+    invariant(typeof this.db.execSync === 'function', 'the wrapped database can write (execSync)');
+    this.db.execSync(sql);
+  }
+
+  /** BEGIN … COMMIT through execSync, like the Mac twin: a throw rolls back (if still open) and is rethrown. */
+  transaction<T>(work: () => T): T {
+    invariant(typeof work === 'function', 'a transaction runs a function');
+    invariant(!this.db.isInTransactionSync(), 'transactions do not nest');
+    this.db.execSync('BEGIN');
+    try {
+      const result = work();
+      this.db.execSync('COMMIT');
+      return result;
+    } catch (error) {
+      if (this.db.isInTransactionSync()) {
+        this.db.execSync('ROLLBACK');
+      }
+      throw error;
+    }
   }
 }
 

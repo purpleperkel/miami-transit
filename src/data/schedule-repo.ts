@@ -1,6 +1,7 @@
 import {
   resolveServiceDays,
   type ServiceCalendarBounds,
+  type ServiceDay,
   type ServiceDayResolution,
   type TimeWindow,
   windowFrom,
@@ -8,6 +9,7 @@ import {
 import { assembleDepartures, type Departure } from '../domain/schedule/departures';
 import { MAX_LAYOVER_S, type ScheduledVehicle, scheduledVehicles, type ServiceDayTrips, type ShapePath } from '../domain/schedule/positions';
 import { assembleRides, judgeRides, type RidesOutcome } from '../domain/schedule/rides';
+import { dropBeatenRides } from '../domain/trips/trip-rides';
 import { invariant } from '../lib/invariant';
 import { err, ok, type Result } from '../lib/result';
 import { readRuntimeNetwork, type RuntimeNetwork } from './live-network';
@@ -133,13 +135,15 @@ export class ScheduleRepo {
     if (resolution.kind !== 'active') {
       return ok(resolution);
     }
-    const visits = resolution.days.map((day) => ({ day, visits: readStopVisits(this.db, station, day, daySeconds(day, window)) }));
-    const departures = assembleDepartures(window, visits);
-    invariant(departures.every((d) => d.epoch >= window.fromEpoch && d.epoch <= window.toEpoch), 'every departure is inside the window');
+    const departures = this.departuresFrom(station, resolution.days, window);
+    invariant(departures.every((d) => resolution.days.some((day) => day.date === d.serviceDate)), 'every departure runs on a resolved service day');
     return ok({ kind: 'departures', serviceDates: resolution.days.map((day) => day.date), departures });
   }
 
-  /** Rides from one station to another boarding during `window` (same vehicle, at most one block hop). */
+  /**
+   * Rides from one station to another boarding during `window` (same vehicle, at most one block hop).
+   * With none: `needs-transfer` if anything departs the origin in the window, else `no-service`.
+   */
   rides(fromKey: string, toKey: string, window: TimeWindow): Result<RidesQueryOutcome, UnknownStation> {
     invariant(fromKey.length > 0 && toKey.length > 0, 'rides needs two station keys');
     invariant(fromKey !== toKey, `a ride joins two different stations, got ${fromKey} twice`);
@@ -155,7 +159,25 @@ export class ScheduleRepo {
       day,
       candidates: readRideCandidates(this.db, stations.value, day, daySeconds(day, window)),
     }));
-    return ok(judgeRides(assembleRides(window, candidates)));
+    const rides = assembleRides(window, candidates);
+    const departsFromA = rides.length > 0 || this.departuresFrom(stations.value.from, resolution.days, window).length > 0;
+    return ok(judgeRides(rides, departsFromA));
+  }
+
+  /**
+   * The rides a trip card offers (M7, m3a's input): `rides()`, minus every ride a direct ride that
+   * departs no earlier beats on arrival — e.g. the 17-min Omni loop-around beside a 4-min direct
+   * Brickell ride. Other outcomes pass through unchanged.
+   */
+  tripRides(fromKey: string, toKey: string, window: TimeWindow): Result<RidesQueryOutcome, UnknownStation> {
+    const outcome = this.rides(fromKey, toKey, window);
+    if (!outcome.ok || outcome.value.kind !== 'rides') {
+      return outcome;
+    }
+    const kept = dropBeatenRides(outcome.value.rides);
+    invariant(kept.length > 0, 'the earliest-arriving ride is never beaten, so a ride list stays non-empty');
+    invariant(kept.length <= outcome.value.rides.length, 'the filter only drops rides');
+    return ok({ kind: 'rides', rides: kept });
   }
 
   /**
@@ -209,6 +231,15 @@ export class ScheduleRepo {
     invariant(stations.length > 0, 'the schedule DB has stations');
     invariant(this.stationList === stations, 'the stations are read once, then kept');
     return stations;
+  }
+
+  /** Departures from `station` on the running service days, inside `window`; terminating trains excluded. */
+  private departuresFrom(station: StationRef, days: readonly ServiceDay[], window: TimeWindow): Departure[] {
+    invariant(days.length > 0, 'departures are read for running service days');
+    const visits = days.map((day) => ({ day, visits: readStopVisits(this.db, station, day, daySeconds(day, window)) }));
+    const departures = assembleDepartures(window, visits);
+    invariant(departures.every((d) => d.epoch >= window.fromEpoch && d.epoch <= window.toEpoch), 'every departure is inside the window');
+    return departures;
   }
 
   private shapePaths(): ReadonlyMap<number, ShapePath> {

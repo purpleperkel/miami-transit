@@ -12,8 +12,12 @@ import { isTimeWindow, type ServiceDay, type TimeWindow } from '../gtfs/service-
  * Government Center and Bayfront Park; Omni and Brickell legs chain through each other), and a
  * rider stays aboard across the seam. Rail termini never link, so rail rides are always direct.
  *
- * When nothing boards in the window, the outcome is `needs-transfer`: the app hands the trip to
- * Apple Maps until the M10 planner can route transfers itself.
+ * When nothing boards in the window, the outcome depends on whether anything leaves A at all
+ * (m3a's input to M7, checked on the real DB 2026-10-01):
+ *   - trains leave A, but none reaches B without changing → `needs-transfer`: the app hands the
+ *     trip to route options (M10) / Apple Maps;
+ *   - nothing leaves A in the window (e.g. MIA at 02:00) → `no-service`: no transfer would help,
+ *     and the trip card must never say "transfer" at night.
  */
 
 /** A (boarding at A, alighting at B) pair for one trip boarding, as the schedule DB yields it (service-day seconds). */
@@ -55,8 +59,10 @@ export type Ride = {
 
 export type RidesOutcome =
   | { readonly kind: 'rides'; readonly rides: readonly Ride[] }
-  /** No ride boards in the window without changing vehicles: hand the trip to Apple Maps (M10 plans it on device). */
-  | { readonly kind: 'needs-transfer' };
+  /** Trains leave A in the window, but none reaches B without changing vehicles: hand the trip to route options. */
+  | { readonly kind: 'needs-transfer' }
+  /** Nothing leaves A in the window at all (night, between service days): not a transfer. */
+  | { readonly kind: 'no-service' };
 
 /**
  * The rides boarding at A inside `window`, earliest departure first (ties: earliest arrival).
@@ -80,11 +86,17 @@ export function assembleRides(window: TimeWindow, days: readonly ServiceDayRideC
   return rides;
 }
 
-/** Rides if any board in the window; otherwise the trip needs a transfer. */
-export function judgeRides(rides: readonly Ride[]): RidesOutcome {
-  invariant(Array.isArray(rides), 'judgeRides takes the assembled ride list');
+/**
+ * Rides if any board in the window; otherwise `needs-transfer` when something still departs A in
+ * the window (`departsFromA`), and `no-service` when nothing does.
+ */
+export function judgeRides(rides: readonly Ride[], departsFromA: boolean): RidesOutcome {
   invariant(rides.every((r) => r.arrEpoch >= r.depEpoch), 'no ride arrives before it departs');
-  return rides.length > 0 ? { kind: 'rides', rides } : { kind: 'needs-transfer' };
+  invariant(rides.length === 0 || departsFromA, 'a ride boarding at A is a departure from A');
+  if (rides.length > 0) {
+    return { kind: 'rides', rides };
+  }
+  return departsFromA ? { kind: 'needs-transfer' } : { kind: 'no-service' };
 }
 
 /** One candidate per boarding (trip + position): direct beats a block hop; then the earliest arrival. */

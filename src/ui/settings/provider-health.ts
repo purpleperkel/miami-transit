@@ -11,6 +11,8 @@ import { formatAge, formatBytes, PROVIDER_NAMES } from './settings-text';
  *
  *   starting  the runtime has not published yet
  *   off       no key in the Keychain
+ *   gated     Swiftly, held back by "Use Swiftly only on Wi-Fi" while the phone is off Wi-Fi (mfix10):
+ *             by design, not a failure, so nothing is appended (the chain passes it over as if it had no key)
  *   paused    its monthly quota is 95% used, so the chain skips it until the month turns
  *   failing   it failed 3+ polls in a row (chain.ts): either it still serves and its data is stale,
  *             or the chain benched it and a provider after it serves instead
@@ -19,12 +21,13 @@ import { formatAge, formatBytes, PROVIDER_NAMES } from './settings-text';
  *   live      it serves, and its latest data is within its fresh threshold (§3)
  *   stale     it serves, and its latest data is older than that
  *
- * "Benched" is read from the chain order: the chain passes over a keyed provider with quota left only
- * when it is benched for failing (both providers offer vehicles and predictions — their own modules
- * assert it), so a provider AFTER it serving a capability means it is failing there.
+ * "Benched" is read from the chain order: the chain passes over a keyed, ungated provider with quota
+ * left only when it is benched for failing (both providers offer vehicles and predictions — their own
+ * modules assert it), so a provider AFTER it serving a capability means it is failing there. A gated
+ * Swiftly is passed over too, which is why `gated` is decided before `failing`.
  */
 
-export type HealthKind = 'starting' | 'off' | 'paused' | 'failing' | 'standby' | 'waiting' | 'live' | 'stale';
+export type HealthKind = 'starting' | 'off' | 'gated' | 'paused' | 'failing' | 'standby' | 'waiting' | 'live' | 'stale';
 export type ProviderHealth = { readonly kind: HealthKind; readonly text: string };
 
 const CAPABILITIES: readonly Capability[] = ['vehicles', 'predictions'];
@@ -32,6 +35,7 @@ const CAPABILITIES: readonly Capability[] = ['vehicles', 'predictions'];
 const HEADLINES: Readonly<Record<HealthKind, string>> = Object.freeze({
   starting: 'Starting…',
   off: 'Off · no key',
+  gated: 'Paused · not on Wi-Fi',
   paused: `Paused · ${QUOTA_SKIP_PERCENT}% of the monthly quota used`,
   failing: 'Failing',
   standby: 'Standby',
@@ -44,7 +48,7 @@ const HEADLINES: Readonly<Record<HealthKind, string>> = Object.freeze({
 export function providerHealth(state: LiveState | null, provider: ProviderId, nowS: number): ProviderHealth {
   invariant(Number.isFinite(nowS), 'health is judged at an instant');
   const kind = state === null ? 'starting' : healthKind(state, provider, nowS);
-  const details = state === null || kind === 'off' ? [] : healthDetails(state, provider, kind, nowS);
+  const details = state === null || kind === 'off' || kind === 'gated' ? [] : healthDetails(state, provider, kind, nowS);
   const health = { kind, text: [HEADLINES[kind], ...details].join(' · ') };
   invariant(health.text.startsWith(HEADLINES[kind]), 'a status row leads with the state');
   return health;
@@ -72,6 +76,8 @@ function healthKind(state: LiveState, provider: ProviderId, nowS: number): Healt
   let kind: HealthKind;
   if (!state.hasKey[provider]) {
     kind = 'off';
+  } else if (provider === 'swiftly' && state.swiftlyGated) {
+    kind = 'gated';
   } else if (skipAt !== null && state.callsThisMonth[provider] >= skipAt) {
     kind = 'paused';
   } else if (failingCapabilities(state, provider).length > 0) {

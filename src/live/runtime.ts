@@ -1,5 +1,6 @@
 import type { RuntimeNetwork } from '../data/live-network';
 import type { ProviderStanding, Standings } from '../domain/live/chain';
+import { isOnWifi, swiftlyAllowed } from '../domain/live/network-gate';
 import type { LiveRequest } from '../domain/live/transports';
 import { type ChainProviderId, type LiveProvider, PROVIDER_IDS, type ProviderId } from '../domain/live/types';
 import { invariant } from '../lib/invariant';
@@ -7,6 +8,7 @@ import type { Result } from '../lib/result';
 import { ByteCounter, type ByteTallies, EXPO_FETCH, type FetchFn, httpGet } from './http';
 import { detach } from './detach';
 import { clearKey, KEY_MASK, KEYCHAIN, type KeyError, type LiveKeys, maskKey, NO_KEYS, readLiveKeys, saveKey, saveSwiftlyAgency, type SecretStore } from './keys';
+import { type NetworkSource, NetworkWatch } from './network-watch';
 import { LivePoller, type LiveSnapshot } from './poller';
 import type { ProviderDeps } from './providers/batches';
 import { NONE_PROVIDER } from './providers/none';
@@ -14,12 +16,24 @@ import { createSwiftlyProvider } from './providers/swiftly';
 import { createTransitlandProvider } from './providers/transitland';
 import { callsThisMonth, type QuotaStore, recordCall } from './quota';
 import { KvQuotaStore } from './quota-store';
+import { readSwiftlyWifiOnly } from './swiftly-wifi';
 
 /**
  * Plan M4.9: the live runtime, assembled — expo/fetch through http.ts (typed errors, byte counter),
  * keys from the Keychain (keys.ts), the quota meter in expo-sqlite/kv-store, the two providers over
  * the schedule's network, and the poller. live-context.tsx makes one per open schedule DB and
  * publishes its LiveState; use-live-polling.ts starts and stops it.
+ *
+ * mfix10 "Use Swiftly only on Wi-Fi": the runtime owns the app's one network watch (network-watch.ts,
+ * over the `networkSource` live-context.tsx passes: expo-network) and starts and stops it with itself;
+ * a runtime given no source has no reading, so the phone counts as off Wi-Fi. Every time the chain
+ * takes the providers' standings (each poll tick, each finished poll) the gate is read afresh: the
+ * rider's setting from its kv item (swiftly-wifi.ts, ON by default) and the watch's latest reading.
+ * With the setting on and the phone off Wi-Fi, Swiftly stands in the chain exactly as if it had no
+ * key, for both capabilities: no request starts, no call is metered, no failure or backoff accrues,
+ * and Transitland serves. The Keychain still holds the key, so `hasKey` and `keyHints` still show it,
+ * and `swiftlyGated` says why it is not serving. A request already in flight when the gate closes
+ * finishes normally.
  *
  * LIFECYCLE: constructing a runtime does nothing observable. `start()` makes a fresh poller, loads
  * the keys and begins publishing; `stop()` aborts the poller's requests and publishing stops. A
@@ -41,6 +55,8 @@ export type LiveState = LiveSnapshot & {
   readonly keysError: KeyError | null;
   /** The latest BUG in the live runtime (a broken invariant in a poll or a key load), or null (detach.ts). */
   readonly internalError: string | null;
+  /** Swiftly has a key, but "Use Swiftly only on Wi-Fi" holds it back: the setting is on and the phone is off Wi-Fi. */
+  readonly swiftlyGated: boolean;
 };
 
 export type RuntimeOptions = {
@@ -52,6 +68,10 @@ export type RuntimeOptions = {
   readonly keychain?: SecretStore;
   readonly quotaStore?: QuotaStore;
   readonly nowS?: () => number;
+  /** The phone's network for the Swiftly gate (live-context.tsx passes expo-network); without one there is never a reading, so never Wi-Fi. */
+  readonly networkSource?: NetworkSource;
+  /** The rider's "Use Swiftly only on Wi-Fi", read afresh every time the chain asks (swiftly-wifi.ts's kv item by default). */
+  readonly swiftlyWifiOnly?: () => boolean;
 };
 
 /** The wall clock, in whole epoch seconds. */
@@ -68,16 +88,22 @@ export class LiveRuntime {
   private internalError: string | null = null;
   private stations: readonly string[] = [];
   private poller: LivePoller | null = null;
+  /** The gate as last published, so a tick that moved no chain status still shows a toggle or a network change. */
+  private publishedGate = false;
   private readonly counter = new ByteCounter();
   private readonly providers: Readonly<Record<ChainProviderId, LiveProvider>>;
   private readonly keychain: SecretStore;
   private readonly quota: QuotaStore;
   private readonly nowS: () => number;
+  private readonly watch: NetworkWatch | null;
+  private readonly wifiOnly: () => boolean;
 
   constructor(private readonly options: RuntimeOptions) {
     this.keychain = options.keychain ?? KEYCHAIN;
     this.quota = options.quotaStore ?? new KvQuotaStore();
     this.nowS = options.nowS ?? wallClockS;
+    this.wifiOnly = options.swiftlyWifiOnly ?? (() => readSwiftlyWifiOnly());
+    this.watch = options.networkSource === undefined ? null : new NetworkWatch(options.networkSource, (message) => this.reportBug(message));
     const fetch = options.fetch ?? EXPO_FETCH;
     const deps: ProviderDeps = {
       get: (request: LiveRequest, signal: AbortSignal) => httpGet(request, signal, { fetch, counter: this.counter, nowS: this.nowS }),
@@ -95,6 +121,7 @@ export class LiveRuntime {
     const started = this.poller !== null;
     invariant(!started || this.poller instanceof LivePoller, 'a started runtime has its poller');
     invariant(started || this.poller === null, 'a stopped runtime has none');
+    invariant(this.watch === null || this.watch.listening === started, 'the network watch listens exactly while the runtime runs');
     return started;
   }
 
@@ -110,6 +137,7 @@ export class LiveRuntime {
     });
     this.poller = poller;
     poller.watchStations(this.stations);
+    this.watch?.start();
     this.emit();
     detach(this.loadKeys(), (message) => this.reportBug(message));
     invariant(this.isStarted(), 'the runtime is started');
@@ -121,13 +149,17 @@ export class LiveRuntime {
     invariant(poller !== null, 'only a started runtime stops');
     this.poller = null;
     poller.dispose();
+    this.watch?.stop();
     invariant(!this.isStarted(), 'the runtime is stopped');
   }
 
-  /** The 1 s heartbeat (use-live-polling.ts, while the app is active). */
+  /** The 1 s heartbeat (use-live-polling.ts, while the app is active); the chain reads the Swiftly gate afresh. */
   tick(): void {
     invariant(this.poller !== null, 'only a started runtime ticks');
     this.poller.tick();
+    if (this.swiftlyGated() !== this.publishedGate) {
+      this.emit(); // the gate moved but no chain status did (Swiftly benched for failing: Transitland serves either way)
+    }
     invariant(this.isStarted(), 'a tick keeps the runtime started');
   }
 
@@ -225,19 +257,34 @@ export class LiveRuntime {
     invariant(Number.isSafeInteger(count), 'a call count is a whole number');
   }
 
-  /** Every provider's standing for the chain: key present, capabilities, calls this month. */
+  /**
+   * Whether "Use Swiftly only on Wi-Fi" holds a keyed Swiftly back now: the setting is on and the phone
+   * is off Wi-Fi (or has no reading yet). Read afresh on every call, never cached: the setting from its
+   * kv item, the network from the watch's latest reading.
+   */
+  private swiftlyGated(): boolean {
+    const reading = this.watch === null ? null : this.watch.reading();
+    const gated = this.keys.swiftly !== null && !swiftlyAllowed({ wifiOnly: this.wifiOnly(), onWifi: isOnWifi(reading) });
+    invariant(!gated || this.keys.swiftly !== null, 'only a keyed Swiftly is held back');
+    invariant(!gated || !isOnWifi(reading), 'Swiftly is held back only off Wi-Fi');
+    return gated;
+  }
+
+  /** Every provider's standing for the chain: key present (a gated Swiftly stands as key-less), capabilities, calls this month. */
   private standings(): Standings {
     const nowS = this.nowS();
-    const standings = { swiftly: this.standing('swiftly', nowS), transitland: this.standing('transitland', nowS) };
+    const gated = this.swiftlyGated();
+    const standings = { swiftly: this.standing('swiftly', nowS, gated), transitland: this.standing('transitland', nowS, false) };
     invariant(PROVIDER_IDS.every((id) => standings[id].callsThisMonth >= 0), 'call counts are never negative');
-    invariant(PROVIDER_IDS.every((id) => standings[id].hasKey === (this.keys[id] !== null)), 'a standing reflects the Keychain');
+    invariant(PROVIDER_IDS.every((id) => standings[id].hasKey === (this.keys[id] !== null && !(id === 'swiftly' && gated))), 'a standing reflects the Keychain and the Wi-Fi gate');
     return standings;
   }
 
-  private standing(provider: ProviderId, nowS: number): ProviderStanding {
+  private standing(provider: ProviderId, nowS: number, gated: boolean): ProviderStanding {
     invariant(Number.isFinite(nowS), 'a standing is taken at an instant');
+    invariant(!gated || provider === 'swiftly', 'only Swiftly is gated');
     const standing: ProviderStanding = {
-      hasKey: this.keys[provider] !== null,
+      hasKey: this.keys[provider] !== null && !gated,
       capabilities: this.providers[provider].capabilities,
       callsThisMonth: callsThisMonth(this.quota, provider, nowS),
     };
@@ -251,6 +298,7 @@ export class LiveRuntime {
       return; // stopped: nothing is published (a Keychain read can finish after a stop)
     }
     const nowS = this.nowS();
+    this.publishedGate = this.swiftlyGated();
     const state: LiveState = Object.freeze({
       ...poller.snapshot,
       bytes: this.counter.snapshot(),
@@ -260,6 +308,7 @@ export class LiveRuntime {
       swiftlyAgency: this.keys.swiftlyAgency,
       keysError: this.keysError,
       internalError: this.internalError,
+      swiftlyGated: this.publishedGate,
     });
     invariant(state.status === poller.snapshot.status, 'the state carries the poller\'s status');
     invariant(Object.values(state.hasKey).every((has) => typeof has === 'boolean'), 'the state says only whether a key exists');

@@ -240,6 +240,7 @@ function liveWith(d: Departure, delayS: number): { readonly live: LiveContextVal
     swiftlyAgency: 'miami',
     keysError: null,
     internalError: null,
+    swiftlyGated: false,
   };
   expect(state.predictions.get(BCC)?.items).toHaveLength(1);
   expect(prediction.epoch).toBe(d.epoch + delayS);

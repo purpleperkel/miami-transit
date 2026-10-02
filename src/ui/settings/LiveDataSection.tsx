@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Pressable, Text, TextInput, View } from 'react-native';
+import { Pressable, Switch, Text, TextInput, View } from 'react-native';
 
 import { DEFAULT_SWIFTLY_AGENCY_KEY } from '@/domain/live/transports';
 import { PROVIDER_IDS, type ProviderId } from '@/domain/live/types';
 import { invariant } from '@/lib/invariant';
 import type { LiveContextValue } from '@/live/live-context';
+import { readSwiftlyWifiOnly, saveSwiftlyWifiOnly } from '@/live/swiftly-wifi';
 
 import { type HealthKind, providerHealth } from './provider-health';
 import { confirmClearKey, type Notice, runAction, saveAgencyNotice, saveKeyNotice } from './settings-actions';
@@ -14,14 +15,15 @@ import { NoticeText, SettingsSection, settingsStyles as styles } from './Setting
 /**
  * Plan M8b.1 "Live data": per provider, the key ("Saved ••••<last4>" or "Not set"), a paste field with
  * Save, Remove, the provider's health (live / failing / stale, update age, bytes per poll) and its
- * monthly calls against its quota; Swiftly also has its agency key. Everything is read from the live
- * state; every change goes through the live runtime (settings-actions.ts).
+ * monthly calls against its quota; Swiftly also has its agency key and the "Use Swiftly only on Wi-Fi"
+ * switch (mfix10). Everything is read from the live state; every key change goes through the live
+ * runtime (settings-actions.ts), and the switch saves the runtime's own setting (src/live/swiftly-wifi.ts).
  */
 export function LiveDataSection({ live, nowS }: { readonly live: LiveContextValue; readonly nowS: number }) {
   invariant(live.state === null || live.runtime !== null, 'a published state belongs to a runtime');
   invariant(Number.isFinite(nowS), 'the section is drawn at an instant');
   return (
-    <SettingsSection title="Live data" footer="Keys stay in this phone's Keychain. Swiftly serves first when it has a key; Transitland otherwise.">
+    <SettingsSection title="Live data" footer={LIVE_DATA_FOOTER}>
       {PROVIDER_IDS.map((provider) => (
         <ProviderCard key={provider} provider={provider} live={live} nowS={nowS} />
       ))}
@@ -29,9 +31,16 @@ export function LiveDataSection({ live, nowS }: { readonly live: LiveContextValu
   );
 }
 
+/** Who serves, and the Wi-Fi rule (mfix10). */
+const LIVE_DATA_FOOTER = "Keys stay in this phone's Keychain. Swiftly serves first when it has a key (only on Wi-Fi, if that is on); Transitland otherwise.";
+
+/** The Wi-Fi only switch's words: shown beside it and read by VoiceOver. */
+const WIFI_ONLY_LABEL = 'Use Swiftly only on Wi-Fi';
+
 const HEALTH_TONE: Readonly<Record<HealthKind, 'ok' | 'error' | 'warning' | null>> = Object.freeze({
   starting: null,
   off: null,
+  gated: null,
   paused: 'warning',
   failing: 'error',
   standby: null,
@@ -53,6 +62,7 @@ function ProviderCard({ provider, live, nowS }: { readonly provider: ProviderId;
       </Text>
       <KeyEditor provider={provider} live={live} />
       {provider === 'swiftly' ? <AgencyEditor live={live} /> : null}
+      {provider === 'swiftly' ? <WifiOnlySwitch /> : null}
       <Text testID={`provider-status-${provider}`} style={[styles.detail, tone === null ? null : styles[tone]]}>
         {health.text}
       </Text>
@@ -109,6 +119,35 @@ function KeyEditor({ provider, live }: { readonly provider: ProviderId; readonly
         </Pressable>
       ) : null}
       <NoticeText notice={notice} testID={`key-notice-${provider}`} />
+    </View>
+  );
+}
+
+/**
+ * "Use Swiftly only on Wi-Fi" (mfix10, ON by default): the switch shows the setting in effect and saves
+ * each toggle in its kv item. The live runtime reads the setting at every poll tick, so a toggle moves
+ * Swiftly in or out of the chain within one cadence; a save the kv store refuses says so and the switch
+ * goes back to the setting in effect.
+ */
+function WifiOnlySwitch() {
+  const [wifiOnly, setWifiOnly] = useState(() => readSwiftlyWifiOnly());
+  const [notice, setNotice] = useState<Notice | null>(null);
+  invariant(typeof wifiOnly === 'boolean', 'the switch is on or off');
+  invariant(notice === null || notice.tone === 'error', 'the switch speaks up only when a save fails');
+  const onValueChange = (value: boolean) => {
+    const saved = saveSwiftlyWifiOnly(value);
+    invariant(!saved.ok || saved.value === value, 'a saved setting reads back as toggled');
+    invariant(saved.ok || saved.error.message.length > 0, 'a refused save explains itself');
+    setWifiOnly(saved.ok ? saved.value : readSwiftlyWifiOnly());
+    setNotice(saved.ok ? null : { tone: 'error', text: `Not saved: ${saved.error.message}.` });
+  };
+  return (
+    <View style={styles.stack}>
+      <View style={styles.controls}>
+        <Text style={[styles.label, styles.grow]}>{WIFI_ONLY_LABEL}</Text>
+        <Switch testID="swiftly-wifi-only" accessibilityLabel={WIFI_ONLY_LABEL} value={wifiOnly} onValueChange={onValueChange} />
+      </View>
+      <NoticeText notice={notice} testID="swiftly-wifi-only-notice" />
     </View>
   );
 }

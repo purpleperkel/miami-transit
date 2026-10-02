@@ -3,13 +3,16 @@ import { createContext, type ReactNode, useContext, useMemo, useState } from 're
 import { useScheduleDb } from '../data/schedule-db-provider';
 import type { ScheduleRepo } from '../data/schedule-repo';
 import { invariant } from '../lib/invariant';
+import { EXPO_NETWORK } from './network-watch';
 import { LiveRuntime, type LiveState } from './runtime';
 import { useLivePolling } from './use-live-polling';
 
 /**
  * Plan M4.9: the live data, provided to the whole app (mounted once, in the root layout, inside the
  * schedule DB provider). Once the bundled schedule DB is open, one LiveRuntime runs over its network;
- * useLivePolling starts it and gates its heartbeat on AppState.
+ * useLivePolling starts it and gates its heartbeat on AppState. The runtime is handed expo-network and
+ * owns the app's ONE network watch (mfix10: it holds Swiftly back off Wi-Fi when the rider's setting
+ * says so), subscribed while this provider is mounted.
  *
  * `useLive()` gives:
  *   state    the latest LiveState — vehicles, predictions per watched station, per-capability chain
@@ -65,7 +68,7 @@ export function LiveValueProvider({ value, children }: { readonly value: LiveCon
 /** A (stopped) runtime over the schedule's network that publishes each state tagged with itself. */
 function createRuntime(repo: ScheduleRepo, publish: (published: Published) => void): LiveRuntime {
   invariant(typeof publish === 'function', 'the runtime publishes to the provider');
-  const runtime: LiveRuntime = new LiveRuntime({ network: repo.liveNetwork(), onChange: (state) => publish({ runtime, state }) });
+  const runtime: LiveRuntime = new LiveRuntime({ network: repo.liveNetwork(), onChange: (state) => publish({ runtime, state }), networkSource: EXPO_NETWORK });
   invariant(!runtime.isStarted(), 'a new runtime waits for useLivePolling to start it');
   return runtime;
 }

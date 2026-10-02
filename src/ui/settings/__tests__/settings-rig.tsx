@@ -2,6 +2,7 @@ import type { ReactElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
 import type { FetchFn, FetchResponseLike } from '../../../live/http';
+import type { NetworkSource } from '../../../live/network-watch';
 import { runtimeNetwork } from '../../../live/__tests__/live-fakes';
 import { LiveRuntime, type LiveState } from '../../../live/runtime';
 import { DataSettingsView } from '../DataSettingsScreen';
@@ -62,8 +63,11 @@ export async function settle(): Promise<void> {
   expect(mounted.length).toBeGreaterThanOrEqual(0);
 }
 
-/** A started runtime over the native fakes, seeded with Keychain items and kv-store entries. */
-export async function liveRig(seed: { keychain?: Record<string, string>; kv?: Record<string, string>; fetch?: FetchFn } = {}): Promise<LiveRig> {
+/**
+ * A started runtime over the native fakes, seeded with Keychain items and kv-store entries; `network` is
+ * the phone's network (mfix10; none = no reading, so off Wi-Fi).
+ */
+export async function liveRig(seed: { keychain?: Record<string, string>; kv?: Record<string, string>; fetch?: FetchFn; network?: NetworkSource } = {}): Promise<LiveRig> {
   const keychain = jest.requireMock<SecureStoreFake>('expo-secure-store');
   const kv = jest.requireMock<KvStoreFake>('expo-sqlite/kv-store');
   keychain.items.clear();
@@ -72,7 +76,7 @@ export async function liveRig(seed: { keychain?: Record<string, string>; kv?: Re
   Object.entries(seed.kv ?? {}).forEach(([key, value]) => kv.map.set(key, value));
   const clock = { now: OCT_1_NOON_S };
   const states: LiveState[] = [];
-  const runtime = new LiveRuntime({ network: runtimeNetwork(), onChange: (state) => void states.push(state), fetch: seed.fetch ?? offline, nowS: () => clock.now });
+  const runtime = new LiveRuntime({ network: runtimeNetwork(), onChange: (state) => void states.push(state), fetch: seed.fetch ?? offline, nowS: () => clock.now, networkSource: seed.network });
   await act(async () => {
     runtime.start();
     await settle();

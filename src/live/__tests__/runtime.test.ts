@@ -3,11 +3,14 @@ import { vehiclesFromFeed } from '../../domain/live/from-gtfsrt';
 import type { SecretStore } from '../keys';
 import type { QuotaStore } from '../quota';
 import { LiveRuntime, type LiveState } from '../runtime';
-import { FakeServer, runtimeNetwork, SWIFTLY_VEHICLES_URL, TL_VEHICLES_URL } from './live-fakes';
+import { readSwiftlyWifiOnly } from '../swiftly-wifi';
+import { FakeNetwork, FakeServer, runtimeNetwork, SWIFTLY_VEHICLES_URL, TL_VEHICLES_URL } from './live-fakes';
 
 /**
  * M4.9: the runtime end to end — Keychain → chain → HTTP → decoder → mapper → published state —
- * over a fake server, an in-memory Keychain and quota store, and a manual clock. Keys are fake.
+ * over a fake server, an in-memory Keychain and quota store, and a manual clock. Keys are fake. The
+ * phone is on Wi-Fi and "Use Swiftly only on Wi-Fi" is at its default (ON, mfix10), so a keyed Swiftly
+ * serves as it always has; swiftly-wifi-chain.test.ts covers the phone off Wi-Fi.
  */
 
 const OCT_1 = Date.UTC(2026, 9, 1, 12) / 1000;
@@ -35,7 +38,9 @@ function rig(items: Readonly<Record<string, string>> = { 'live.key.transitland':
     deleteItemAsync: (key) => Promise.resolve(void keychain.delete(key)),
   };
   const quotaStore: QuotaStore = { get: (key) => quota.get(key) ?? null, set: (key, count) => void quota.set(key, count) };
-  const options = { network: runtimeNetwork(), onChange: (state: LiveState) => void states.push(state), fetch: server.fetch, keychain: secretStore, quotaStore, nowS: () => clock.now };
+  const settings = new Map<string, string>();
+  const wifi = { networkSource: new FakeNetwork('WIFI'), swiftlyWifiOnly: () => readSwiftlyWifiOnly({ getItemSync: (key) => settings.get(key) ?? null, setItemSync: (key, value) => void settings.set(key, value) }) };
+  const options = { network: runtimeNetwork(), onChange: (state: LiveState) => void states.push(state), fetch: server.fetch, keychain: secretStore, quotaStore, nowS: () => clock.now, ...wifi };
   const runtime = new LiveRuntime(options);
   expect(runtime.isStarted()).toBe(false);
   expect(states).toEqual([]);

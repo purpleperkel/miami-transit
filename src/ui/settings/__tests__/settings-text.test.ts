@@ -26,6 +26,7 @@ function state(over: Partial<LiveState> = {}): LiveState {
     swiftlyAgency: 'miami',
     keysError: null,
     internalError: null,
+    swiftlyGated: false,
   };
   expect(base.status.vehicles.provider).toBe('none');
   expect(Object.keys(over).every((key) => key in base)).toBe(true);

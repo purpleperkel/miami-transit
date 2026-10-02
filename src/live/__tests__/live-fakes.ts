@@ -1,11 +1,15 @@
+import type { NetworkState } from 'expo-network';
+
 import type { RuntimeNetwork } from '../../data/live-network';
 import { STOP_STATIONS, testNetwork } from '../../domain/live/__tests__/test-network';
 import type { FetchFn, FetchResponseLike, HttpInit } from '../http';
 import type { LiveKeys } from '../keys';
+import type { NetworkSource } from '../network-watch';
 
 /**
  * Shared fakes for the live-runtime tests: obviously fake keys, the live-domain test network plus
- * each station's stops, and a fake server that answers fetches by URL and records every request.
+ * each station's stops, a fake server that answers fetches by URL and records every request, and a
+ * fake phone network (mfix10) handed to a runtime as its `networkSource`.
  */
 
 export const FAKE_KEYS: LiveKeys = Object.freeze({ swiftly: 'fake-swiftly-key', transitland: 'fake-transitland-key', swiftlyAgency: 'miami' });
@@ -94,5 +98,68 @@ export class FakeServer {
       return Promise.reject(reply);
     }
     return Promise.resolve({ ok: reply.status >= 200 && reply.status <= 299, status: reply.status, arrayBuffer: () => Promise.resolve(reply.body.slice().buffer) });
+  }
+}
+
+/**
+ * expo-network's state for a network type, connected unless the type is NONE or UNKNOWN (as on iOS);
+ * `null` is a state without a type (connected, type unknown).
+ */
+export function networkState(type: string | null): NetworkState {
+  const connected = type !== 'NONE' && type !== 'UNKNOWN';
+  const state = (type === null ? { isConnected: true, isInternetReachable: true } : { type, isConnected: connected, isInternetReachable: connected }) as NetworkState;
+  expect(state.type ?? null).toBe(type);
+  expect(typeof state.isConnected).toBe('boolean');
+  return state;
+}
+
+/** One listener the fake network handed out, and whether its subscription was removed. */
+export type FakeListener = { readonly listener: (state: NetworkState) => void; removed: boolean };
+
+/**
+ * The phone's network, standing in for expo-network as a runtime's `networkSource`: the first answer
+ * is networkState(`first`), or never lands for 'never'; `emit` plays a network change to every listener
+ * still subscribed. It counts the first-answer asks and keeps every listener it handed out.
+ */
+export class FakeNetwork implements NetworkSource {
+  readonly listeners: FakeListener[] = [];
+  asks = 0;
+
+  constructor(private readonly first: string | null | 'never') {
+    expect(first === null || first.length > 0).toBe(true);
+    expect(this.listeners).toEqual([]);
+  }
+
+  getNetworkStateAsync(): Promise<NetworkState> {
+    this.asks += 1;
+    expect(this.asks).toBeGreaterThan(0);
+    expect(this.first).not.toBe('');
+    return this.first === 'never' ? new Promise<NetworkState>(() => undefined) : Promise.resolve(networkState(this.first));
+  }
+
+  addNetworkStateListener(listener: (state: NetworkState) => void): { remove(): void } {
+    const entry: FakeListener = { listener, removed: false };
+    this.listeners.push(entry);
+    expect(typeof listener).toBe('function');
+    expect(this.listeners).toContain(entry);
+    return { remove: () => void (entry.removed = true) };
+  }
+
+  /** The listeners still subscribed. */
+  open(): FakeListener[] {
+    const open = this.listeners.filter((entry) => !entry.removed);
+    expect(open.length).toBeLessThanOrEqual(this.listeners.length);
+    expect(open.every((entry) => !entry.removed)).toBe(true);
+    return open;
+  }
+
+  /** A network change: every subscribed listener hears networkState(`type`). */
+  emit(type: string | null): void {
+    const open = this.open();
+    expect(open.length).toBeGreaterThan(0);
+    expect(type === null || type.length > 0).toBe(true);
+    for (const entry of open) {
+      entry.listener(networkState(type));
+    }
   }
 }

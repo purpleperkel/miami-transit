@@ -69,6 +69,7 @@ export const settingsStyles = StyleSheet.create({
     backgroundColor: PlatformColor('tertiarySystemGroupedBackground'),
   },
   controls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  grow: { flex: 1 },
   button: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: PlatformColor('systemBlue') },
   buttonDisabled: { opacity: 0.4 },
   buttonText: { fontSize: 17, fontWeight: '600', color: 'white' },

@@ -26,6 +26,8 @@ jest.mock('expo/fetch', () => ({ fetch: jest.fn(() => new Promise(() => undefine
 // test-time mock of native module
 jest.mock('react-native-maps', () => ({ __esModule: true, default: jest.requireActual<typeof import('../../map/__tests__/map-view-mock')>('../../map/__tests__/map-view-mock').MapViewMock, Polyline: 'Polyline', Marker: 'Marker' }));
 // test-time mock of native module
+jest.mock('expo-network', () => ({ getNetworkStateAsync: jest.fn(() => new Promise(() => undefined)), addNetworkStateListener: jest.fn(() => ({ remove: jest.fn() })) }));
+// test-time mock of native module
 jest.mock('expo-notifications', () => ({ setNotificationHandler: jest.fn(), getPermissionsAsync: jest.fn(), requestPermissionsAsync: jest.fn() }));
 
 /**
@@ -35,7 +37,8 @@ jest.mock('expo-notifications', () => ({ setNotificationHandler: jest.fn(), getP
  * strips' hurry hook and home context opened 4 watches, and the map asked a 5th time for its blue dot.
  * The platform reports iOS 26 (else jest's Platform.Version is undefined and no accessory mounts at all),
  * the schedule DB is the committed one through node:sqlite, the user DB fails to open, and the live
- * runtime idles in the background, so only the location wiring is counted.
+ * runtime idles in the background (expo-network's first reading never lands), so only the location
+ * wiring is counted.
  */
 
 type NodeStatement = { all(...params: unknown[]): unknown[]; get(...params: unknown[]): unknown };

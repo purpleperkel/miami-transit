@@ -49,6 +49,7 @@ cd "$(dirname "$0")/../.."
 #     'estimated'; "N-minute walk along streets" for 'routed' (mfix9's phrase); "your N-minute walk" for 'override'.
 #   The trip card (CountdownHero, testID 'countdown-hero', in the Trips tab and on the trip screen): "a N min walk
 #     from here" / "a N min walk from your start" / "a N min walk (your setting)", N = the same minutes.
+#   The rider's position is the one watch's LATEST fix (mfix6's UserLocationProvider) on every screen, never an older one.
 #   The verdict (bar) walks the one walk: routed/estimated metres at Jamie's paces (mfix9's verdicts unchanged); an
 #     override walks exactly minutes x 60 s and jogs it in walkS x walkMps / jogMps.
 #
@@ -259,7 +260,10 @@ NODE
 # leans on a module default pace (PLANNING_WALK_MPS only in walk-estimate.ts; DEFAULT_WALK_MPS / DEFAULT_JOG_MPS /
 # DEFAULT_WALKING_PACE only under src/ui/settings, where they are the stored-nothing default and its footer;
 # HURRY_DEFAULTS.walkMps / .jogMps nowhere in app code); and every app caller of a saved-trip walk entry point
-# (tripCards, reminderCandidates, tripVerdict, savedTripWalk) outside its defining module reads readWalkingPace().
+# (tripCards, reminderCandidates, tripVerdict, judgeTrip, savedTripWalk) outside its defining module reads
+# readWalkingPace(). judgeTrip is the bar's entry point: src/ui/hurry/useHurryVerdict.ts (useNearTripVerdict) judges the
+# near trip through it, so the bar's verdict is one of the callers counted. At least FOUR app files call one: the Trips
+# tab, the home context, the reminder sync and the bar's verdict hook (the count names the files it found).
 pace_wiring() {
   need_files src/ui/trips/trip-walk.ts || return 1
   node - <<'NODE' || return 1
@@ -278,19 +282,23 @@ for (const f of files) {
   if (!f.startsWith('src/ui/settings/') && /\b(DEFAULT_WALK_MPS|DEFAULT_JOG_MPS|DEFAULT_WALKING_PACE)\b/.test(c)) problems.push(`${f} leans on the settings' default pace instead of readWalkingPace()`);
   if (/\bHURRY_DEFAULTS\s*\.\s*(walkMps|jogMps)\b/.test(c)) problems.push(`${f} leans on m7c's default pace HURRY_DEFAULTS.walkMps/jogMps`);
 }
-const entry = { tripCards: 'src/ui/trips/trip-card.ts', reminderCandidates: 'src/ui/trips/reminder-candidates.ts', tripVerdict: 'src/ui/hurry/trip-verdict.ts', savedTripWalk: 'src/ui/trips/trip-walk.ts' };
+// judgeTrip: the bar's verdict (useHurryVerdict.ts useNearTripVerdict) judges its near trip through it, not tripVerdict.
+const entry = { tripCards: 'src/ui/trips/trip-card.ts', reminderCandidates: 'src/ui/trips/reminder-candidates.ts', tripVerdict: 'src/ui/hurry/trip-verdict.ts', judgeTrip: 'src/ui/hurry/trip-verdict.ts', savedTripWalk: 'src/ui/trips/trip-walk.ts' };
 const pure = new Set(Object.values(entry));
-let callers = 0;
+const callers = [];
 for (const f of files) {
   if (pure.has(f)) continue;
   const called = Object.keys(entry).filter((name) => new RegExp(`\\b${name}\\s*\\(`).test(code(f)));
   if (called.length === 0) continue;
-  callers += 1;
+  callers.push(f);
   if (!/\breadWalkingPace\s*\(/.test(code(f))) problems.push(`${f} calls ${called.join(', ')} but never reads readWalkingPace(): Jamie's pace must reach every saved-trip walk`);
 }
-if (callers < 3) problems.push(`only ${callers} app file(s) call a saved-trip walk entry point (the Trips tab, the home context, the reminder sync and the bar's verdict do)`);
+// Four: the Trips tab (tripCards), the home context (tripCards), the reminder sync (reminderCandidates) and the bar's
+// verdict hook (judgeTrip) each call one; fewer means one of them walks a saved trip some other way.
+const WANT_CALLERS = 4;
+if (callers.length < WANT_CALLERS) problems.push(`only ${callers.length} app file(s) call a saved-trip walk entry point (${callers.join(', ') || 'none'}); the Trips tab, the home context, the reminder sync and the bar's verdict hook do (${WANT_CALLERS})`);
 if (problems.length > 0) { for (const p of problems) console.log(`ratchet: ${p}`); process.exit(1); }
-console.log(`ratchet: ${callers} app caller(s) of the saved-trip walk read readWalkingPace(); no module default pace is leaned on`);
+console.log(`ratchet: ${callers.length} app caller(s) of the saved-trip walk read readWalkingPace() (${callers.join(', ')}); no module default pace is leaned on`);
 NODE
 }
 
@@ -355,7 +363,10 @@ function mockScheduleCopy() {
 function mockNoUserDbFile(): never { throw new Error('ratchet-oracle: the user DB is opened through UserDbProvider open=, never a file'); }
 function mockKvStore() { return jest.requireActual(require('node:path').join(process.cwd(), 'src/ui/settings/__tests__/native-fakes')).kvStoreModule(); }
 function mockAsk() { return Promise.resolve({ granted: mockFix !== null, status: mockFix !== null ? 'granted' : 'denied' }); }
-function mockWatch(_o: unknown, onFix: (f: { coords: LL | null }) => void) {
+/** The one watch's callback (mfix6: the app opens exactly one), kept so moveTo can report a newer fix through it. */
+let mockOnFix: ((f: { coords: LL | null; timestamp?: number }) => void) | null = null;
+function mockWatch(_o: unknown, onFix: (f: { coords: LL | null; timestamp?: number }) => void) {
+  mockOnFix = onFix;
   if (mockFix !== null) onFix({ coords: mockFix });
   return Promise.resolve({ remove: () => undefined });
 }
@@ -423,6 +434,13 @@ async function settle(rounds = 8) { await act(async () => { for (let i = 0; i < 
 /** Real timers: wait (<= 2 s) until fetchWalk was called `n` times, then let the answer land (mfix9's untilCalls). */
 async function untilCalls(calls: unknown[], n: number) {
   for (let i = 0; i < 40 && calls.length < n; i += 1) await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+  await settle();
+}
+/** The rider moves: the one watch reports a NEWER fix at `to` (timestamped 30 s on, as expo-location stamps a fix). */
+async function moveTo(to: LL) {
+  if (mockOnFix === null) fail('premise: the app\'s location watch is running (a scene was rendered with a fix)');
+  mockFix = to;
+  await act(async () => { mockOnFix?.({ coords: to, timestamp: Date.now() + 30_000 }); });
   await settle();
 }
 function textOf(node: any): string {
@@ -601,6 +619,37 @@ async function railPlatform(walkMps: number) {
   await unmountAll();
 }
 
+/**
+ * E: the bar's VERDICT walks Jamie's STORED pace too — never hurryVerdict's module default (an omitted pace), never a
+ * constant that turns the trip's own minutes into metres — for the estimate, the routed walk and the 7-minute
+ * override. At `TV` every one has minutes to spare and its line moves with each minute of walk (premise), so a verdict
+ * walked at any pace but the stored one reads differently: the bar's line 2 and its sentence must be the engine's
+ * hurryVerdict over the one walk at `pace` (the contract: routed/estimated metres at Jamie's paces; an override walks
+ * minutes x 60 s and jogs it in walkS x walkMps / jogMps).
+ */
+async function storedPaceVerdicts(TV: number, pace: { walkMps: number; jogMps: number }) {
+  const { hurryVerdict } = load('src/domain/hurry/verdict', ['hurryVerdict']);
+  const runs: ['override' | 'routed' | 'estimated', any, boolean][] = [['estimated', here(), false], ['routed', here(), true], ['override', here({ walkOverrideMin: 7 }), false]];
+  for (const [source, trip, routedKnown] of runs) {
+    const want = expected(source, TV, pace, routedKnown ? fixture().routedM : undefined);
+    const walkText = source === 'override' ? `${want.minutes} min walk` : `~${want.minutes} min walk`;
+    const line = statusLine(want.verdict, want.ctx, walkText);
+    const departures = want.rides.filter((r: any) => r.depEpoch >= TV).map((r: any) => ({ epoch: r.depEpoch, live: false, lineId: r.lineId, headsign: null }));
+    for (const dS of [-60, 60]) {
+      const off = hurryVerdict({ now: TV, walkMeters: (want.walkS + dS) * pace.walkMps, detour: 1, departures, ...pace });
+      if (statusLine(off, want.ctx, walkText) === line) fail(`premise: at TV the ${source} line (${line}) moves with a minute of walk`);
+    }
+    const g = routedKnown ? fixture() : null;
+    const tree = await scene(trip, TV, g === null ? null : g.fetchWalk);
+    if (g !== null) await untilCalls(g.calls, 1);
+    const seen = read(tree);
+    if (show(seen.lines) !== show(['Bayfront Park', line])) fail(`${source} at Jamie's stored ${pace.walkMps} / ${pace.jogMps} m/s: the bar's verdict walks that pace (${show(['Bayfront Park', line])}), got ${show(seen.lines)}`);
+    const sentence = copy('hurrySentence')(want.verdict, want.ctx);
+    if (!seen.label.includes(sentence)) fail(`${source} at Jamie's stored ${pace.walkMps} / ${pace.jogMps} m/s: the bar's label says the verdict sentence at that pace ${show(sentence)}: ${show(seen.label)}`);
+    await unmountAll();
+  }
+}
+
 const CASES: Record<string, () => Promise<void>> = {
   // A. The precedence, by direct calls: override -> routed (from the rider) -> estimated; the rider first, the saved start without a fix.
   precedence: async () => {
@@ -610,8 +659,20 @@ const CASES: Record<string, () => Promise<void>> = {
     const S1: LL = { latitude: P805.latitude - 100 / perDeg, longitude: P805.longitude };
     const asked: string[] = [];
     // mfix9's WalkTo is asked with the stop itself (walkKey: its stop_id at its place); `asked` records the stop_ids.
-    const routed = (stop: { stopId: string }) => { asked.push(stop.stopId); return { walkMeters: 300, detour: 1, source: 'routed' }; };
-    const estimate = (stop: { stopId: string }) => { const p = platform(stop.stopId); return { walkMeters: haversineMeters(O, p), detour: detour(), source: 'estimated' }; };
+    // walkKey parity: every ask must key the SAME cache entry as the schedule's platform of that stop_id — the right
+    // stop_id at another place keys another entry (another stop's walk). `misplaced` records each ask that does not.
+    const { walkKey } = load('src/domain/walk/walk-cache', ['walkKey']);
+    if (walkKey({ ...P806, latitude: P806.latitude + 0.001 }) === walkKey(P806) || walkKey({ ...P806, stopId: '805' }) === walkKey(P806)) fail('premise: mfix9\'s walkKey keys a stop by its stop_id AND its place');
+    const misplaced: string[] = [];
+    const atItsPlace = (stop: any): any => {
+      const p = typeof stop?.stopId === 'string' ? db().realScheduleRepo().platforms().find((x: any) => x.stopId === stop.stopId) : undefined;
+      let why: string | null = typeof stop?.stopId !== 'string' ? 'not a WalkStop: it has no stopId (a raw stop_id string?)' : p === undefined ? 'no schedule platform has that stop_id' : null;
+      try { if (why === null && walkKey(stop) !== walkKey(p)) why = `walkKey ${walkKey(stop)}, the platform's is ${walkKey(p)}`; } catch (e) { why = `walkKey refuses it: ${(e as Error).message.split('\n')[0]}`; }
+      if (why !== null) misplaced.push(`${show(stop)} (${why})`);
+      return p;
+    };
+    const routed = (stop: { stopId: string }) => { atItsPlace(stop); asked.push(stop?.stopId); return { walkMeters: 300, detour: 1, source: 'routed' }; };
+    const estimate = (stop: { stopId: string }) => { const p = atItsPlace(stop); return { walkMeters: p === undefined ? 0 : haversineMeters(O, p), detour: detour(), source: 'estimated' }; };
     const est = (from: LL, p: any, mps: number) => Math.ceil((haversineMeters(from, p) * detour()) / mps);
     const walk = (source: string, from: string, walkS: number, stopId: string | null, minutes = Math.ceil(walkS / 60)) => ({ source, from, walkS, minutes, stopId });
     const none = { start: null, walkOverrideMin: null };
@@ -630,8 +691,12 @@ const CASES: Record<string, () => Promise<void>> = {
     ];
     for (const [name, trip, input, want] of table) {
       asked.length = 0;
+      misplaced.length = 0;
       let got: unknown;
-      try { got = savedTripWalk(trip, input); } catch (e) { fail(`${name}: savedTripWalk threw ${(e as Error).message.split('\n')[0]}`); }
+      let threw: string | null = null;
+      try { got = savedTripWalk(trip, input); } catch (e) { threw = (e as Error).message.split('\n')[0] ?? ''; }
+      if (misplaced.length > 0) fail(`${name}: mfix9's WalkTo is asked with the boarding platform itself — its stop_id AT ITS PLACE (walkKey parity with the schedule's platform ${show(want?.stopId ?? null)}); asked with ${misplaced.join('; ')}`);
+      if (threw !== null) fail(`${name}: savedTripWalk threw ${threw}`);
       if (show(pick(got)) !== show(want)) fail(`${name}: want ${show(want)}, got ${show(pick(got))}`);
       if (want?.source === 'routed' && show(asked) !== show(['806'])) fail(`${name}: the routed walk is asked for the chosen platform only (["806"]), asked ${show(asked)}`);
     }
@@ -674,6 +739,18 @@ const CASES: Record<string, () => Promise<void>> = {
     }
     await farCountdown(pace.walkMps);
     await railPlatform(pace.walkMps);
+    // The walk follows the rider's LATEST fix: the scene starts at P (100 m due south of 805), then the one watch
+    // reports a newer fix at O. Before the move the bar and both cards walk from P; after it, every screen walks from
+    // O — never from a fix older than the one the bar's plan and verdict are judged from.
+    const P: LL = { latitude: platform('805').latitude - 100 / perDeg, longitude: platform('805').longitude };
+    const fromP = Math.ceil(Math.ceil((haversineMeters(P, platform('805')) * detour()) / pace.walkMps) / 60);
+    const fromO = expected('estimated', T, pace).minutes;
+    if (fromP === fromO) fail(`premise: the walk from P (${fromP} min) differs from the walk from O (${fromO} min)`);
+    const moving = await scene(here(), T, null, 'regular', P);
+    oneWalk('estimated from the first fix P (100 m south of 805)', read(moving), fromP, true, 'from here');
+    await moveTo(O);
+    oneWalk('estimated after the rider moved from P to O (the watch\'s newer fix; P is stale)', read(moving), fromO, true, 'from here');
+    await unmountAll();
   },
   // E. The pace: savedTripWalk never supplies one; Jamie's STORED pace reaches the bar, both cards and the reminders.
   pace: async () => {
@@ -699,6 +776,8 @@ const CASES: Record<string, () => Promise<void>> = {
     await unmountAll();
     await farCountdown(pace.walkMps);
     await railPlatform(pace.walkMps);
+    // The bar's VERDICT walks the stored pace for every source (T - 470: the first 805 ride - 900 s).
+    await storedPaceVerdicts(T - 470, pace);
     // The reminder sync reads the stored pace too (ReminderSync.syncReminders -> reminderCandidates).
     const fixed = db().savedTrip('fixed', GOV, DADS, { start: W, reminder: { days: 0b0011111, atMin: 8 * 60 + 30 } });
     const got = await syncedLeaveBys([fixed]);
@@ -802,21 +881,21 @@ if (return 0 2>/dev/null); then return 0; fi
 trap 'echo "ratchet: mfix11_one_walk gate failed at verify script line $LINENO"' ERR
 
 # --- (A) One function decides a saved trip's walk: override -> routed -> estimated -------------------------------
-# 1. Oracle, direct calls of src/ui/trips/trip-walk.ts savedTripWalk: the override beats a known routed walk and needs no position (7 -> 420 s, 7 min; 0 -> 0); routed = ceil(walkMeters / walkMps) to the platform NEAREST the origin (806 from O), asked for that platform only; an estimated WalkEstimate, or no walk function, is ceil(straight x HURRY_DEFAULTS.detour / walkMps); the pace passed in is the pace walked (1.1 m/s); a saved start yields to the rider's position, and without a fix the walk is the estimate from the start (805 from S1, 'start'); no override, no start, no fix -> null; at a rail station the walk goes to the boarding platform (Government Center 9512), never the station centre.
+# 1. Oracle, direct calls of src/ui/trips/trip-walk.ts savedTripWalk: the override beats a known routed walk and needs no position (7 -> 420 s, 7 min; 0 -> 0); routed = ceil(walkMeters / walkMps) to the platform NEAREST the origin (806 from O), asked for that platform only, with the platform itself at its place (walkKey parity with the schedule's platform: a raw stop_id, or the right stop_id at another place, fails — also for the estimated WalkEstimate); an estimated WalkEstimate, or no walk function, is ceil(straight x HURRY_DEFAULTS.detour / walkMps); the pace passed in is the pace walked (1.1 m/s); a saved start yields to the rider's position, and without a fix the walk is the estimate from the start (805 from S1, 'start'); no override, no start, no fix -> null; at a rail station the walk goes to the boarding platform (Government Center 9512), never the station centre.
 mfix11_oracle precedence
 # 2. One passing test (src/ui/trips/__tests__/trip-walk.test.ts).
 jest_cases "$MFIX11_WALK_TEST" 'a saved trip walks its override, else the routed walk, else the estimate'
 
 # --- (B, C) Every place that shows or uses a saved trip's walk shows the same one -------------------------------
-# 3. Oracle, ONE tree of the REAL Now bar + Trips tab + trip screen (saved trip Fifth Street -> Bayfront Park, rider at stop 815, T = the first 805 ride - 430 s): the bar's "~N min walk" / "N min walk" equals both cards' "a N min walk ..." for the override 7 min (no provider: 7, no "~", "(your setting)"), the estimate (no provider: 6, "from here"), the routed fixture (mfix9's provider, exactly ONE request for all three screens: 9) and the override while a routed walk is known (7); and tripCards' walk is savedTripWalk's (source, walkS 420 / 527 / 330, minutes) with the leave-by m7a's nextLeave gives that walk + the 120 s buffer. And for a trip the rider is NOT near (Vizcaya -> Dadeland South, a street walk 1.6 x the straight line from the oracle's own injected fetchWalk), the bar's countdown ("Leave in N min", from the home context's cards) is the Trips tab's and the trip screen's hero over the routed walk, where the estimate's would differ; and a Government Center -> Dadeland South trip walks to its boarding platform 9512 (not the centre, not northbound 9513) on the bar, both cards and in tripCards, from a rider due east where the minutes split.
+# 3. Oracle, ONE tree of the REAL Now bar + Trips tab + trip screen (saved trip Fifth Street -> Bayfront Park, rider at stop 815, T = the first 805 ride - 430 s): the bar's "~N min walk" / "N min walk" equals both cards' "a N min walk ..." for the override 7 min (no provider: 7, no "~", "(your setting)"), the estimate (no provider: 6, "from here"), the routed fixture (mfix9's provider, exactly ONE request for all three screens: 9) and the override while a routed walk is known (7); and tripCards' walk is savedTripWalk's (source, walkS 420 / 527 / 330, minutes) with the leave-by m7a's nextLeave gives that walk + the 120 s buffer. And for a trip the rider is NOT near (Vizcaya -> Dadeland South, a street walk 1.6 x the straight line from the oracle's own injected fetchWalk), the bar's countdown ("Leave in N min", from the home context's cards) is the Trips tab's and the trip screen's hero over the routed walk, where the estimate's would differ; and a Government Center -> Dadeland South trip walks to its boarding platform 9512 (not the centre, not northbound 9513) on the bar, both cards and in tripCards, from a rider due east where the minutes split; and when the one watch reports a newer fix (the rider moves from P, 100 m due south of 805, to O: 2 min -> 6 min) the bar and both cards walk from the LATEST fix, never the first one seen.
 mfix11_oracle consistency
 # 4. One passing test (src/ui/trips/__tests__/one-walk.test.tsx).
 jest_cases "$MFIX11_ONE_WALK_TEST" 'the bar and the trip card show the same walk for every source'
 
 # --- (E) Jamie's pace, never a module default --------------------------------------------------------------------
-# 5. Oracle: savedTripWalk throws without a usable walkMps (undefined, 0, NaN, negative); with Jamie's pace STORED at 1.1 / 2.2 m/s (the real saveWalkingPace), the bar and both cards walk it (estimated 7 min, routed 11 min, where 1.35 gives 6 and 9), so do the bar's countdown for a trip the rider is not near and the rail platform run (gate 3's, at 1.1 m/s), and the reminder sync's leave-bys walk from the saved start at 1.1 m/s.
+# 5. Oracle: savedTripWalk throws without a usable walkMps (undefined, 0, NaN, negative); with Jamie's pace STORED at 1.1 / 2.2 m/s (the real saveWalkingPace), the bar and both cards walk it (estimated 7 min, routed 11 min, where 1.35 gives 6 and 9), so do the bar's countdown for a trip the rider is not near and the rail platform run (gate 3's, at 1.1 m/s); the bar's VERDICT walks the stored 1.1 / 2.2 m/s too — line 2 and the label's sentence are the engine's hurryVerdict over the one walk at that pace for the estimate, the routed walk and the 7-minute override (minutes x 60 s, jogged at walkS x walkMps / jogMps), at the first 805 ride - 900 s, where each minute of walk changes the line (so hurryVerdict's module default pace, or a constant pace turning the override into metres, reads differently); and the reminder sync's leave-bys walk from the saved start at 1.1 m/s.
 mfix11_oracle pace
-# 6. Grep: trip-walk.ts never supplies a pace (no default, no settings read); no app file leans on PLANNING_WALK_MPS (outside walk-estimate.ts), the settings' DEFAULT_* (outside src/ui/settings) or HURRY_DEFAULTS.walkMps/jogMps; every app caller of tripCards / reminderCandidates / tripVerdict / savedTripWalk reads readWalkingPace().
+# 6. Grep: trip-walk.ts never supplies a pace (no default, no settings read); no app file leans on PLANNING_WALK_MPS (outside walk-estimate.ts), the settings' DEFAULT_* (outside src/ui/settings) or HURRY_DEFAULTS.walkMps/jogMps; every app caller of tripCards / reminderCandidates / tripVerdict / judgeTrip / savedTripWalk reads readWalkingPace(), and at least four app files call one (the Trips tab, the home context, the reminder sync and the bar's verdict hook src/ui/hurry/useHurryVerdict.ts, which judges through judgeTrip).
 pace_wiring
 # 7. One passing test (src/ui/trips/__tests__/trip-walk.test.ts).
 jest_cases "$MFIX11_WALK_TEST" 'the walk never falls back to a module default pace'
